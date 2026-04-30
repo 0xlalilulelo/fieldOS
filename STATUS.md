@@ -20,8 +20,11 @@ Started: 2026-04-29
 - [x] Step 3 — Limine v12.0.2 boot path + ~120 lines of C kernel;
   serial prints `Field OS: stage 0 reached` and `FIELD_OS_BOOT_OK`
   under QEMU TCG
-- [ ] Step 4 — CI smoke loop (`build-iso`, `smoke`, `loc-budget`,
-  `reproducibility` jobs)
+- [x] Step 4 — CI smoke loop. `ci/qemu-smoke.sh`, `tools/count-loc.sh`,
+  `.github/workflows/ci.yml` with three jobs: `build-iso`, `smoke`,
+  `loc-budget`. The `reproducibility` job is deferred to M10 (we don't
+  yet have byte-identical builds and known-failing CI noise erodes
+  signal).
 - [ ] Step 5 — `holyc-lang` vendored and audited (recon only; the
   freestanding-backend graft is M3)
 
@@ -34,21 +37,23 @@ checkout on Debian 12 / Ubuntu 24.04 / Fedora 41.
 
 ## Active work
 
-M0 step 3 just landed. Vendored Limine v12.0.2 (binaries BSD-2,
-header 0BSD; trimmed to x86_64). Wrote ~120 lines of kernel C
-across `kernel/main.c`, `kernel/arch/x86_64/{io.h,serial.h,serial.c,
-linker.ld}`, `kernel/kernel.mk`, `boot/limine.conf`. Top-level
-`make iso` builds `field-os-poc.iso` (17.8 MB). Headless QEMU TCG
-prints `Field OS: stage 0 reached` and `FIELD_OS_BOOT_OK` on COM1.
+M0 step 4 just landed. `ci/qemu-smoke.sh` (headless QEMU + serial
+grep, distinct exit codes for missing-ISO / timeout / startup-fail
+/ guest-CPU-fault), `tools/count-loc.sh` (reports against the
+100k-line budget; soft-pass at 0% / 166 LOC currently),
+`.github/workflows/ci.yml` (three jobs on Ubuntu 24.04: `build-iso`
+with toolchain caching, `smoke` consuming the artifact,
+`loc-budget`). The fourth `reproducibility` job from the original
+plan is deferred to M10 alongside the SOURCE_DATE_EPOCH and
+xorriso-determinism work.
 
-Discovered along the way: HVF can't virtualize x86_64 guests on
-Apple Silicon (host/guest arch must match). `tools/qemu-run.sh`
-now picks TCG on Apple Silicon, HVF on Intel macOS, KVM on Linux.
+Local verification: `tools/count-loc.sh` reports 166/100,000;
+`ci/qemu-smoke.sh field-os-poc.iso` is green in 2 seconds.
 
-Next: M0 step 4 — CI smoke loop. `ci/qemu-smoke.sh` (headless
-variant of qemu-run.sh) + `tools/count-loc.sh` + a four-job
-`.github/workflows/ci.yml`: build-iso, smoke, loc-budget,
-reproducibility.
+Next: M0 step 5 — vendor `holyc-lang` (Jamesbarford) into `holyc/`
+and write the audit notes for the M3 freestanding-backend graft
+at `docs/skills/holyc-lang-audit.md`. Recon only; the actual graft
+is M3.
 
 ## Last completed milestone
 

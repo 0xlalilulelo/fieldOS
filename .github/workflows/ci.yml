@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # build-iso: cross-compile the kernel and assemble the bootable ISO.
+  # The toolchain build is cached on tools/toolchain.mk hash — first
+  # run after a pin change is ~25 min, subsequent runs are ~30 sec.
+  build-iso:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex texinfo \
+            libgmp-dev libmpfr-dev libmpc-dev \
+            xorriso
+
+      - name: Cache cross-compiler toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/x86_64-elf
+          key: toolchain-${{ runner.os }}-${{ hashFiles('tools/toolchain.mk') }}
+
+      - name: Build cross-compiler (cache miss only)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: tools/build-toolchain.sh
+
+      - name: Build ISO
+        run: make iso
+
+      - name: Inspect output
+        run: |
+          ls -la field-os-poc.iso
+          file field-os-poc.iso
+          du -h field-os-poc.iso
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: field-os-poc-iso
+          path: field-os-poc.iso
+
+  # smoke: download the ISO from build-iso and grep the boot sentinel
+  # off serial. Always TCG (hosted runners have no nested virt anyway).
+  smoke:
+    needs: build-iso
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: field-os-poc-iso
+
+      - name: Boot and grep sentinel
+        run: ci/qemu-smoke.sh field-os-poc.iso
+
+  # loc-budget: report base-system line count vs the 100,000-line cap.
+  # Soft-passing forever in Phase 0 (we're at 0% of budget); the real
+  # gate kicks in once we cross 90% on the way to 95% hard fail.
+  loc-budget:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count base-system LOC
+        run: tools/count-loc.sh
+
+  # reproducibility: deferred to M10 per phase-0.md §M10 (byte-identical
+  # ISO between two clean builds). Wiring SOURCE_DATE_EPOCH through the
+  # kernel build (-fdebug-prefix-map) and xorriso (file dates) is M10
+  # scope; landing a job that we already know would fail would erode
+  # the meaning of a green CI badge.

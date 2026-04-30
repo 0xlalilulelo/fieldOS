@@ -31,3 +31,11 @@ Phase 1).
   `tools/qemu-run.sh` so x86_64 guests on Apple Silicon
   correctly fall through to TCG (HVF requires host arch ==
   guest arch). (M0 step 3)
+- CI smoke loop: `ci/qemu-smoke.sh` (headless QEMU + serial
+  grep, distinct exit codes for failure modes),
+  `tools/count-loc.sh` (reports base-system LOC vs the
+  100,000-line budget; warn at 90%, hard fail at 95%),
+  `.github/workflows/ci.yml` with `build-iso` (toolchain
+  cached on `tools/toolchain.mk` hash), `smoke` (boot the
+  artifact and grep), and `loc-budget`. `reproducibility`
+  job deferred to M10. (M0 step 4)
