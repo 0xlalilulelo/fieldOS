@@ -1,0 +1,42 @@
+Limine bootloader, vendored for Field OS.
+
+upstream: https://github.com/limine-bootloader/limine/releases/tag/v12.0.2
+version:  v12.0.2
+
+Binary tarball used:
+  url:    https://github.com/limine-bootloader/limine/releases/download/v12.0.2/limine-binary.tar.xz
+  sha256: 797abf4437841a49bdfce41fc33e43457a1a2b8b6bc46865b04dab471955b9f7
+  size:   855056 bytes (compressed)
+
+Header source:
+  url:    https://github.com/limine-bootloader/limine/releases/download/v12.0.2/limine-12.0.2.tar.xz
+  path:   limine-12.0.2/limine-protocol/include/limine.h
+
+Trimmed (not vendored — recover by re-fetching upstream):
+  - BOOTAA64.EFI, BOOTIA32.EFI, BOOTLOONGARCH64.EFI, BOOTRISCV64.EFI
+    (non-x86_64 EFI boot binaries; revisit when Phase 3 lands ARM64)
+  - limine-tool-windows-x86/limine.exe (Windows host tool; we build
+    the host tool from limine.c on Linux/macOS instead)
+  - limine-bios-pxe.bin (PXE network boot; not used for ISO boot)
+
+Kept even though they look optional:
+  - limine-bios-hdd.h: required to compile the host `limine` tool
+    from limine.c. Looks like an HDD-install thing, but limine.c
+    #includes it unconditionally.
+
+License:
+  - LICENSE: BSD-2-Clause for the binaries (Mintsuki and contributors).
+  - limine.h: 0BSD (zero-clause BSD), per its SPDX header.
+
+To bump:
+  1. Pick the new release: https://github.com/limine-bootloader/limine/releases
+  2. curl -fLO  the new limine-binary.tar.xz; verify SHA-256 against
+     the upstream .sig file.
+  3. Extract; copy limine-bios.sys, limine-bios-cd.bin, limine-uefi-cd.bin,
+     BOOTX64.EFI, LICENSE, limine.c, Makefile to vendor/limine/
+     (overwriting the old versions). Drop everything else.
+  4. curl the matching limine-X.Y.Z.tar.xz source release; extract
+     limine-protocol/include/limine.h; copy to vendor/limine/limine.h.
+  5. Update version, sha256, and size lines in this file.
+  6. Re-run `make iso && tools/qemu-run.sh` to confirm the kernel
+     still boots cleanly.

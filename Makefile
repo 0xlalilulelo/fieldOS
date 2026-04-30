@@ -1,22 +1,27 @@
 # Field OS top-level Makefile.
 #
 # The build chain is plain GNU Make for Phase 0. Per-component .mk
-# files (e.g. kernel/kernel.mk in M0 step 3) are include'd from here
-# as the project grows. Cross-compiler paths come from
-# tools/toolchain.mk; refer to $(CROSS_CC) and friends, never bare
-# `gcc`.
+# files are include'd here as the project grows. Cross-compiler paths
+# come from tools/toolchain.mk; refer to $(CROSS_CC) and friends,
+# never bare `gcc`.
 
 include tools/toolchain.mk
+include kernel/kernel.mk
+
+ISO         := field-os-poc.iso
+ISO_ROOT    := build/iso-root
+LIMINE_DIR  := vendor/limine
+LIMINE_HOST := $(LIMINE_DIR)/limine
 
 .DEFAULT_GOAL := help
-.PHONY: help toolchain-check iso clean distclean
+.PHONY: help toolchain-check iso limine-host clean distclean
 
 # --- help ----------------------------------------------------------------
 help:
 	@echo "Field OS build targets"
 	@echo ""
+	@echo "  iso               Build $(ISO)."
 	@echo "  toolchain-check   Verify the x86_64-elf cross-compiler works."
-	@echo "  iso               Build field-os-poc.iso  (wired in M0 step 3)"
 	@echo "  clean             Remove build artifacts."
 	@echo "  distclean         Remove build artifacts and toolchain install."
 	@echo "  help              This message."
@@ -25,12 +30,9 @@ help:
 	@echo "Cross-CC:         $(CROSS_CC)"
 
 # --- toolchain-check -----------------------------------------------------
-# Confirm the cross-compiler is installed and can produce an
-# x86_64-elf object file. Run this after tools/build-toolchain.sh and
-# whenever the toolchain pin changes.
 toolchain-check:
 	@[ -x "$(CROSS_CC)" ] || { echo "missing $(CROSS_CC) — run tools/build-toolchain.sh"; exit 1; }
-	@[ -x "$(CROSS_LD) " ] 2>/dev/null; [ -x "$(CROSS_LD)" ] || { echo "missing $(CROSS_LD) — run tools/build-toolchain.sh"; exit 1; }
+	@[ -x "$(CROSS_LD)" ] || { echo "missing $(CROSS_LD) — run tools/build-toolchain.sh"; exit 1; }
 	@echo "==> $$($(CROSS_CC) --version | head -1)"
 	@echo "==> $$($(CROSS_LD) --version | head -1)"
 	@tmp=$$(mktemp -d) && \
@@ -40,19 +42,41 @@ toolchain-check:
 	  rm -rf $$tmp
 	@echo "==> toolchain OK"
 
-# --- iso (placeholder until M0 step 3) -----------------------------------
-iso:
-	@echo "iso: not yet wired — M0 step 3 brings up the kernel + Limine boot path."
-	@exit 1
+# --- limine-host ---------------------------------------------------------
+# Build the host `limine` CLI used for `bios-install`. Idempotent —
+# the upstream Makefile only rebuilds limine.c when changed.
+$(LIMINE_HOST): $(LIMINE_DIR)/limine.c $(LIMINE_DIR)/Makefile
+	$(MAKE) -C $(LIMINE_DIR)
+
+limine-host: $(LIMINE_HOST)
+
+# --- iso -----------------------------------------------------------------
+$(ISO): $(KERNEL_ELF) $(LIMINE_HOST) boot/limine.conf
+	@rm -rf $(ISO_ROOT)
+	@mkdir -p $(ISO_ROOT)/boot $(ISO_ROOT)/EFI/BOOT
+	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/field-kernel
+	cp boot/limine.conf $(ISO_ROOT)/boot/
+	cp $(LIMINE_DIR)/limine-bios.sys \
+	   $(LIMINE_DIR)/limine-bios-cd.bin \
+	   $(LIMINE_DIR)/limine-uefi-cd.bin \
+	   $(ISO_ROOT)/boot/
+	cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT)/EFI/BOOT/
+	xorriso -as mkisofs \
+	    -b boot/limine-bios-cd.bin \
+	    -no-emul-boot -boot-load-size 4 -boot-info-table \
+	    --efi-boot boot/limine-uefi-cd.bin \
+	    -efi-boot-part --efi-boot-image --protective-msdos-label \
+	    $(ISO_ROOT) -o $@
+	$(LIMINE_HOST) bios-install $@
+
+iso: $(ISO)
 
 # --- clean ---------------------------------------------------------------
 clean:
 	rm -rf build kernel/build
-	rm -f field-os-poc.iso
+	rm -f $(ISO)
+	-$(MAKE) -C $(LIMINE_DIR) clean 2>/dev/null
 
-# --- distclean -----------------------------------------------------------
-# Removes everything clean does, plus the cross-toolchain install.
-# Use sparingly — rebuilding the toolchain takes ~25 min.
 distclean: clean
 	@echo "removing toolchain install at $(TOOLCHAIN_PREFIX)"
 	rm -rf $(TOOLCHAIN_PREFIX)

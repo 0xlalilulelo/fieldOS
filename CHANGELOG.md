@@ -20,3 +20,14 @@ Phase 1).
 - Top-level `Makefile` (`toolchain-check`, `help`, `clean`,
   `distclean`); portable `tools/qemu-run.sh` launcher with
   HVF/KVM/TCG auto-select. (M0 step 2.5)
+- Limine v12.0.2 vendored at `vendor/limine/` (BSD-2 binaries,
+  0BSD header), trimmed to x86_64. ~120 lines of C kernel
+  (`kernel/main.c`, `kernel/arch/x86_64/{io.h,serial.h,serial.c,
+  linker.ld}`, `kernel/kernel.mk`), `boot/limine.conf`, and a
+  rewritten top-level `Makefile` `iso` target. Kernel boots to
+  long mode via Limine, initializes COM1 (16550 @ 115200 8N1),
+  prints `Field OS: stage 0 reached` then `FIELD_OS_BOOT_OK`,
+  and halts under cli/hlt. Includes a portability fix to
+  `tools/qemu-run.sh` so x86_64 guests on Apple Silicon
+  correctly fall through to TCG (HVF requires host arch ==
+  guest arch). (M0 step 3)

@@ -7,6 +7,12 @@ dist/
 *.img
 *.bin
 
+# Vendor exceptions: prebuilt binaries we ship intentionally.
+# Order matters — these un-ignore must come after the *.bin / *.elf
+# rules above so they win as the last matching rule.
+!vendor/**/*.bin
+!vendor/**/*.sys
+
 # Toolchain build scratch (the cross-compiler installs to
 # $HOME/.local/x86_64-elf, not in-tree)
 toolchain/src/
@@ -28,6 +34,12 @@ Thumbs.db
 
 # Vendored library build dirs (sources stay tracked, builds do not)
 vendor/*/build/
+
+# The host `limine` CLI tool, built from vendor/limine/limine.c
+# by `make limine-host` — sources tracked, binary is not. macOS
+# also generates a .dSYM debug-symbol bundle alongside the binary.
+vendor/limine/limine
+vendor/limine/limine.dSYM/
 
 # HolyC fork build artifacts
 holyc/build/

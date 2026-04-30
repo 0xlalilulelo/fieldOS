@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # tools/qemu-run.sh
 #
-# Boot a Field OS ISO under QEMU with the best available accelerator:
-#   macOS  -> -accel hvf  -cpu max
-#   Linux  -> -enable-kvm -cpu host  (if /dev/kvm is writable)
-#   else   -> TCG fallback (-cpu max)
+# Boot a Field OS ISO under QEMU with the best available accelerator.
+# HVF/KVM only apply when host CPU arch matches guest arch — and the
+# Field OS Phase-0 guest is x86_64. So Apple Silicon hosts (aarch64)
+# fall through to TCG even on macOS, despite running macOS.
 #
 # Usage:
 #   tools/qemu-run.sh                    # boots ./field-os-poc.iso
@@ -27,10 +27,13 @@ Usage:
   tools/qemu-run.sh path/to/foo.iso    # boots a specific ISO
   tools/qemu-run.sh -h | --help        # this message
 
-Auto-selects the best available accelerator:
-  macOS  -> -accel hvf  -cpu max
-  Linux  -> -enable-kvm -cpu host  (if /dev/kvm is writable)
-  else   -> TCG fallback (-cpu max)
+Auto-selects the best available accelerator. The Phase-0 guest is
+x86_64; HVF/KVM only apply when the host CPU arch matches:
+  macOS x86_64    -> -accel hvf  -cpu max
+  macOS arm64     -> -accel tcg  -cpu max   (HVF cannot run x86_64 guest)
+  Linux x86_64    -> -enable-kvm -cpu host  (if /dev/kvm is writable)
+  Linux x86_64    -> -accel tcg  -cpu max   (otherwise)
+  anywhere else   -> -accel tcg  -cpu max
 
 Serial is wired to stdio so the boot sentinel (FIELD_OS_BOOT_OK)
 is visible in the launching terminal. CI uses ci/qemu-smoke.sh,
@@ -56,16 +59,23 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || {
 }
 
 ACCEL=()
-case "$(uname -s)" in
-  Darwin) ACCEL=(-accel hvf -cpu max) ;;
-  Linux)
+case "$(uname -s)-$(uname -m)" in
+  Darwin-x86_64)
+    ACCEL=(-accel hvf -cpu max)
+    ;;
+  Darwin-arm64)
+    ACCEL=(-accel tcg -cpu max)
+    ;;
+  Linux-x86_64)
     if [[ -w /dev/kvm ]]; then
       ACCEL=(-enable-kvm -cpu host)
     else
-      ACCEL=(-cpu max)
+      ACCEL=(-accel tcg -cpu max)
     fi
     ;;
-  *) ACCEL=(-cpu max) ;;
+  *)
+    ACCEL=(-accel tcg -cpu max)
+    ;;
 esac
 
 exec qemu-system-x86_64 \
