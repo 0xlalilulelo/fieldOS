@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+dist/
+*.o
+*.elf
+*.iso
+*.img
+*.bin
+
+# Toolchain build scratch (the cross-compiler installs to
+# $HOME/.local/x86_64-elf, not in-tree)
+toolchain/src/
+
+# CI / smoke test artifacts
+serial.log
+qemu.log
+*.pid
+
+# Editor and OS junk
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Vendored library build dirs (sources stay tracked, builds do not)
+vendor/*/build/
+
+# HolyC fork build artifacts
+holyc/build/
