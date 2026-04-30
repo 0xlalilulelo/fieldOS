@@ -12,3 +12,8 @@ Phase 1).
 - Repository scaffolding: directory tree, BSD-2-Clause license,
   README, naming catalog at `docs/naming.md`, ADR template at
   `docs/adrs/0000-template.md`. (M0 step 1)
+- Cross-compiler toolchain build script
+  (`tools/build-toolchain.sh`) with pinned binutils 2.42 and
+  gcc 14.2.0 + SHA-256 hashes; companion CI fetch-script stub
+  (`tools/fetch-toolchain.sh`); shared pin file
+  (`tools/toolchain.mk`). (M0 step 2)
