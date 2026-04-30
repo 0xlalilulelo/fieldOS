@@ -15,6 +15,8 @@ Started: 2026-04-29
 - [x] Step 1 — Repo skeleton, license, naming catalog
 - [x] Step 2 — Cross-compiler toolchain (`tools/build-toolchain.sh`,
   `tools/toolchain.mk`, `tools/fetch-toolchain.sh`)
+- [x] Step 2.5 — Top-level `Makefile` + `tools/qemu-run.sh`
+  (pulled forward from step 3 to validate toolchain integration)
 - [ ] Step 3 — Limine boot path + ~50-line C kernel printing the
   `Field OS: stage 0 reached` line and the `FIELD_OS_BOOT_OK` sentinel
 - [ ] Step 4 — CI smoke loop (`build-iso`, `smoke`, `loc-budget`,
@@ -31,14 +33,14 @@ checkout on Debian 12 / Ubuntu 24.04 / Fedora 41.
 
 ## Active work
 
-M0 step 2 just landed: cross-compiler toolchain
-(binutils 2.42 + gcc 14.2.0) installs to `~/.local/x86_64-elf` via
-`tools/build-toolchain.sh`. Versions and SHA-256 hashes pinned in
-`tools/toolchain.mk`. CI-side `tools/fetch-toolchain.sh` is stubbed
-until the first prebuilt-tarball release artifact is published.
+M0 step 2.5 just landed: top-level `Makefile` with
+`toolchain-check`/`help`/`clean`/`distclean` targets; portable
+`tools/qemu-run.sh` with HVF/KVM/TCG auto-select. `make
+toolchain-check` is green: x86_64-elf-gcc 14.2.0, GNU ld 2.42.
 
-Next: M0 step 2.5 — top-level `Makefile` and `tools/qemu-run.sh`
-(pulled forward from step 3 to validate toolchain integration).
+Next: M0 step 3 — vendor Limine v9.x, write the ~50-line C kernel
+that prints the boot sentinel, top-level `make iso` target,
+`kernel/arch/x86_64` subsystem skeleton.
 
 ## Last completed milestone
 

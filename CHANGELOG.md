@@ -17,3 +17,6 @@ Phase 1).
   gcc 14.2.0 + SHA-256 hashes; companion CI fetch-script stub
   (`tools/fetch-toolchain.sh`); shared pin file
   (`tools/toolchain.mk`). (M0 step 2)
+- Top-level `Makefile` (`toolchain-check`, `help`, `clean`,
+  `distclean`); portable `tools/qemu-run.sh` launcher with
+  HVF/KVM/TCG auto-select. (M0 step 2.5)
