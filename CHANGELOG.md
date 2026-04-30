@@ -39,3 +39,14 @@ Phase 1).
   cached on `tools/toolchain.mk` hash), `smoke` (boot the
   artifact and grep), and `loc-budget`. `reproducibility`
   job deferred to M10. (M0 step 4)
+- `holyc-lang` beta-v0.0.10 vendored at `holyc/` (BSD-2,
+  21,497 LOC across 42 src/ files); audit at
+  `docs/skills/holyc-lang-audit.md` covering architecture,
+  libc/host-assumption surface, ABI, and a six-step roadmap
+  for the M3 freestanding-backend graft. Recon only — the
+  graft itself is M3 work. (M0 step 5)
+- **M0 — Tooling and Bootstrap complete.** `make iso &&
+  ci/qemu-smoke.sh field-os-poc.iso` boots through Limine
+  v12.0.2, prints `Field OS: stage 0 reached` then
+  `FIELD_OS_BOOT_OK` on COM1 serial, halts cleanly. 166 LOC
+  consumed of the 100,000-line base-system budget.

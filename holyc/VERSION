@@ -1,0 +1,26 @@
+holyc-lang vendored for Field OS.
+
+upstream: https://github.com/Jamesbarford/holyc-lang
+version:  beta-v0.0.10  (released 2025-08-02)
+
+Tarball used:
+  url:    https://github.com/Jamesbarford/holyc-lang/archive/refs/tags/beta-v0.0.10.tar.gz
+  sha256: be664891b02e68424299d1ad874bddce84e46476a23436973865dd190731d3e4
+  size:   approximately 357 KB compressed; 21,497 LOC across 42 src/ files
+
+License: BSD-2-Clause (see ./COPYING).
+  Compatible with Field OS's BSD-2-Clause base.
+
+Audit: docs/skills/holyc-lang-audit.md   (M0 step 5, dated 2026-04-30).
+
+This is a vendored snapshot, not a submodule. The M3 freestanding
+graft will modify these sources in place; commits inside this tree
+are part of the Field OS history, not the upstream's.
+
+To bump the pin (M3 only — do not bump in M0/M1/M2):
+  1. Pick a new tag: https://github.com/Jamesbarford/holyc-lang/tags
+  2. curl -fLO  the new tarball; verify SHA-256.
+  3. Diff this tree against the new tarball; reapply our local
+     edits manually if the upstream surface has shifted under
+     them. Track the rebase in docs/adrs/NNNN-holyc-bump-X.Y.Z.md.
+  4. Update version, sha256, and audit doc.
