@@ -59,3 +59,15 @@ Phase 1).
   on the TSS selector. New: `kernel/arch/x86_64/{gdt.h,gdt.c,
   gdt_load.S}`. `kernel/kernel.mk` learns to compile `.S`
   sources. (M1 step A)
+- M1-B: 256-entry IDT with per-vector asm stubs (synthetic zero
+  error code pushed for vectors where the CPU does not),
+  common `isr_common` dispatcher saving all 15 GPRs into a
+  `struct regs`, C `exception_handler` printing
+  `PANIC: vec=N err=0x... rip=0x... rsp=0x...` on serial, and
+  4 KiB IST stacks for #DF (IST1) / #NMI (IST2) / #MC (IST3).
+  New: `kernel/arch/x86_64/{idt.h,idt.c,exceptions.S}`.
+  `gdt.h/.c` gain `gdt_set_ist(index, top)` so `idt.c` can
+  populate `tss.ist[]` without exposing the TSS globally.
+  Fault path verified by a temporary `ud2` after `idt_init`
+  yielding `PANIC: vec=6 err=0x0 rip=0xffffffff80001... rsp=...`
+  on serial; the `ud2` was removed before the commit. (M1 step B)

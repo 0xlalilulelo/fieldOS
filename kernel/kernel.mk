@@ -9,10 +9,12 @@ KERNEL_ELF   := $(KERNEL_BUILD)/field-kernel.elf
 KERNEL_C_SRCS := \
     kernel/main.c \
     kernel/arch/x86_64/gdt.c \
+    kernel/arch/x86_64/idt.c \
     kernel/arch/x86_64/serial.c
 
 KERNEL_S_SRCS := \
-    kernel/arch/x86_64/gdt_load.S
+    kernel/arch/x86_64/gdt_load.S \
+    kernel/arch/x86_64/exceptions.S
 
 KERNEL_OBJS := \
     $(patsubst %.c,$(KERNEL_BUILD)/%.o,$(KERNEL_C_SRCS)) \

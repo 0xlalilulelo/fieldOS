@@ -102,3 +102,10 @@ void gdt_init(void)
 	gdt_load_and_reload_segments(&r);
 	__asm__ volatile ("ltr %w0" :: "r"((uint16_t)GDT_TSS));
 }
+
+void gdt_set_ist(int index, uint64_t stack_top)
+{
+	if (index >= 1 && index <= 7) {
+		tss.ist[index - 1] = stack_top;
+	}
+}

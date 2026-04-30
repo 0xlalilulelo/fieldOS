@@ -14,8 +14,8 @@ Started: 2026-04-30
 
 - [x] Step A — GDT (5 entries + 16-byte TSS); CS reload via
   far return; data selectors and TR loaded
-- [ ] Step B — IDT with 256 stub handlers; IST stacks for
-  #DF/#NMI/#MC; common panic handler over serial
+- [x] Step B — IDT with 256 stub handlers; IST stacks for
+  #DF/#NMI/#MC; `exception_handler` prints PANIC line on serial
 - [ ] Step C — Limine framebuffer request; embedded TempleOS
   8×8 bitmap font; `fb_init`/`fb_putc`/`fb_puts`
 - [ ] Step D — `Field OS: stage 1 reached` + `Hello, Field` on
@@ -32,25 +32,30 @@ remains green.
 
 ## Active work
 
-M1-A just landed: x86_64 GDT and TSS scaffolding. New files:
-- `kernel/arch/x86_64/gdt.h` — selector constants, `gdt_init` decl
-- `kernel/arch/x86_64/gdt.c` — 5-entry GDT + 16-byte TSS descriptor
-- `kernel/arch/x86_64/gdt_load.S` — far-return CS reload + TR load
+M1-B just landed: 256-entry IDT, per-vector asm stubs, common
+dispatch into a C panic handler, IST stacks for #DF/#NMI/#MC.
+New files:
+- `kernel/arch/x86_64/idt.h` — `struct regs` layout, decls
+- `kernel/arch/x86_64/idt.c` — gate encoding, IST stack
+  allocation, `idt_init`, panic-path print helpers
+- `kernel/arch/x86_64/exceptions.S` — 256 stubs (`.altmacro` +
+  `.rept` over 0..255), uniform `isr_common` dispatcher,
+  `isr_table` array consumed by `idt_init`
 
-`kernel/main.c` calls `gdt_init()` between the stage-0 line and
-the sentinel. `kernel/kernel.mk` learns to compile `.S` sources.
-TSS allocated with empty IST entries; M1-B fills them.
+`gdt.h` / `gdt.c` gained `gdt_set_ist(index, top)` so idt.c
+populates the TSS IST slots without the TSS itself being
+visible. `kernel/main.c` calls `idt_init()` immediately after
+`gdt_init()`.
 
-Smoke green: serial prints `Field OS: stage 0 reached` then
-`FIELD_OS_BOOT_OK` in 2 s. The GDT load is silent — survival of
-the segment reload (which would triple-fault on a malformed
-descriptor) proves correctness. M1-D will switch the stage line
-to `stage 1` after all M1 pieces are wired up.
+Verification: smoke is green (sentinel still prints in 2 s) and
+the fault path was exercised by inserting a temporary `ud2`
+after `idt_init`. Serial captured:
+`PANIC: vec=6 err=0x0 rip=0xffffffff8000102b rsp=0xffff80000ff99ff0`.
+The `ud2` was removed before the commit landed.
 
-Next: M1-B — IDT with 256 stub entries pushing vector + synthetic
-error code into a common asm dispatch, common C handler
-`exception_handler(struct regs *)` that prints panic info on
-serial, IST stacks (4 KiB each) for #DF/#NMI/#MC wired into TSS.
+Next: M1-C — Limine framebuffer request, embedded TempleOS 8×8
+bitmap font, `fb_init`/`fb_putc`/`fb_puts`. After that, M1-C
+needs visual confirmation in a QEMU GUI (per pre-agreed plan).
 
 ## Last completed milestone
 
