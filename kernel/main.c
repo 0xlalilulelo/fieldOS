@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include "limine.h"
+#include "arch/x86_64/gdt.h"
 #include "arch/x86_64/serial.h"
 
 /* Limine protocol v12 anchored markers. The bootloader scans the
@@ -37,6 +38,7 @@ void kmain(void)
 
 	serial_init();
 	serial_puts("Field OS: stage 0 reached\n");
+	gdt_init();
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();
 }

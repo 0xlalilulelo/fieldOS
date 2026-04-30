@@ -8,9 +8,15 @@ KERNEL_ELF   := $(KERNEL_BUILD)/field-kernel.elf
 
 KERNEL_C_SRCS := \
     kernel/main.c \
+    kernel/arch/x86_64/gdt.c \
     kernel/arch/x86_64/serial.c
 
-KERNEL_OBJS := $(patsubst %.c,$(KERNEL_BUILD)/%.o,$(KERNEL_C_SRCS))
+KERNEL_S_SRCS := \
+    kernel/arch/x86_64/gdt_load.S
+
+KERNEL_OBJS := \
+    $(patsubst %.c,$(KERNEL_BUILD)/%.o,$(KERNEL_C_SRCS)) \
+    $(patsubst %.S,$(KERNEL_BUILD)/%.o,$(KERNEL_S_SRCS))
 
 # -ffreestanding         no hosted libc; we provide our own runtime
 # -nostdlib              don't link any libc
@@ -37,6 +43,10 @@ KERNEL_LDFLAGS := \
     -T kernel/arch/x86_64/linker.ld
 
 $(KERNEL_BUILD)/%.o: %.c
+	@mkdir -p $(@D)
+	$(CROSS_CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(KERNEL_BUILD)/%.o: %.S
 	@mkdir -p $(@D)
 	$(CROSS_CC) $(KERNEL_CFLAGS) -c $< -o $@
 

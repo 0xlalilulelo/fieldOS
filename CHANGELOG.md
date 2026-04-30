@@ -49,4 +49,13 @@ Phase 1).
   ci/qemu-smoke.sh field-os-poc.iso` boots through Limine
   v12.0.2, prints `Field OS: stage 0 reached` then
   `FIELD_OS_BOOT_OK` on COM1 serial, halts cleanly. 166 LOC
-  consumed of the 100,000-line base-system budget.
+  consumed of the 100,000-line base-system budget. Tag
+  `M0-complete` on commit `60e1a48`.
+- M1-A: x86_64 GDT (5 entries — null + kernel code/data + user
+  code/data) plus a 16-byte TSS descriptor with empty IST
+  entries (M1-B fills them). `gdt_init()` loads the GDT via
+  `lgdt`, reloads CS through a far-return trick, reloads
+  SS/DS/ES/FS/GS to the kernel data selector, and runs `ltr`
+  on the TSS selector. New: `kernel/arch/x86_64/{gdt.h,gdt.c,
+  gdt_load.S}`. `kernel/kernel.mk` learns to compile `.S`
+  sources. (M1 step A)

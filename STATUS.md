@@ -6,62 +6,55 @@
 
 ## Current milestone
 
-**M0 — Tooling and Bootstrap** *(in progress)*
+**M1 — Boot to Long Mode** *(in progress)*
 
-Started: 2026-04-29
+Started: 2026-04-30
 
-### M0 deliverables
+### M1 deliverables
 
-- [x] Step 1 — Repo skeleton, license, naming catalog
-- [x] Step 2 — Cross-compiler toolchain (`tools/build-toolchain.sh`,
-  `tools/toolchain.mk`, `tools/fetch-toolchain.sh`)
-- [x] Step 2.5 — Top-level `Makefile` + `tools/qemu-run.sh`
-  (pulled forward from step 3 to validate toolchain integration)
-- [x] Step 3 — Limine v12.0.2 boot path + ~120 lines of C kernel;
-  serial prints `Field OS: stage 0 reached` and `FIELD_OS_BOOT_OK`
-  under QEMU TCG
-- [x] Step 4 — CI smoke loop. `ci/qemu-smoke.sh`, `tools/count-loc.sh`,
-  `.github/workflows/ci.yml` with three jobs: `build-iso`, `smoke`,
-  `loc-budget`. The `reproducibility` job is deferred to M10 (we don't
-  yet have byte-identical builds and known-failing CI noise erodes
-  signal).
-- [x] Step 5 — `holyc-lang` beta-v0.0.10 vendored at `holyc/`
-  (BSD-2-Clause, 21,497 LOC across 42 src/ files); audit notes at
-  `docs/skills/holyc-lang-audit.md` covering architecture, libc
-  surface, ABI, and a six-step M3 graft roadmap.
+- [x] Step A — GDT (5 entries + 16-byte TSS); CS reload via
+  far return; data selectors and TR loaded
+- [ ] Step B — IDT with 256 stub handlers; IST stacks for
+  #DF/#NMI/#MC; common panic handler over serial
+- [ ] Step C — Limine framebuffer request; embedded TempleOS
+  8×8 bitmap font; `fb_init`/`fb_putc`/`fb_puts`
+- [ ] Step D — `Field OS: stage 1 reached` + `Hello, Field` on
+  framebuffer; QEMU `-d int,cpu_reset` confirms zero exceptions
+  taken; full M1 smoke green
 
 ### Exit criterion
 
-`make iso && ci/qemu-smoke.sh` is green locally and in GitHub Actions.
-Serial prints `Field OS: stage 0 reached` followed by the sentinel
-`FIELD_OS_BOOT_OK`. The toolchain rebuilds reproducibly from a clean
-checkout on Debian 12 / Ubuntu 24.04 / Fedora 41.
+Cold-boot to `Hello, Field` on the framebuffer (rendered with the
+embedded TempleOS 8×8 bitmap font) plus `Field OS: stage 1 reached`
+and `FIELD_OS_BOOT_OK` on COM1 within ~100 ms simulated time.
+QEMU `-d int,cpu_reset` shows zero exceptions taken; smoke test
+remains green.
 
 ## Active work
 
-M0 step 5 just landed: vendored `holyc-lang` beta-v0.0.10
-(BSD-2-Clause, 21,497 LOC) into `holyc/`; audit at
-`docs/skills/holyc-lang-audit.md` documents architecture, libc
-deps, ABI assumptions, and a concrete six-step roadmap for the
-M3 freestanding-backend graft.
+M1-A just landed: x86_64 GDT and TSS scaffolding. New files:
+- `kernel/arch/x86_64/gdt.h` — selector constants, `gdt_init` decl
+- `kernel/arch/x86_64/gdt.c` — 5-entry GDT + 16-byte TSS descriptor
+- `kernel/arch/x86_64/gdt_load.S` — far-return CS reload + TR load
 
-**M0 is complete.** Final exit criterion verified post-vendor:
-`make clean && make iso && ci/qemu-smoke.sh field-os-poc.iso`
-is green (FIELD_OS_BOOT_OK on serial in 2 s). Line-count budget
-consumed: 166/100,000 (0%). Five commits across two evenings.
+`kernel/main.c` calls `gdt_init()` between the stage-0 line and
+the sentinel. `kernel/kernel.mk` learns to compile `.S` sources.
+TSS allocated with empty IST entries; M1-B fills them.
 
-Next: M1 — boot to long mode in earnest. GDT (5 entries + TSS),
-IDT with 256 stub handlers and IST stacks for #DF/#NMI/#MC,
-framebuffer-backed `Println` alongside serial, "Hello, Field"
-on the framebuffer with a PSF bitmap font deferred to M5.
-Estimated 1–2 FT-weeks per phase-0.md §M1, ~3 weeks part-time.
+Smoke green: serial prints `Field OS: stage 0 reached` then
+`FIELD_OS_BOOT_OK` in 2 s. The GDT load is silent — survival of
+the segment reload (which would triple-fault on a malformed
+descriptor) proves correctness. M1-D will switch the stage line
+to `stage 1` after all M1 pieces are wired up.
+
+Next: M1-B — IDT with 256 stub entries pushing vector + synthetic
+error code into a common asm dispatch, common C handler
+`exception_handler(struct regs *)` that prints panic info on
+serial, IST stacks (4 KiB each) for #DF/#NMI/#MC wired into TSS.
 
 ## Last completed milestone
 
-**M0 — Tooling and Bootstrap** (2026-04-29 → 2026-04-30, five
+**M0 — Tooling and Bootstrap** (2026-04-29 → 2026-04-30, six
 commits, ~190 LOC of base-system C, 21,000 LOC vendored at
-arm's length under `vendor/limine/` and `holyc/`).
-
-## Last completed milestone
-
-None — M0 is the first.
+arm's length under `vendor/limine/` and `holyc/`). Tag:
+`M0-complete` on commit `60e1a48`.
