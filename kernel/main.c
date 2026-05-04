@@ -1,6 +1,8 @@
+#include <stddef.h>
 #include <stdint.h>
 
 #include "limine.h"
+#include "arch/x86_64/framebuffer.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
@@ -17,6 +19,17 @@ static volatile uint64_t limine_requests_start_marker[4] =
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[3] =
 	LIMINE_BASE_REVISION(3);
+
+/* Framebuffer request — externable so framebuffer.c can read the
+ * response. The .limine_requests section keeps it in Limine's
+ * scan range; volatile so the bootloader's response write to
+ * .response is observed by our kernel after the handoff. */
+__attribute__((used, section(".limine_requests")))
+volatile struct limine_framebuffer_request limine_fb_request = {
+	.id = LIMINE_FRAMEBUFFER_REQUEST_ID,
+	.revision = 0,
+	.response = NULL,
+};
 
 __attribute__((used, section(".limine_requests_end")))
 static volatile uint64_t limine_requests_end_marker[2] =
@@ -41,6 +54,8 @@ void kmain(void)
 	serial_puts("Field OS: stage 0 reached\n");
 	gdt_init();
 	idt_init();
+	fb_init();
+	fb_puts("Hello, Field\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();
 }

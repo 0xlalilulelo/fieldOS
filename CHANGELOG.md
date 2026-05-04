@@ -71,3 +71,15 @@ Phase 1).
   Fault path verified by a temporary `ud2` after `idt_init`
   yielding `PANIC: vec=6 err=0x0 rip=0xffffffff80001... rsp=...`
   on serial; the `ud2` was removed before the commit. (M1 step B)
+- M1-C: Limine framebuffer wired in. New
+  `kernel/arch/x86_64/{framebuffer.h,framebuffer.c}` — `fb_init`
+  reads the Limine response, captures pointer / pitch /
+  dimensions, clears to black; `fb_putc_at` / `fb_puts` blit the
+  TempleOS/ZealOS 8×8 console font vendored at
+  `kernel/arch/x86_64/{font_8x8.h,font_8x8.c}` (Unlicense /
+  public domain — origin recorded per CLAUDE.md hard
+  constraint #6). `kernel/main.c` adds the framebuffer request,
+  initialises the framebuffer, and prints `Hello, Field` after
+  `idt_init`. Glyph shapes verified by QEMU monitor screendump
+  showing recognisable H-e-l-l-o-,- -F-i-e-l-d in the top-left
+  8×96 pixel region of the 1280×800 framebuffer. (M1 step C)

@@ -8,6 +8,8 @@ KERNEL_ELF   := $(KERNEL_BUILD)/field-kernel.elf
 
 KERNEL_C_SRCS := \
     kernel/main.c \
+    kernel/arch/x86_64/font_8x8.c \
+    kernel/arch/x86_64/framebuffer.c \
     kernel/arch/x86_64/gdt.c \
     kernel/arch/x86_64/idt.c \
     kernel/arch/x86_64/serial.c
