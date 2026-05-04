@@ -51,11 +51,11 @@ void kmain(void)
 	}
 
 	serial_init();
-	serial_puts("Field OS: stage 0 reached\n");
 	gdt_init();
 	idt_init();
 	fb_init();
 	fb_puts("Hello, Field\n");
+	serial_puts("Field OS: stage 1 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();
 }

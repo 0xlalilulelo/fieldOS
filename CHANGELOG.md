@@ -83,3 +83,15 @@ Phase 1).
   `idt_init`. Glyph shapes verified by QEMU monitor screendump
   showing recognisable H-e-l-l-o-,- -F-i-e-l-d in the top-left
   8×96 pixel region of the 1280×800 framebuffer. (M1 step C)
+- M1-D: `kmain` final order — `serial_init` → `gdt_init` →
+  `idt_init` → `fb_init` → `fb_puts("Hello, Field\n")` →
+  `serial_puts("Field OS: stage 1 reached\n")` → sentinel →
+  halt. The stage indicator now lands AFTER all M1
+  initialisation, so its presence on serial certifies every
+  init step succeeded. (M1 step D)
+- **M1 — Boot to Long Mode complete.** `make iso &&
+  ci/qemu-smoke.sh` green; serial prints `Field OS: stage 1
+  reached` then `FIELD_OS_BOOT_OK`; framebuffer shows
+  `Hello, Field` in the TempleOS 8×8 font; QEMU
+  `-d int,cpu_reset` log shows zero exception/interrupt
+  deliveries from the kernel.

@@ -6,9 +6,9 @@
 
 ## Current milestone
 
-**M1 — Boot to Long Mode** *(in progress)*
+**M1 — Boot to Long Mode** *(complete)*
 
-Started: 2026-04-30
+2026-04-30 → 2026-05-04, four commits.
 
 ### M1 deliverables
 
@@ -21,9 +21,11 @@ Started: 2026-04-30
   `Zeal-Operating-System/ZealOS:src/Kernel/FontStd.ZC`);
   `fb_init`/`fb_putc_at`/`fb_puts`/`fb_clear` against 32-bpp
   BGRA framebuffer
-- [ ] Step D — `Field OS: stage 1 reached` + `Hello, Field` on
-  framebuffer; QEMU `-d int,cpu_reset` confirms zero exceptions
-  taken; full M1 smoke green
+- [x] Step D — kmain order finalized; serial prints
+  `Field OS: stage 1 reached` after all init; `-d int,cpu_reset`
+  confirms zero exception/interrupt deliveries from the kernel
+  (the only cpu_reset events are firmware-side: initial reset
+  and a SeaBIOS SMM excursion, both in real mode)
 
 ### Exit criterion
 
@@ -35,34 +37,41 @@ remains green.
 
 ## Active work
 
-M1-C just landed: Limine framebuffer wired in, the TempleOS/ZealOS
-8×8 bitmap font vendored, and a software glyph blitter that draws
-white-on-black 8×8 cells against a 32-bpp BGRA framebuffer. New
-files:
-- `kernel/arch/x86_64/font_8x8.h` / `font_8x8.c` — 256 glyphs
-  copied verbatim from ZealOS `src/Kernel/FontStd.ZC` (Unlicense /
-  public domain). Lineage record kept per CLAUDE.md hard
-  constraint #6.
-- `kernel/arch/x86_64/framebuffer.h` / `framebuffer.c` — `fb_init`
-  reads `limine_fb_request.response`, captures pointer / pitch /
-  dimensions, clears to black, parks the cursor at (0, 0).
-  `fb_putc_at`, `fb_puts`, `fb_clear` for the rendering surface.
+M1-D just landed. `kmain` final order: `serial_init` → `gdt_init`
+→ `idt_init` → `fb_init` → `fb_puts("Hello, Field\n")` →
+`serial_puts("Field OS: stage 1 reached\n")` →
+`serial_puts("FIELD_OS_BOOT_OK\n")` → halt. The stage indicator
+now lands AFTER all M1 initialisation rather than before, so its
+presence on serial certifies that every step succeeded.
 
-`kernel/main.c` adds the Limine framebuffer request to the
-`.limine_requests` section and calls `fb_init()` followed by
-`fb_puts("Hello, Field\n")` between `idt_init` and the sentinel.
+**M1 is complete.** Final exit criterion verified:
+- `make iso && ci/qemu-smoke.sh` green; serial prints
+  `Field OS: stage 1 reached` followed by `FIELD_OS_BOOT_OK`.
+- Headless QEMU GUI run shows `Hello, Field` rendered in the
+  TempleOS/ZealOS 8×8 font at the top-left of the 1280×800
+  framebuffer; visual eyeball confirmed.
+- `-d int,cpu_reset` log shows zero exception/interrupt
+  deliveries (`v=` lines: 0) from the moment the kernel takes
+  control. The two `CPU Reset` events in the log are both
+  firmware-side (initial reset and a SeaBIOS SMM excursion,
+  both in real mode at sub-1 MiB EIP), not kernel-side faults.
 
-Verification: serial smoke green; QEMU screendump via the monitor
-TCP backdoor shows the expected glyph shapes for `H e l l o , F
-i e l d` in the top-left 8×96 pixel region of the 1280×800
-framebuffer. No bit-order, color, or coordinate bugs.
+LOC: 1024 / 100,000 (1%). Eight base-system C files plus two
+.S sources. Four commits across the milestone.
 
-Next (after the visual eyeball check passes): M1-D — switch the
-serial stage indicator to `Field OS: stage 1 reached`, run with
-`-d int,cpu_reset` to confirm zero exceptions taken across the
-entire boot path, full M1 wrap.
+Next: M2 — physical memory manager, virtual memory manager,
+kernel slab heap. Per phase-0.md §M2 this is "where most hobby
+OS projects either get it right and accelerate, or get it wrong
+and bog down for months." Estimated 2–3 FT-weeks per the plan,
+~5 weeks part-time.
 
 ## Last completed milestone
+
+**M1 — Boot to Long Mode** (2026-04-30 → 2026-05-04, four
+commits, +700 LOC base-system). Boot path: GDT + TSS, IDT with
+256 stubs and IST stacks for #DF/#NMI/#MC, software framebuffer
+with TempleOS 8×8 font, "Hello, Field" rendered, zero
+exceptions taken.
 
 **M0 — Tooling and Bootstrap** (2026-04-29 → 2026-04-30, six
 commits, ~190 LOC of base-system C, 21,000 LOC vendored at
