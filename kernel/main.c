@@ -7,6 +7,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
 #include "mm/pmm.h"
+#include "mm/slab.h"
 #include "mm/vmm.h"
 
 /* Limine protocol v12 anchored markers. The bootloader scans the
@@ -76,10 +77,12 @@ void kmain(void)
 	idt_init();
 	pmm_init();
 	vmm_init();
+	slab_init();
 	fb_init();
 	fb_puts("Hello, Field\n");
 	pmm_print_stats();
 	vmm_self_test();
+	slab_self_test();
 	serial_puts("Field OS: stage 1 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();

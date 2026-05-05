@@ -179,6 +179,58 @@ void pmm_free_page(uint64_t pa)
 	}
 }
 
+uint64_t pmm_alloc_pages(uint64_t n)
+{
+	if (bitmap == NULL || n == 0) {
+		return 0;
+	}
+	if (n == 1) {
+		return pmm_alloc_page();
+	}
+
+	uint64_t run_start = 0;
+	uint64_t run_len   = 0;
+	for (uint64_t p = 0; p < bitmap_pages; p++) {
+		if (!bit_get(p)) {
+			if (run_len == 0) {
+				run_start = p;
+			}
+			run_len++;
+			if (run_len == n) {
+				for (uint64_t i = 0; i < n; i++) {
+					bit_set(run_start + i);
+				}
+				free_pages -= n;
+				return run_start * PAGE_SIZE;
+			}
+		} else {
+			run_len = 0;
+		}
+	}
+	return 0;
+}
+
+void pmm_free_pages(uint64_t pa, uint64_t n)
+{
+	if (bitmap == NULL || n == 0) {
+		return;
+	}
+	uint64_t start = pa / PAGE_SIZE;
+	if (start + n > bitmap_pages) {
+		return;
+	}
+	for (uint64_t i = 0; i < n; i++) {
+		if (bit_get(start + i)) {
+			bit_clear(start + i);
+			free_pages++;
+		}
+	}
+	uint64_t w = start / 64;
+	if (w < cursor_word) {
+		cursor_word = w;
+	}
+}
+
 void pmm_stats(uint64_t *free_bytes, uint64_t *total_bytes)
 {
 	if (free_bytes  != NULL) *free_bytes  = free_pages         * PAGE_SIZE;

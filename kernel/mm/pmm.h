@@ -21,6 +21,17 @@ uint64_t pmm_alloc_page(void);
  * ignores double-free in M2-A; M2-D may turn this into a panic. */
 void pmm_free_page(uint64_t pa);
 
+/* Allocate `n` contiguous 4 KiB frames. Returns the physical
+ * address of the first frame, or 0 on OOM. Used by the slab
+ * heap's large-allocation path. Naive linear scan from page 0;
+ * phase-0.md authorises a buddy allocator only "if profiling
+ * demands it", and ours doesn't yet. */
+uint64_t pmm_alloc_pages(uint64_t n);
+
+/* Release `n` contiguous frames previously returned by
+ * pmm_alloc_pages. */
+void pmm_free_pages(uint64_t pa, uint64_t n);
+
 /* Inspect the bitmap. *free_bytes is the current free count;
  * *total_bytes is the total USABLE memory observed at boot. */
 void pmm_stats(uint64_t *free_bytes, uint64_t *total_bytes);

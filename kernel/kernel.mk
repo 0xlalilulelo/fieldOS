@@ -14,6 +14,7 @@ KERNEL_C_SRCS := \
     kernel/arch/x86_64/idt.c \
     kernel/arch/x86_64/serial.c \
     kernel/mm/pmm.c \
+    kernel/mm/slab.c \
     kernel/mm/vmm.c
 
 KERNEL_S_SRCS := \

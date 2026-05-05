@@ -127,3 +127,26 @@ Phase 1).
   base), halts on failure. Verified: `OK (PMM retained 513
   pages = 2052 KiB for page tables)` — exact predicted overhead
   (1 PD + 512 PTs). Boot-to-sentinel <1 s on TCG. (M2 step B)
+- M2-C: slab heap. New `kernel/mm/{slab.h,slab.c}`. Eight
+  per-size caches at 16/32/64/128/256/512/1024/2048 bytes over
+  4 KiB PMM pages with a 32-byte in-page header (magic 0x5A1B,
+  cache_id, free_count, total_slots, first_free, prev/next).
+  Slot freelist threaded as a uint16_t page offset in the first
+  2 bytes of each free slot. Allocations >2 KiB take a
+  contiguous-page large path with a 16-byte header (magic
+  0x1A1B, page count) at offset 0 and payload at offset 16.
+  `kmalloc(size)` / `kfree(ptr)` ptr-only at the C level
+  (HolyC bindings deferred to M3); `kfree` masks to the 4 KiB
+  page boundary, reads the magic, dispatches to slab-free or
+  large-free; bad magic panics via `cli;hlt`. Fully-empty slab
+  pages unlink from their cache list and return to the PMM —
+  required by the no-leaks exit criterion. `pmm.{h,c}` extended
+  with `pmm_alloc_pages(n)` (naive linear contiguous scan from
+  page 0) and `pmm_free_pages(pa, n)`. `kernel/main.c` calls
+  `slab_init()` after `vmm_init()` and `slab_self_test()` after
+  `vmm_self_test()`. Self-test runs every boot: 10,000 LCG-
+  sized allocations (1..4096 bytes), Fisher-Yates shuffle, free
+  in shuffled order, assert PMM baseline. Verified: `Slab:
+  10K random alloc/free... OK (no leaks)`. Boot-to-sentinel ~2 s
+  on TCG. LOC: 2,014 / 100,000 (2%), 21 base-system files.
+  (M2 step C)
