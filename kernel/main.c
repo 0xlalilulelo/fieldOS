@@ -6,6 +6,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
+#include "mm/pmm.h"
 
 /* Limine protocol v12 anchored markers. The bootloader scans the
  * kernel image between the start and end markers for request magic;
@@ -27,6 +28,25 @@ static volatile uint64_t limine_base_revision[3] =
 __attribute__((used, section(".limine_requests")))
 volatile struct limine_framebuffer_request limine_fb_request = {
 	.id = LIMINE_FRAMEBUFFER_REQUEST_ID,
+	.revision = 0,
+	.response = NULL,
+};
+
+/* Memory map request — pmm.c reads it during pmm_init to discover
+ * USABLE physical memory regions. */
+__attribute__((used, section(".limine_requests")))
+volatile struct limine_memmap_request limine_memmap_request_struct = {
+	.id = LIMINE_MEMMAP_REQUEST_ID,
+	.revision = 0,
+	.response = NULL,
+};
+
+/* HHDM request — pmm.c uses the offset to read physical memory
+ * via the bootloader's higher-half direct map (since the kernel's
+ * own VMM doesn't exist yet — that lands in M2-B). */
+__attribute__((used, section(".limine_requests")))
+volatile struct limine_hhdm_request limine_hhdm_request_struct = {
+	.id = LIMINE_HHDM_REQUEST_ID,
 	.revision = 0,
 	.response = NULL,
 };
@@ -53,8 +73,10 @@ void kmain(void)
 	serial_init();
 	gdt_init();
 	idt_init();
+	pmm_init();
 	fb_init();
 	fb_puts("Hello, Field\n");
+	pmm_print_stats();
 	serial_puts("Field OS: stage 1 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();

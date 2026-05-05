@@ -94,4 +94,19 @@ Phase 1).
   reached` then `FIELD_OS_BOOT_OK`; framebuffer shows
   `Hello, Field` in the TempleOS 8×8 font; QEMU
   `-d int,cpu_reset` log shows zero exception/interrupt
-  deliveries from the kernel.
+  deliveries from the kernel. Tag `M1-complete` on commit
+  `c211cf8`.
+- M2-A: bitmap physical-memory manager. New
+  `kernel/mm/{pmm.h,pmm.c}`. One bit per 4 KiB frame; packed
+  bitmap; two-finger cursor over uint64_t words using
+  `__builtin_ctzll` for bit-scan. `pmm_init` walks the Limine
+  memmap, sizes the bitmap from the highest USABLE address,
+  bootstraps it inside the largest USABLE region (bitmap pages
+  self-mark as used). `pmm_alloc_page` / `pmm_free_page` /
+  `pmm_stats` / `pmm_print_stats` / `pmm_hhdm_offset` form the
+  external API. `kernel/main.c` adds the
+  `LIMINE_MEMMAP_REQUEST_ID` and `LIMINE_HHDM_REQUEST_ID`
+  requests, calls `pmm_init` immediately after `idt_init`, and
+  `pmm_print_stats` between `fb_puts` and the stage line.
+  Verified under `-m 256M`: serial prints
+  `Memory: 254 MiB free of 254 MiB total`. (M2 step A)

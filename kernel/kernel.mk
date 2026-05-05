@@ -12,7 +12,8 @@ KERNEL_C_SRCS := \
     kernel/arch/x86_64/framebuffer.c \
     kernel/arch/x86_64/gdt.c \
     kernel/arch/x86_64/idt.c \
-    kernel/arch/x86_64/serial.c
+    kernel/arch/x86_64/serial.c \
+    kernel/mm/pmm.c
 
 KERNEL_S_SRCS := \
     kernel/arch/x86_64/gdt_load.S \
