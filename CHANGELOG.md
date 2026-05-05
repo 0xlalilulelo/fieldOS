@@ -110,3 +110,20 @@ Phase 1).
   `pmm_print_stats` between `fb_puts` and the stage line.
   Verified under `-m 256M`: serial prints
   `Memory: 254 MiB free of 254 MiB total`. (M2 step A)
+- M2-B: 4-level virtual memory manager. New
+  `kernel/mm/{vmm.h,vmm.c}`. Page-table memory accessed through
+  the Limine HHDM (no recursive mapping). API: `vmm_map`,
+  `vmm_unmap`, `vmm_translate` over an arbitrary PML4;
+  `vmm_new_address_space` clones entries 256..511 from the
+  kernel master so user processes inherit kernel mappings;
+  `vmm_kernel_pml4` exposes the master captured from CR3 at
+  init. Walker allocates intermediate tables on demand (PMM
+  pages zeroed and installed as `PRESENT|RW|USER`); `invlpg`
+  fires on both map and unmap. Flags surface as
+  `VMM_FLAG_PRESENT|RW|USER|GLOBAL|NOEXEC`. 4 KiB pages only
+  in M2-B; huge pages may land later if profiling demands.
+  `vmm_self_test()` runs every boot: 256K iterations of
+  map/translate/unmap over 1 GiB of virtual addresses (16 TiB
+  base), halts on failure. Verified: `OK (PMM retained 513
+  pages = 2052 KiB for page tables)` — exact predicted overhead
+  (1 PD + 512 PTs). Boot-to-sentinel <1 s on TCG. (M2 step B)

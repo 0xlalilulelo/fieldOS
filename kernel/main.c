@@ -7,6 +7,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
 #include "mm/pmm.h"
+#include "mm/vmm.h"
 
 /* Limine protocol v12 anchored markers. The bootloader scans the
  * kernel image between the start and end markers for request magic;
@@ -74,9 +75,11 @@ void kmain(void)
 	gdt_init();
 	idt_init();
 	pmm_init();
+	vmm_init();
 	fb_init();
 	fb_puts("Hello, Field\n");
 	pmm_print_stats();
+	vmm_self_test();
 	serial_puts("Field OS: stage 1 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();
