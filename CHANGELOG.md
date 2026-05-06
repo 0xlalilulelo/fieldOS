@@ -150,3 +150,26 @@ Phase 1).
   10K random alloc/free... OK (no leaks)`. Boot-to-sentinel ~2 s
   on TCG. LOC: 2,014 / 100,000 (2%), 21 base-system files.
   (M2 step C)
+- M2-D: M2 wrap. New `kernel/lib/{format.h,format.c}` with a
+  single `format_dec(uint64_t)` that prints unsigned decimal to
+  serial — no leading zeros, no separators, panic-path safe
+  (single 21-byte stack buffer, no allocation, no globals).
+  Replaces four near-identical helpers
+  (`idt.c::put_dec`, `pmm.c`/`vmm.c`/`slab.c::serial_print_dec`)
+  whose call sites all collapse to `format_dec`. `idt.c::put_hex64`
+  stays put — single panic-path caller, moves the next time a
+  non-panic caller needs hex. `kernel/main.c` bumps the stage
+  marker from `stage 1 reached` to `stage 2 reached`, landing
+  after every M2 init returns successfully so its appearance on
+  serial certifies pmm/vmm/slab init plus the three self-tests.
+  Net −34 LOC, +2 files. (M2 step D)
+- **M2 — Memory Management complete.** `make iso &&
+  ci/qemu-smoke.sh` green; serial prints
+  `Memory: 254 MiB free of 254 MiB total`,
+  `VMM: 1 GiB map/unmap... OK (PMM retained 513 pages = 2052
+  KiB for page tables)`,
+  `Slab: 10K random alloc/free... OK (no leaks)`,
+  `Field OS: stage 2 reached`, then `FIELD_OS_BOOT_OK`.
+  Boot-to-sentinel ~2 s on TCG. 1,980 LOC consumed of the
+  100,000-line base-system budget (2 %), 23 files. Tag
+  `M2-complete` on the M2-D commit.

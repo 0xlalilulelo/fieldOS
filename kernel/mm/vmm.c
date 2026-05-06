@@ -4,6 +4,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "arch/x86_64/serial.h"
+#include "lib/format.h"
 
 /* x86_64 page-table entry bits (Intel SDM Vol 3 Ch 4.5).
  *   bit 0  P    present
@@ -142,24 +143,6 @@ uint64_t vmm_kernel_pml4(void)
 	return kernel_master_pml4_pa;
 }
 
-/* TODO(M2-D): consolidate this with idt.c::put_dec and
- * pmm.c::serial_print_dec into kernel/lib/format.{h,c}. */
-static void serial_print_dec(uint64_t v)
-{
-	if (v == 0) {
-		serial_putc('0');
-		return;
-	}
-	char buf[21];
-	int i = 20;
-	buf[i] = '\0';
-	while (v > 0) {
-		buf[--i] = '0' + (char)(v % 10);
-		v /= 10;
-	}
-	serial_puts(&buf[i]);
-}
-
 static _Noreturn void test_halt(void)
 {
 	for (;;) {
@@ -227,8 +210,8 @@ void vmm_self_test(void)
 		: 0;
 
 	serial_puts("OK (PMM retained ");
-	serial_print_dec(retained_pages);
+	format_dec(retained_pages);
 	serial_puts(" pages = ");
-	serial_print_dec(retained_pages * 4);
+	format_dec(retained_pages * 4);
 	serial_puts(" KiB for page tables)\n");
 }

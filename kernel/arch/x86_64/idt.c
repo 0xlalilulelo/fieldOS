@@ -3,6 +3,7 @@
 #include "gdt.h"
 #include "idt.h"
 #include "serial.h"
+#include "lib/format.h"
 
 /* IDT entry layout in long mode (Intel SDM Vol 3 §6.14.1).
  *   [15:0]    offset[15:0]
@@ -98,23 +99,10 @@ static void put_hex64(uint64_t v)
 	serial_puts(buf);
 }
 
-static void put_dec(uint64_t v)
-{
-	if (v == 0) { serial_putc('0'); return; }
-	char buf[21];
-	int i = 20;
-	buf[i] = '\0';
-	while (v > 0) {
-		buf[--i] = '0' + (v % 10);
-		v /= 10;
-	}
-	serial_puts(&buf[i]);
-}
-
 void exception_handler(struct regs *r)
 {
 	serial_puts("\nPANIC: vec=");
-	put_dec(r->vector);
+	format_dec(r->vector);
 	serial_puts(" err=");
 	put_hex64(r->error_code);
 	serial_puts(" rip=");

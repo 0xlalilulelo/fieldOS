@@ -4,6 +4,7 @@
 #include "pmm.h"
 #include "slab.h"
 #include "arch/x86_64/serial.h"
+#include "lib/format.h"
 
 /* Slab page: 4 KiB PMM page with a 32-byte header at offset 0
  * (magic 0x5A1B). Slots are packed after the header for sizes
@@ -234,24 +235,6 @@ void kfree(void *ptr)
 	}
 }
 
-/* TODO(M2-D): consolidate with idt.c::put_dec, pmm.c::serial_print_dec,
- * vmm.c::serial_print_dec into a shared kernel/lib/format.{h,c}. */
-static void serial_print_dec(uint64_t v)
-{
-	if (v == 0) {
-		serial_putc('0');
-		return;
-	}
-	char buf[21];
-	int i = 20;
-	buf[i] = '\0';
-	while (v > 0) {
-		buf[--i] = '0' + (char)(v % 10);
-		v /= 10;
-	}
-	serial_puts(&buf[i]);
-}
-
 #define SELF_TEST_N 10000
 
 struct slab_test_record {
@@ -320,7 +303,7 @@ void slab_self_test(void)
 	pmm_stats(&free_after, &total);
 	if (free_after != free_before) {
 		serial_puts("FAIL (leak: ");
-		serial_print_dec((free_before - free_after) / PAGE_SIZE);
+		format_dec((free_before - free_after) / PAGE_SIZE);
 		serial_puts(" pages)\n");
 		test_halt();
 	}

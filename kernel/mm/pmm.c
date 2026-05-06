@@ -4,6 +4,7 @@
 #include "limine.h"
 #include "pmm.h"
 #include "arch/x86_64/serial.h"
+#include "lib/format.h"
 
 /* Owned by kernel/main.c so the .limine_requests section sees them
  * during Limine's request scan. We only read the .response field
@@ -242,31 +243,13 @@ uint64_t pmm_hhdm_offset(void)
 	return hhdm_offset;
 }
 
-/* TODO(M2-D or later): consolidate with idt.c's put_dec into a
- * shared kernel/lib/format.{h,c} once we have a third caller. */
-static void serial_print_dec(uint64_t v)
-{
-	if (v == 0) {
-		serial_putc('0');
-		return;
-	}
-	char buf[21];
-	int i = 20;
-	buf[i] = '\0';
-	while (v > 0) {
-		buf[--i] = '0' + (char)(v % 10);
-		v /= 10;
-	}
-	serial_puts(&buf[i]);
-}
-
 void pmm_print_stats(void)
 {
 	uint64_t fb = 0, tb = 0;
 	pmm_stats(&fb, &tb);
 	serial_puts("Memory: ");
-	serial_print_dec(fb / (1024 * 1024));
+	format_dec(fb / (1024 * 1024));
 	serial_puts(" MiB free of ");
-	serial_print_dec(tb / (1024 * 1024));
+	format_dec(tb / (1024 * 1024));
 	serial_puts(" MiB total\n");
 }

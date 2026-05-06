@@ -83,7 +83,7 @@ void kmain(void)
 	pmm_print_stats();
 	vmm_self_test();
 	slab_self_test();
-	serial_puts("Field OS: stage 1 reached\n");
+	serial_puts("Field OS: stage 2 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();
 }
