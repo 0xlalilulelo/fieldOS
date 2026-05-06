@@ -38,3 +38,11 @@ void serial_puts(const char *s)
 		serial_putc(*s++);
 	}
 }
+
+char serial_getc(void)
+{
+	while (!(inb(COM1 + 5) & 0x01)) {
+		/* spin until LSR DR (bit 0) signals a byte in RBR */
+	}
+	return (char)inb(COM1);
+}
