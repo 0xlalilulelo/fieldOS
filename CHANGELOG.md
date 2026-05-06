@@ -172,4 +172,4 @@ Phase 1).
   `Field OS: stage 2 reached`, then `FIELD_OS_BOOT_OK`.
   Boot-to-sentinel ~2 s on TCG. 1,980 LOC consumed of the
   100,000-line base-system budget (2 %), 23 files. Tag
-  `M2-complete` on the M2-D commit.
+  `M2-complete` on commit `6cd9855`.

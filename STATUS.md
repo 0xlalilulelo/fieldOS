@@ -55,7 +55,7 @@ six-step roadmap is the contract; deviations get an ADR.
 ## Last completed milestone
 
 **M2 — Memory Management** (2026-05-05 → 2026-05-06, four
-commits). Tag `M2-complete` on the M2-D commit.
+commits). Tag `M2-complete` on commit `6cd9855`.
 
 **M1 — Boot to Long Mode** (2026-04-30 → 2026-05-04, four
 commits, +700 LOC base-system). Boot path: GDT + TSS, IDT with
