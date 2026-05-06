@@ -120,6 +120,23 @@ int vmm_translate(uint64_t pml4_pa, uint64_t va, uint64_t *phys_out)
 	return 0;
 }
 
+int vmm_remap(uint64_t pml4_pa, uint64_t va, uint32_t flags)
+{
+	uint64_t *pte = walk(pml4_pa, va, 0);
+	if (pte == NULL || !(*pte & PTE_P)) {
+		return -1;
+	}
+	uint64_t entry = *pte & PTE_ADDR_MASK;
+	if (flags & VMM_FLAG_PRESENT) entry |= PTE_P;
+	if (flags & VMM_FLAG_RW)      entry |= PTE_RW;
+	if (flags & VMM_FLAG_USER)    entry |= PTE_US;
+	if (flags & VMM_FLAG_GLOBAL)  entry |= PTE_G;
+	if (flags & VMM_FLAG_NOEXEC)  entry |= PTE_NX;
+	*pte = entry;
+	__asm__ volatile ("invlpg (%0)" :: "r"(va) : "memory");
+	return 0;
+}
+
 uint64_t vmm_new_address_space(void)
 {
 	uint64_t new_pa = pmm_alloc_page();
