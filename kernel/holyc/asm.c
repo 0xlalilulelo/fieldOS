@@ -6,11 +6,11 @@
  * drives this entry point against the checked-in corpus under
  * holyc/tests/corpus/ and compares output to $(CROSS_AS) byte-for-byte.
  *
- * C-1 covers the smallest validating cluster: zero-operand
- * instructions (ret, leave) and single-register-operand instructions
- * (push reg64, pop reg64). Subsequent commits extend this dispatch
- * table with mov / lea / sub / test / je / call clusters until the
- * encoder matches GAS for every instruction line in Bug_171.s.
+ * Coverage so far:
+ *   C-1: ret, leave, push reg64, pop reg64               (33/63 lines)
+ *   C-2: movq (4 forms), leaq (mem-reg, RIP-rel)         (+22 lines)
+ *   C-3: subq imm-reg, test reg-reg, je, call rel/indir  (later)
+ *   D:   data directives (.quad, .asciz, .double)        (later)
  *
  * No libc dependency. Compiles under both the host build (via the
  * asm-test rule) and the kernel build (-ffreestanding -mno-sse).
@@ -88,15 +88,20 @@ static void outByte(OutBuf *o, uint8_t b) {
     o->p[o->len++] = b;
 }
 
-/* --- Operand parsing (C-1: registers only) ------------------------------ */
+/* --- Operand parsing ----------------------------------------------------- */
 
 typedef enum {
-    OPR_REG,
+    OPR_REG,        /* %rax                                */
+    OPR_IMM,        /* $42 / $0x1f / $-8                    */
+    OPR_MEM,        /* disp(%base) — disp may be 0          */
+    OPR_MEM_RIP,    /* label(%rip) — symbol; rel32=0 stays  */
 } OprKind;
 
 typedef struct {
     OprKind kind;
-    int     reg;     /* 0..15 for OPR_REG */
+    int     reg;     /* OPR_REG: register; OPR_MEM: base reg */
+    int64_t imm;     /* OPR_IMM                              */
+    int64_t disp;    /* OPR_MEM (zero if absent)             */
 } Oprnd;
 
 /* Trim leading and trailing whitespace; advance *psrc past leading
@@ -120,7 +125,7 @@ static size_t stripTrailingComment(const char *s, size_t len) {
     return len;
 }
 
-/* Parse one register operand: "%name". Returns AS_OK on success. */
+/* Parse one register operand: "%name". */
 static int parseRegOperand(const char *s, size_t n, Oprnd *out) {
     n = trimWS(&s, n);
     if (n < 2 || s[0] != '%') return AS_E_MALFORMED;
@@ -129,6 +134,169 @@ static int parseRegOperand(const char *s, size_t n, Oprnd *out) {
     out->kind = OPR_REG;
     out->reg  = rn;
     return AS_OK;
+}
+
+/* Parse a signed integer in decimal or 0x-hex. Used by both
+ * immediate operands (after `$`) and memory displacements. */
+static int parseSignedInt(const char *s, size_t n, int64_t *out) {
+    if (n == 0) return AS_E_MALFORMED;
+    int64_t sign = 1;
+    if (s[0] == '-')      { sign = -1; s++; n--; }
+    else if (s[0] == '+') {             s++; n--; }
+    int base = 10;
+    if (n >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16; s += 2; n -= 2;
+    }
+    if (n == 0) return AS_E_MALFORMED;
+    int64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        int d = -1;
+        char c = s[i];
+        if      (c >= '0' && c <= '9')              d = c - '0';
+        else if (base == 16 && c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (base == 16 && c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else return AS_E_MALFORMED;
+        if (d >= base) return AS_E_MALFORMED;
+        v = v * base + d;
+    }
+    *out = sign * v;
+    return AS_OK;
+}
+
+/* Parse `$<num>`. */
+static int parseImmOperand(const char *s, size_t n, Oprnd *out) {
+    n = trimWS(&s, n);
+    if (n < 2 || s[0] != '$') return AS_E_MALFORMED;
+    s++; n--;
+    n = trimWS(&s, n);
+    int64_t v = 0;
+    int rc = parseSignedInt(s, n, &v);
+    if (rc != AS_OK) return rc;
+    out->kind = OPR_IMM;
+    out->imm  = v;
+    return AS_OK;
+}
+
+/* Parse `[disp](%base)` or `label(%rip)`. The disp portion is
+ * optional (defaults to 0). For the RIP form, the label part is
+ * not stored — the encoder emits a zero-filled rel32 (relocation
+ * site) which matches GAS's pre-link bytes. */
+static int parseMemOperand(const char *s, size_t n, Oprnd *out) {
+    n = trimWS(&s, n);
+    /* Locate '(' that opens the base-register expression. */
+    size_t paren = 0;
+    while (paren < n && s[paren] != '(') paren++;
+    if (paren == n) return AS_E_MALFORMED;
+    /* Locate matching ')'. C-2 has no nested parens in operands. */
+    size_t close = paren + 1;
+    while (close < n && s[close] != ')') close++;
+    if (close == n) return AS_E_MALFORMED;
+    /* Anything after ')' must be whitespace only. */
+    for (size_t i = close + 1; i < n; i++) {
+        if (!myWS(s[i])) return AS_E_MALFORMED;
+    }
+    /* Inside parens: %name. */
+    const char *inner = s + paren + 1;
+    size_t inner_len = close - paren - 1;
+    inner_len = trimWS(&inner, inner_len);
+    if (inner_len < 2 || inner[0] != '%') return AS_E_MALFORMED;
+    /* %rip is special — RIP-relative addressing. */
+    if (inner_len == 4 &&
+        inner[1] == 'r' && inner[2] == 'i' && inner[3] == 'p') {
+        out->kind = OPR_MEM_RIP;
+        return AS_OK;
+    }
+    int rn = regLookup64(inner + 1, inner_len - 1);
+    if (rn < 0) return AS_E_MALFORMED;
+    /* Disp portion: empty means 0; otherwise a signed integer. */
+    int64_t disp = 0;
+    const char *dp = s;
+    size_t dlen = paren;
+    while (dlen > 0 && myWS(dp[dlen - 1])) dlen--;
+    dlen = trimWS(&dp, dlen);
+    if (dlen > 0) {
+        int rc = parseSignedInt(dp, dlen, &disp);
+        if (rc != AS_OK) return rc;
+    }
+    out->kind = OPR_MEM;
+    out->reg  = rn;
+    out->disp = disp;
+    return AS_OK;
+}
+
+/* Top-level operand parser — dispatches by first non-WS character. */
+static int parseOperand(const char *s, size_t n, Oprnd *out) {
+    n = trimWS(&s, n);
+    if (n == 0)         return AS_E_MALFORMED;
+    if (s[0] == '%')    return parseRegOperand(s, n, out);
+    if (s[0] == '$')    return parseImmOperand(s, n, out);
+    return parseMemOperand(s, n, out);
+}
+
+/* Split operand region at the first top-level comma (not inside
+ * parens) and parse both sides. */
+static int parseTwoOperands(const char *s, size_t n, Oprnd *a, Oprnd *b) {
+    int    depth = 0;
+    size_t comma = (size_t)-1;
+    for (size_t i = 0; i < n; i++) {
+        if      (s[i] == '(') depth++;
+        else if (s[i] == ')') depth--;
+        else if (s[i] == ',' && depth == 0) { comma = i; break; }
+    }
+    if (comma == (size_t)-1) return AS_E_MALFORMED;
+    int rc = parseOperand(s, comma, a);
+    if (rc != AS_OK) return rc;
+    return parseOperand(s + comma + 1, n - comma - 1, b);
+}
+
+/* --- Memory-operand encoding (ModR/M + SIB + disp) ----------------------- */
+
+/* Emit the ModR/M (and SIB and disp bytes) for a memory operand
+ * with a given reg-field value (the "r" half of ModR/M, lower 3 bits
+ * of the encoder's reg/opcode-extension argument).
+ *
+ * Special cases (Intel SDM Vol. 2 §2.1.5):
+ *   - rbp(5) / r13(13) (rm field == 5) cannot use mod=00 — that
+ *     encoding means RIP-relative. Force mod=01 disp8=0 if disp==0.
+ *   - rsp(4) / r12(12) (rm field == 4) require a SIB byte, because
+ *     rm=100 with mod≠11 means "SIB follows". We emit SIB = (scale=0,
+ *     index=4 [none], base=base&7).
+ *   - OPR_MEM_RIP: mod=00, rm=101, rel32=0 (relocation will fill it). */
+static int emitMem(OutBuf *o, int reg_field, const Oprnd *mem) {
+    if (mem->kind == OPR_MEM_RIP) {
+        outByte(o, ((reg_field & 7) << 3) | 5);
+        outByte(o, 0); outByte(o, 0); outByte(o, 0); outByte(o, 0);
+        return o->ok ? AS_OK : AS_E_NOSPACE;
+    }
+    int     base = mem->reg;
+    int64_t disp = mem->disp;
+    int     mod;
+    int     disp_bytes;
+    if (disp == 0 && (base & 7) != 5) {
+        mod = 0; disp_bytes = 0;
+    } else if (disp >= -128 && disp <= 127) {
+        mod = 1; disp_bytes = 1;
+    } else if (disp >= INT32_MIN && disp <= INT32_MAX) {
+        mod = 2; disp_bytes = 4;
+    } else {
+        return AS_E_MALFORMED;
+    }
+    if ((base & 7) == 4) {
+        /* SIB required for rm-field == 4. */
+        outByte(o, (mod << 6) | ((reg_field & 7) << 3) | 4);
+        outByte(o, (0 << 6) | (4 << 3) | (base & 7));
+    } else {
+        outByte(o, (mod << 6) | ((reg_field & 7) << 3) | (base & 7));
+    }
+    if (disp_bytes == 1) {
+        outByte(o, (uint8_t)(disp & 0xFF));
+    } else if (disp_bytes == 4) {
+        outByte(o, (uint8_t)(disp        & 0xFF));
+        outByte(o, (uint8_t)((disp >> 8) & 0xFF));
+        outByte(o, (uint8_t)((disp >> 16) & 0xFF));
+        outByte(o, (uint8_t)((disp >> 24) & 0xFF));
+    }
+    return o->ok ? AS_OK : AS_E_NOSPACE;
 }
 
 /* --- Encoders ------------------------------------------------------------ */
@@ -167,6 +335,87 @@ static int encPop(const char *opers, size_t n, OutBuf *out) {
     return out->ok ? AS_OK : AS_E_NOSPACE;
 }
 
+/* movq — four forms in the corpus:
+ *   reg, reg     opcode 89  ModR/M(11, src, dst)
+ *   mem, reg     opcode 8B  ModR/M(mod, dst, base)  [+SIB+disp]
+ *   reg, mem     opcode 89  ModR/M(mod, src, base)  [+SIB+disp]
+ *   imm32, reg   opcode C7 /0  ModR/M(11, 0, dst)  imm32 sign-extended
+ *
+ * All forms emit REX.W (0x48-base). The reg-reg case takes REX.R for
+ * a high src and REX.B for a high dst; the mem cases take REX.R for
+ * a high reg-side and REX.B for a high base. The imm-reg case takes
+ * REX.B for a high dst.
+ *
+ * Full 64-bit immediates that don't fit signed-32 would route to
+ * 0xB8+rn imm64; the corpus has none and the encoder returns
+ * AS_E_UNKNOWN to surface the gap if a future input has one. */
+static int encMovq(const char *opers, size_t n, OutBuf *out) {
+    Oprnd a, b;
+    int rc = parseTwoOperands(opers, n, &a, &b);
+    if (rc != AS_OK) return rc;
+
+    if (a.kind == OPR_REG && b.kind == OPR_REG) {
+        uint8_t rex = REX_BASE | REX_W;
+        if (a.reg >= 8) rex |= REX_R;
+        if (b.reg >= 8) rex |= REX_B;
+        outByte(out, rex);
+        outByte(out, 0x89);
+        outByte(out, (3 << 6) | ((a.reg & 7) << 3) | (b.reg & 7));
+        return out->ok ? AS_OK : AS_E_NOSPACE;
+    }
+    if ((a.kind == OPR_MEM || a.kind == OPR_MEM_RIP) && b.kind == OPR_REG) {
+        uint8_t rex = REX_BASE | REX_W;
+        if (b.reg >= 8) rex |= REX_R;
+        if (a.kind == OPR_MEM && a.reg >= 8) rex |= REX_B;
+        outByte(out, rex);
+        outByte(out, 0x8B);
+        return emitMem(out, b.reg, &a);
+    }
+    if (a.kind == OPR_REG && (b.kind == OPR_MEM || b.kind == OPR_MEM_RIP)) {
+        uint8_t rex = REX_BASE | REX_W;
+        if (a.reg >= 8) rex |= REX_R;
+        if (b.kind == OPR_MEM && b.reg >= 8) rex |= REX_B;
+        outByte(out, rex);
+        outByte(out, 0x89);
+        return emitMem(out, a.reg, &b);
+    }
+    if (a.kind == OPR_IMM && b.kind == OPR_REG) {
+        if (a.imm < INT32_MIN || a.imm > INT32_MAX) return AS_E_UNKNOWN;
+        uint8_t rex = REX_BASE | REX_W;
+        if (b.reg >= 8) rex |= REX_B;
+        outByte(out, rex);
+        outByte(out, 0xC7);
+        outByte(out, (3 << 6) | (0 << 3) | (b.reg & 7));
+        int32_t v = (int32_t)a.imm;
+        outByte(out, (uint8_t)(v        & 0xFF));
+        outByte(out, (uint8_t)((v >> 8) & 0xFF));
+        outByte(out, (uint8_t)((v >> 16) & 0xFF));
+        outByte(out, (uint8_t)((v >> 24) & 0xFF));
+        return out->ok ? AS_OK : AS_E_NOSPACE;
+    }
+    return AS_E_UNKNOWN;
+}
+
+/* leaq — two forms in the corpus:
+ *   disp(%base), reg     opcode 8D  ModR/M(mod, dst, base) [+SIB+disp]
+ *   label(%rip), reg     opcode 8D  ModR/M(00, dst, 5)     rel32=0
+ *
+ * REX.W always; REX.R for a high dst; REX.B for a high base. */
+static int encLeaq(const char *opers, size_t n, OutBuf *out) {
+    Oprnd a, b;
+    int rc = parseTwoOperands(opers, n, &a, &b);
+    if (rc != AS_OK) return rc;
+    if (b.kind != OPR_REG) return AS_E_MALFORMED;
+    if (a.kind != OPR_MEM && a.kind != OPR_MEM_RIP) return AS_E_MALFORMED;
+
+    uint8_t rex = REX_BASE | REX_W;
+    if (b.reg >= 8) rex |= REX_R;
+    if (a.kind == OPR_MEM && a.reg >= 8) rex |= REX_B;
+    outByte(out, rex);
+    outByte(out, 0x8D);
+    return emitMem(out, b.reg, &a);
+}
+
 /* --- Dispatch ----------------------------------------------------------- */
 
 typedef int (*EncoderFn)(const char *opers, size_t n, OutBuf *out);
@@ -181,6 +430,8 @@ static const Dispatch kDispatch[] = {
     { "leave", encLeave },
     { "push",  encPush  },
     { "pop",   encPop   },
+    { "movq",  encMovq  },
+    { "leaq",  encLeaq  },
 };
 
 /* Re-classify here so asm_encode is self-contained — the harness's
