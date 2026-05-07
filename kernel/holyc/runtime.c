@@ -4,6 +4,7 @@
 
 #include "runtime.h"
 #include "arch/x86_64/serial.h"
+#include "lib/format.h"
 #include "mm/slab.h"
 
 /* See runtime.h for the contract. */
@@ -99,6 +100,53 @@ char *strdup(const char *s)
 	}
 	memcpy(p, s, n);
 	return p;
+}
+
+int memcmp(const void *a, const void *b, size_t n)
+{
+	const unsigned char *p = a;
+	const unsigned char *q = b;
+	for (size_t i = 0; i < n; i++) {
+		if (p[i] != q[i]) {
+			return (int)p[i] - (int)q[i];
+		}
+	}
+	return 0;
+}
+
+/* strerror returns a stub string. Vendored holyc-lang only calls
+ * strerror in error-reporting paths that do not run in the M3-B
+ * kernel-resident subset (no file IO, no fork/exec, no networking).
+ * If a real caller hits this, the returned string makes the stub
+ * visible in the output rather than pretending to full POSIX. */
+char *strerror(int errnum)
+{
+	static char buf[] = "(holyc runtime: strerror stub)";
+	(void)errnum;
+	return buf;
+}
+
+/* errno storage. Single global; no per-thread state — the kernel is
+ * single-threaded for M3 (Patrol scheduling lands at M4). The shim
+ * header in kernel/holyc/include/errno.h defines `errno` as a macro
+ * for this symbol. */
+int holyc_runtime_errno = 0;
+
+/* Body of the assert() macro from kernel/holyc/include/assert.h.
+ * Routes a failed expression through the same halt path as the
+ * runtime's other panics, with the source location in the message. */
+_Noreturn void __holyc_assert_fail(const char *expr, const char *file, int line)
+{
+	serial_puts("Assertion failed: ");
+	serial_puts(expr);
+	serial_puts(" at ");
+	serial_puts(file);
+	serial_puts(":");
+	format_dec((uint64_t)line);
+	serial_puts("\n");
+	for (;;) {
+		__asm__ volatile ("cli; hlt");
+	}
 }
 
 /* --- weak-symbol allocator shim -------------------------------------- */
@@ -336,11 +384,16 @@ void holyc_runtime_self_test(void)
 	}
 
 	/* string ops */
-	if (strlen("Field") != 5)         runtime_halt("strlen");
-	if (strcmp("abc", "abc") != 0)    runtime_halt("strcmp eq");
-	if (strcmp("abc", "abd") >= 0)    runtime_halt("strcmp lt");
-	if (strchr("abc", 'b') == NULL)   runtime_halt("strchr hit");
-	if (strchr("abc", 'z') != NULL)   runtime_halt("strchr miss");
+	if (strlen("Field") != 5)              runtime_halt("strlen");
+	if (strcmp("abc", "abc") != 0)         runtime_halt("strcmp eq");
+	if (strcmp("abc", "abd") >= 0)         runtime_halt("strcmp lt");
+	if (strchr("abc", 'b') == NULL)        runtime_halt("strchr hit");
+	if (strchr("abc", 'z') != NULL)        runtime_halt("strchr miss");
+	if (memcmp("abc", "abc", 3) != 0)      runtime_halt("memcmp eq");
+	if (memcmp("abc", "abd", 3) >= 0)      runtime_halt("memcmp lt");
+	if (memcmp("abd", "abc", 3) <= 0)      runtime_halt("memcmp gt");
+	if (memcmp("abc", "abd", 2) != 0)      runtime_halt("memcmp prefix");
+	if (strerror(22) == NULL)              runtime_halt("strerror");
 
 	/* snprintf format ladder — exercises %d, %x with width and
 	 * 0-pad, %s, %c, and the cap=0 path (returns length without
