@@ -59,6 +59,23 @@ HOLYC_C_SRCS := \
 
 HOLYC_OBJS := $(patsubst $(HOLYC_SRC)/%.c,$(HOLYC_BUILD)/%.o,$(HOLYC_C_SRCS))
 
+# Host AT&T-corpus capture tool. Links the host hcc object set MINUS
+# main.o (single `main` symbol) against holyc/tools/dump-asm.c. The
+# resulting binary takes (input.HC, output.s) and writes the AoStr
+# returned by compileToAsm directly. Used by the `corpus` target
+# below; lives behind ADR-0003 §2.
+HOLYC_OBJS_NOMAIN := $(filter-out $(HOLYC_BUILD)/main.o,$(HOLYC_OBJS))
+HOLYC_DUMP_ASM_SRC := $(HOLYC_DIR)/tools/dump-asm.c
+HOLYC_DUMP_ASM     := $(HOLYC_BUILD)/dump-asm
+
+# Corpus inputs and the .s files they produce. Inputs grow as later
+# step-4 sub-rounds need new instruction-form coverage; per ADR-0003
+# §2, each input is a checked-in .HC file the host hcc compiles
+# successfully today.
+CORPUS_DIR    := $(HOLYC_DIR)/tests/corpus
+CORPUS_INPUTS := $(HOLYC_DIR)/bug-tests/Bug_171.HC
+CORPUS_OUTS   := $(patsubst $(HOLYC_DIR)/bug-tests/%.HC,$(CORPUS_DIR)/%.s,$(CORPUS_INPUTS))
+
 # HCC_GIT_HASH stamps the binary with a Field OS commit identifier so
 # `hcc --version` reports which checkout produced it.
 HOLYC_GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -101,3 +118,28 @@ holyc-host-smoke: $(HOLYC_HCC) $(HOLYC_PRELUDE)
 
 holyc-host-clean:
 	rm -rf $(HOLYC_BUILD) $(HOLYC_HCC)
+
+# --- Corpus capture (ADR-0003 §2) -----------------------------------------
+#
+# `make corpus` rebuilds the AT&T-text corpus under holyc/tests/corpus/
+# from the inputs in CORPUS_INPUTS. The .s files are checked in; the
+# rule's job is to keep them honest against the pinned holyc-lang and
+# the in-tree x86.c. Diff before bumping holyc/VERSION.
+
+$(HOLYC_DUMP_ASM): $(HOLYC_OBJS_NOMAIN) $(HOLYC_DUMP_ASM_SRC)
+	@mkdir -p $(@D)
+	$(HOLYC_CC) $(HOLYC_CFLAGS) -I$(HOLYC_SRC) \
+	    $(HOLYC_DUMP_ASM_SRC) $(HOLYC_OBJS_NOMAIN) -lm -o $@
+
+$(CORPUS_DIR)/%.s: $(HOLYC_DIR)/bug-tests/%.HC $(HOLYC_DUMP_ASM) $(HOLYC_PRELUDE)
+	@mkdir -p $(@D)
+	$(HOLYC_DUMP_ASM) $< $@
+
+.PHONY: corpus corpus-clean
+
+corpus: $(CORPUS_OUTS)
+	@count=$$(ls $(CORPUS_DIR)/*.s 2>/dev/null | wc -l | tr -d ' ') && \
+	  echo "==> $(CORPUS_DIR): $$count file(s)"
+
+corpus-clean:
+	rm -rf $(CORPUS_DIR) $(HOLYC_DUMP_ASM)

@@ -5,6 +5,8 @@
 *.o
 *.db
 *.s
+# Field-OS corpus capture (ADR-0003 §2). Checked in, not build scratch.
+!tests/corpus/*.s
 a.out
 mcc
 hcc
