@@ -27,4 +27,13 @@ int holyc_eval(const char *src);
  * unexpected return so CI smoke catches regressions. */
 void holyc_eval_self_test(void);
 
+/* Boot probe of the kernel-resident hcc subset (M3-B candidate
+ * C-minimal). Allocates an AoStr via vendored holyc/src/aostr.c,
+ * concatenates HCC_VERSION + " linked", prints to serial. Witnesses
+ * that the holyc subset .o files are observably present in the
+ * running kernel ELF and that the runtime + slab chain works
+ * end-to-end at runtime. Prints "Subset: hcc <version> linked... OK"
+ * on success; halts the kernel on any unexpected return. */
+void holyc_subset_self_test(void);
+
 #endif

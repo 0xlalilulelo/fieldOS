@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "limine.h"
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/framebuffer.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
@@ -78,6 +79,7 @@ void kmain(void)
 	serial_init();
 	gdt_init();
 	idt_init();
+	cpu_enable_sse();
 	pmm_init();
 	vmm_init();
 	slab_init();
@@ -90,6 +92,7 @@ void kmain(void)
 	slab_self_test();
 	holyc_jit_self_test();
 	holyc_runtime_self_test();
+	holyc_subset_self_test();
 	holyc_eval_self_test();
 	serial_puts("Field OS: stage 2 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");

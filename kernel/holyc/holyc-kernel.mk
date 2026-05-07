@@ -1,43 +1,24 @@
 # kernel/holyc/holyc-kernel.mk
 #
-# Build rules for the kernel-resident subset of the vendored
-# holyc-lang compiler. Compiled but NOT linked into the kernel ELF
-# yet — that integration is M3-B candidate C (the holyc_eval entry
-# point). This file's job is pure discovery per ADR-0001 §3 step 3:
-# "drives the strip plan against measured ground."
+# Build rules and discovery targets for the kernel-resident subset
+# of the vendored holyc-lang compiler. As of M3-B candidate C the
+# .o files defined here ARE linked into the kernel ELF (kernel.mk
+# extends $(KERNEL_ELF)'s prereqs and link command with
+# $(HOLYC_KERNEL_OBJS)); the subset-link discovery target below stays
+# useful for surfacing residual undefineds when the subset list grows.
 #
-# Vendored sources are compiled with the cross-GCC under
-# -ffreestanding -nostdlib against the libc-shaped shim headers in
-# kernel/holyc/include/ and the freestanding runtime in
-# kernel/holyc/runtime.{c,h}. The .o files surface their gaps as
-# undefined symbols; `make holyc-kernel-subset-syms` reports them
-# so the next commit knows what to add to the runtime.
+# The variable list (HOLYC_KERNEL_BUILD, HOLYC_KERNEL_SRCS,
+# HOLYC_KERNEL_OBJS) lives in kernel/kernel.mk because GNU Make
+# expands the $(KERNEL_ELF) rule's prerequisites at parse time, and
+# that file is included before this one. The build rules and the
+# subset-only flags that diverge from KERNEL_CFLAGS still live here.
 #
-# Why a separate .mk: the kernel ELF and the holyc kernel-resident
-# subset have different compile flags (-w on the vendored subset to
-# silence upstream warnings we do not control) and different output
-# directories (build/holyc-kernel/ vs kernel/build/). Mixing them in
-# kernel.mk would obscure the boundary that's load-bearing for
-# ADR-0001 §3 step 3's discovery framing.
-
-HOLYC_KERNEL_BUILD := build/holyc-kernel
-
-# Witness sources for the in-kernel hcc subset. M3-B candidate B
-# started at one file (aostr.c) at 95e8012 to exercise runtime.c's
-# weak malloc/free shim; B-followup-2 (this set) expands to the four
-# files that cctrl.c reaches for transitively — ast.c, arena.c, and
-# containers.c — so the partial-link target below can produce a
-# single relocatable .o whose residual undefined-symbol set is
-# what candidate C must close before the kernel ELF can link the
-# subset.
-HOLYC_KERNEL_SRCS := \
-    holyc/src/aostr.c \
-    holyc/src/ast.c \
-    holyc/src/arena.c \
-    holyc/src/containers.c
-
-HOLYC_KERNEL_OBJS := \
-    $(patsubst holyc/src/%.c,$(HOLYC_KERNEL_BUILD)/%.o,$(HOLYC_KERNEL_SRCS))
+# Why a separate .mk: the holyc subset compiles with -w (vendored
+# tree owned by audit, not by Field OS code style) and with SSE
+# enabled (aostr.c reads variadic doubles via xmm regs); the kernel
+# ELF compiles with -mno-sse -mno-mmx -mno-sse2. ADR-0002 documents
+# the resulting xmm save/restore obligation that lands at M4
+# alongside the first `sti`.
 
 # Build flags mirror KERNEL_CFLAGS for the parts that affect the ABI
 # (-mcmodel, no-red-zone, freestanding) so the .o files can
@@ -66,6 +47,7 @@ HOLYC_KERNEL_CFLAGS := \
     -O2 -g \
     -std=gnu11 \
     -w \
+    -ffunction-sections -fdata-sections \
     -I kernel/holyc/include \
     -I kernel \
     -I holyc/src
