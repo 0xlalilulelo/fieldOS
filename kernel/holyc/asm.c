@@ -12,7 +12,7 @@
  *   C-3: subq imm-reg, test reg-reg, je rel32, call      (+ 8 inst)
  *   D-1: .byte / .short / .word / .long / .quad          (1/6 dd)
  *   D-2: .asciz / .ascii / .string                       (+4 dd → 5/6)
- *   D-3: .double / .float                                (later)
+ *   D-3: .double / .float                                (+1 dd → 6/6)
  *
  * No libc dependency. Compiles under both the host build (via the
  * asm-test rule) and the kernel build (-ffreestanding -mno-sse).
@@ -622,6 +622,164 @@ static int encAsciz(const char *o, size_t n, OutBuf *b) {
     return b->ok ? AS_OK : AS_E_NOSPACE;
 }
 
+/* Decimal-float operand parser. Grammar:
+ *
+ *   [+-]? int-digits ('.' frac-digits)? ([eE] [+-]? exp-digits)?
+ *
+ * The encoder performs the parse with integer arithmetic only — no
+ * double / float in this translation unit, since asm.c also compiles
+ * under the kernel's -mno-mmx -mno-sse -mno-sse2 flags (kernel.mk).
+ * Correctly-rounded fractional-decimal-to-binary conversion needs
+ * extended-precision integer math (~hundreds of lines for a real
+ * strtod); the corpus has only ".double 1.0", and AS_E_UNKNOWN is
+ * the right answer for anything that would require rounding.
+ *
+ * The parser succeeds iff the literal denotes an exact non-negative
+ * integer after exp-folding (e.g. "1.0", "1.", "10e-1", "1e2" → 100).
+ * Genuine fractions ("0.5", "0.1") and out-of-range integers return
+ * AS_E_UNKNOWN. The integer is then handed to the IEEE-754 bit-pattern
+ * builder, which is exact for |v| < 2^53 (double) or < 2^24 (float).
+ *
+ * Hex floats (0x1.8p3), NaN, Inf, and full GAS float syntax are
+ * out of scope for D-3; the corpus does not exercise them. They
+ * fall through to AS_E_MALFORMED today — a future input needing
+ * them gains a typed branch on first sight. */
+static int parseDecimalOperand(const char *s, size_t n,
+                               int *sign_out, uint64_t *value_out) {
+    n = trimWS(&s, n);
+    if (n == 0) return AS_E_MALFORMED;
+
+    int sign = 1;
+    if (s[0] == '-')      { sign = -1; s++; n--; }
+    else if (s[0] == '+') {             s++; n--; }
+    if (n == 0) return AS_E_MALFORMED;
+
+    size_t i = 0;
+    size_t int_start = i;
+    while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+    size_t int_end = i;
+
+    size_t frac_start = 0, frac_end = 0;
+    if (i < n && s[i] == '.') {
+        i++;
+        frac_start = i;
+        while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+        frac_end = i;
+    }
+
+    if (int_start == int_end && frac_start == frac_end)
+        return AS_E_MALFORMED;
+
+    int exp10 = 0;
+    if (i < n && (s[i] == 'e' || s[i] == 'E')) {
+        i++;
+        int exp_sign = 1;
+        if      (i < n && s[i] == '-') { exp_sign = -1; i++; }
+        else if (i < n && s[i] == '+') {                 i++; }
+        size_t exp_start = i;
+        while (i < n && s[i] >= '0' && s[i] <= '9') {
+            exp10 = exp10 * 10 + (s[i] - '0');
+            if (exp10 > 1000) return AS_E_UNKNOWN;
+            i++;
+        }
+        if (i == exp_start) return AS_E_MALFORMED;
+        exp10 *= exp_sign;
+    }
+
+    if (i != n) return AS_E_MALFORMED;
+
+    /* Strip trailing zeros from the fractional part. Anything left
+     * is a genuine fractional digit; folded into exp10 below. */
+    while (frac_end > frac_start && s[frac_end - 1] == '0') frac_end--;
+    int frac_digits = (int)(frac_end - frac_start);
+    int net_exp = exp10 - frac_digits;
+
+    /* Combine surviving digits into mantissa. */
+    uint64_t m = 0;
+    const uint64_t MAX_DIV10 = (uint64_t)0xFFFFFFFFFFFFFFFFULL / 10;
+    for (size_t j = int_start; j < int_end; j++) {
+        if (m > MAX_DIV10) return AS_E_UNKNOWN;
+        m = m * 10 + (uint64_t)(s[j] - '0');
+    }
+    for (size_t j = frac_start; j < frac_end; j++) {
+        if (m > MAX_DIV10) return AS_E_UNKNOWN;
+        m = m * 10 + (uint64_t)(s[j] - '0');
+    }
+
+    /* Strip trailing zeros from mantissa, raising net_exp. */
+    while (m != 0 && m % 10 == 0) { m /= 10; net_exp++; }
+
+    /* Accept only the integer reduction: net_exp >= 0 and the
+     * multiply-out fits in uint64_t. */
+    if (net_exp < 0) return AS_E_UNKNOWN;
+    while (net_exp > 0) {
+        if (m > MAX_DIV10) return AS_E_UNKNOWN;
+        m *= 10;
+        net_exp--;
+    }
+
+    *sign_out  = sign;
+    *value_out = m;
+    return AS_OK;
+}
+
+/* IEEE-754 binary64 bit-pattern of an exact integer value (sign * v).
+ * Exactly representable iff v < 2^53. Caller emits the 8 LE bytes. */
+static int encDouble(const char *o, size_t n, OutBuf *b) {
+    int sign;
+    uint64_t v;
+    int rc = parseDecimalOperand(o, n, &sign, &v);
+    if (rc != AS_OK) return rc;
+    if (v >= (1ULL << 53)) return AS_E_UNKNOWN;
+
+    uint64_t bits;
+    if (v == 0) {
+        bits = (sign < 0) ? (1ULL << 63) : 0;
+    } else {
+        int k = 0;
+        uint64_t tmp = v;
+        while (tmp > 1) { tmp >>= 1; k++; }
+        uint64_t exp_field = (uint64_t)(k + 1023);
+        uint64_t fractional = v - (1ULL << k);
+        uint64_t mantissa = fractional << (52 - k);
+        bits = (((sign < 0) ? 1ULL : 0ULL) << 63)
+             | (exp_field << 52)
+             | mantissa;
+    }
+    for (int i = 0; i < 8; i++) {
+        outByte(b, (uint8_t)((bits >> (i * 8)) & 0xFF));
+    }
+    return b->ok ? AS_OK : AS_E_NOSPACE;
+}
+
+/* IEEE-754 binary32 bit-pattern. Exactly representable iff v < 2^24. */
+static int encFloat(const char *o, size_t n, OutBuf *b) {
+    int sign;
+    uint64_t v;
+    int rc = parseDecimalOperand(o, n, &sign, &v);
+    if (rc != AS_OK) return rc;
+    if (v >= (1ULL << 24)) return AS_E_UNKNOWN;
+
+    uint32_t bits;
+    if (v == 0) {
+        bits = (sign < 0) ? 0x80000000U : 0U;
+    } else {
+        int k = 0;
+        uint64_t tmp = v;
+        while (tmp > 1) { tmp >>= 1; k++; }
+        uint32_t exp_field = (uint32_t)(k + 127);
+        uint64_t fractional = v - (1ULL << k);
+        uint32_t mantissa = (uint32_t)(fractional << (23 - k));
+        bits = (((sign < 0) ? 1U : 0U) << 31)
+             | (exp_field << 23)
+             | mantissa;
+    }
+    for (int i = 0; i < 4; i++) {
+        outByte(b, (uint8_t)((bits >> (i * 8)) & 0xFF));
+    }
+    return b->ok ? AS_OK : AS_E_NOSPACE;
+}
+
 /* leaq — two forms in the corpus:
  *   disp(%base), reg     opcode 8D  ModR/M(mod, dst, base) [+SIB+disp]
  *   label(%rip), reg     opcode 8D  ModR/M(00, dst, 5)     rel32=0
@@ -673,6 +831,9 @@ static const Dispatch kDispatch[] = {
     { ".ascii",  encAscii },
     { ".asciz",  encAsciz },
     { ".string", encAsciz },
+    /* Float forms (D-3). */
+    { ".double", encDouble },
+    { ".float",  encFloat  },
 };
 
 /* Names that name themselves as data-emitting. Mirrors the harness's
