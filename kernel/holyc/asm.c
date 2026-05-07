@@ -9,7 +9,7 @@
  * Coverage so far:
  *   C-1: ret, leave, push reg64, pop reg64               (33/63 lines)
  *   C-2: movq (4 forms), leaq (mem-reg, RIP-rel)         (+22 lines)
- *   C-3: subq imm-reg, test reg-reg, je, call rel/indir  (later)
+ *   C-3: subq imm-reg, test reg-reg, je rel32, call      (+ 8 lines)
  *   D:   data directives (.quad, .asciz, .double)        (later)
  *
  * No libc dependency. Compiles under both the host build (via the
@@ -91,17 +91,19 @@ static void outByte(OutBuf *o, uint8_t b) {
 /* --- Operand parsing ----------------------------------------------------- */
 
 typedef enum {
-    OPR_REG,        /* %rax                                */
-    OPR_IMM,        /* $42 / $0x1f / $-8                    */
-    OPR_MEM,        /* disp(%base) — disp may be 0          */
-    OPR_MEM_RIP,    /* label(%rip) — symbol; rel32=0 stays  */
+    OPR_REG,        /* %rax                                  */
+    OPR_IMM,        /* $42 / $0x1f / $-8                     */
+    OPR_MEM,        /* disp(%base) — disp may be 0           */
+    OPR_MEM_RIP,    /* label(%rip) — symbol; rel32=0 stays   */
+    OPR_SYMBOL,     /* bare label (call _printf, je .L4)     */
+    OPR_INDIRECT,   /* *%reg (call *%r11)                    */
 } OprKind;
 
 typedef struct {
     OprKind kind;
-    int     reg;     /* OPR_REG: register; OPR_MEM: base reg */
-    int64_t imm;     /* OPR_IMM                              */
-    int64_t disp;    /* OPR_MEM (zero if absent)             */
+    int     reg;     /* OPR_REG / OPR_INDIRECT / OPR_MEM base */
+    int64_t imm;     /* OPR_IMM                               */
+    int64_t disp;    /* OPR_MEM (zero if absent)              */
 } Oprnd;
 
 /* Trim leading and trailing whitespace; advance *psrc past leading
@@ -224,13 +226,34 @@ static int parseMemOperand(const char *s, size_t n, Oprnd *out) {
     return AS_OK;
 }
 
-/* Top-level operand parser — dispatches by first non-WS character. */
+/* Parse `*%reg` — the indirect form used by `call *%r11`. */
+static int parseIndirectOperand(const char *s, size_t n, Oprnd *out) {
+    n = trimWS(&s, n);
+    if (n < 3 || s[0] != '*' || s[1] != '%') return AS_E_MALFORMED;
+    int rn = regLookup64(s + 2, n - 2);
+    if (rn < 0) return AS_E_MALFORMED;
+    out->kind = OPR_INDIRECT;
+    out->reg  = rn;
+    return AS_OK;
+}
+
+/* Top-level operand parser — dispatches by first non-WS character.
+ * A bare token (no leading sigil and no '(') is taken as a symbol;
+ * the encoder emits a zero-filled rel32 (relocation site) for it,
+ * matching GAS pre-link bytes. */
 static int parseOperand(const char *s, size_t n, Oprnd *out) {
     n = trimWS(&s, n);
     if (n == 0)         return AS_E_MALFORMED;
     if (s[0] == '%')    return parseRegOperand(s, n, out);
     if (s[0] == '$')    return parseImmOperand(s, n, out);
-    return parseMemOperand(s, n, out);
+    if (s[0] == '*')    return parseIndirectOperand(s, n, out);
+
+    /* A '(' anywhere means memory; otherwise treat as a bare symbol. */
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '(') return parseMemOperand(s, n, out);
+    }
+    out->kind = OPR_SYMBOL;
+    return AS_OK;
 }
 
 /* Split operand region at the first top-level comma (not inside
@@ -396,6 +419,94 @@ static int encMovq(const char *opers, size_t n, OutBuf *out) {
     return AS_E_UNKNOWN;
 }
 
+/* subq $imm, %dst — opcode 83 /5 (imm8 sign-extended) or 81 /5
+ * (imm32 sign-extended). REX.W; REX.B for a high dst. GAS picks the
+ * shorter imm8 form whenever the immediate fits in signed-8. */
+static int encSubq(const char *opers, size_t n, OutBuf *out) {
+    Oprnd a, b;
+    int rc = parseTwoOperands(opers, n, &a, &b);
+    if (rc != AS_OK) return rc;
+    if (a.kind != OPR_IMM || b.kind != OPR_REG) return AS_E_UNKNOWN;
+    if (a.imm < INT32_MIN || a.imm > INT32_MAX) return AS_E_UNKNOWN;
+
+    uint8_t rex = REX_BASE | REX_W;
+    if (b.reg >= 8) rex |= REX_B;
+    outByte(out, rex);
+
+    if (a.imm >= -128 && a.imm <= 127) {
+        outByte(out, 0x83);
+        outByte(out, (3 << 6) | (5 << 3) | (b.reg & 7));
+        outByte(out, (uint8_t)(a.imm & 0xFF));
+    } else {
+        outByte(out, 0x81);
+        outByte(out, (3 << 6) | (5 << 3) | (b.reg & 7));
+        int32_t v = (int32_t)a.imm;
+        outByte(out, (uint8_t)(v        & 0xFF));
+        outByte(out, (uint8_t)((v >> 8)  & 0xFF));
+        outByte(out, (uint8_t)((v >> 16) & 0xFF));
+        outByte(out, (uint8_t)((v >> 24) & 0xFF));
+    }
+    return out->ok ? AS_OK : AS_E_NOSPACE;
+}
+
+/* test %src, %dst (reg-reg) — opcode 85 /r. ModR/M.reg=src,
+ * ModR/M.rm=dst. Operand order is symmetric for test (no "real"
+ * destination, just flags); GAS picks this canonical encoding. */
+static int encTest(const char *opers, size_t n, OutBuf *out) {
+    Oprnd a, b;
+    int rc = parseTwoOperands(opers, n, &a, &b);
+    if (rc != AS_OK) return rc;
+    if (a.kind != OPR_REG || b.kind != OPR_REG) return AS_E_UNKNOWN;
+
+    uint8_t rex = REX_BASE | REX_W;
+    if (a.reg >= 8) rex |= REX_R;
+    if (b.reg >= 8) rex |= REX_B;
+    outByte(out, rex);
+    outByte(out, 0x85);
+    outByte(out, (3 << 6) | ((a.reg & 7) << 3) | (b.reg & 7));
+    return out->ok ? AS_OK : AS_E_NOSPACE;
+}
+
+/* je rel32 — long form (0F 84 + rel32). For an undefined symbol
+ * GAS cannot guarantee the target fits in rel8 and emits the long
+ * form; we match unconditionally because the encoder, like GAS at
+ * assemble time, has no way to know the final displacement. The
+ * rel32 placeholder is zero-filled — the relocation belongs to
+ * the linker, not the assembler. */
+static int encJe(const char *opers, size_t n, OutBuf *out) {
+    Oprnd a;
+    int rc = parseOperand(opers, n, &a);
+    if (rc != AS_OK) return rc;
+    if (a.kind != OPR_SYMBOL) return AS_E_UNKNOWN;
+    outByte(out, 0x0F);
+    outByte(out, 0x84);
+    outByte(out, 0); outByte(out, 0); outByte(out, 0); outByte(out, 0);
+    return out->ok ? AS_OK : AS_E_NOSPACE;
+}
+
+/* call symbol      — opcode E8 + rel32, pre-link rel32=0
+ * call *%reg       — opcode FF /2 + ModR/M(11, 2, rn), REX.B if rn>=8
+ *
+ * Default operand size for call in 64-bit mode is 64; no REX.W. */
+static int encCall(const char *opers, size_t n, OutBuf *out) {
+    Oprnd a;
+    int rc = parseOperand(opers, n, &a);
+    if (rc != AS_OK) return rc;
+
+    if (a.kind == OPR_SYMBOL) {
+        outByte(out, 0xE8);
+        outByte(out, 0); outByte(out, 0); outByte(out, 0); outByte(out, 0);
+        return out->ok ? AS_OK : AS_E_NOSPACE;
+    }
+    if (a.kind == OPR_INDIRECT) {
+        if (a.reg >= 8) outByte(out, REX_BASE | REX_B);
+        outByte(out, 0xFF);
+        outByte(out, (3 << 6) | (2 << 3) | (a.reg & 7));
+        return out->ok ? AS_OK : AS_E_NOSPACE;
+    }
+    return AS_E_UNKNOWN;
+}
+
 /* leaq — two forms in the corpus:
  *   disp(%base), reg     opcode 8D  ModR/M(mod, dst, base) [+SIB+disp]
  *   label(%rip), reg     opcode 8D  ModR/M(00, dst, 5)     rel32=0
@@ -432,6 +543,10 @@ static const Dispatch kDispatch[] = {
     { "pop",   encPop   },
     { "movq",  encMovq  },
     { "leaq",  encLeaq  },
+    { "subq",  encSubq  },
+    { "test",  encTest  },
+    { "je",    encJe    },
+    { "call",  encCall  },
 };
 
 /* Re-classify here so asm_encode is self-contained — the harness's
