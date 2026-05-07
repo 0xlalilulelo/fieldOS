@@ -7,6 +7,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
 #include "holyc/jit.h"
+#include "holyc/runtime.h"
 #include "mm/pmm.h"
 #include "mm/slab.h"
 #include "mm/vmm.h"
@@ -86,6 +87,7 @@ void kmain(void)
 	vmm_self_test();
 	slab_self_test();
 	holyc_jit_self_test();
+	holyc_runtime_self_test();
 	serial_puts("Field OS: stage 2 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();

@@ -14,6 +14,7 @@ KERNEL_C_SRCS := \
     kernel/arch/x86_64/idt.c \
     kernel/arch/x86_64/serial.c \
     kernel/holyc/jit.c \
+    kernel/holyc/runtime.c \
     kernel/lib/format.c \
     kernel/mm/pmm.c \
     kernel/mm/slab.c \
