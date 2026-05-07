@@ -11,7 +11,7 @@
  *   C-2: movq (4 forms), leaq (mem-reg, RIP-rel)         (+22 inst)
  *   C-3: subq imm-reg, test reg-reg, je rel32, call      (+ 8 inst)
  *   D-1: .byte / .short / .word / .long / .quad          (1/6 dd)
- *   D-2: .asciz / .ascii / .string                       (later)
+ *   D-2: .asciz / .ascii / .string                       (+4 dd → 5/6)
  *   D-3: .double / .float                                (later)
  *
  * No libc dependency. Compiles under both the host build (via the
@@ -538,6 +538,90 @@ static int encShort(const char *o, size_t n, OutBuf *b) { return encWidth(o, n, 
 static int encLong (const char *o, size_t n, OutBuf *b) { return encWidth(o, n, b, 4); }
 static int encQuad (const char *o, size_t n, OutBuf *b) { return encWidth(o, n, b, 8); }
 
+/* String-operand parser shared by .ascii / .asciz / .string. The
+ * grammar is a single double-quoted run; the corpus has no
+ * comma-separated multi-string forms. Escape sequences honoured:
+ *
+ *   \n  0x0A     \\  0x5C     \0  0x00
+ *   \r  0x0D     \"  0x22     \xHH (1-2 hex digits)
+ *   \t  0x09
+ *
+ * GAS additionally accepts \b \f \v and full octal escapes (\NNN).
+ * Out-of-corpus inputs that use those forms will hit AS_E_MALFORMED
+ * — a coverage gap surfaced loudly, not a silent miscompile.
+ *
+ * Note: \0 here is exactly one NUL byte, not the start of a 3-digit
+ * octal escape. GAS treats \012 as octal-12 (a newline). The corpus
+ * has neither form, so we keep the simpler reading. */
+static int parseStringOperand(const char *s, size_t n, OutBuf *out) {
+    n = trimWS(&s, n);
+    if (n < 2 || s[0] != '"') return AS_E_MALFORMED;
+    s++; n--;
+    /* Find closing quote, skipping over backslash-escapes. */
+    size_t end = 0;
+    while (end < n) {
+        if (s[end] == '\\' && end + 1 < n) { end += 2; continue; }
+        if (s[end] == '"') break;
+        end++;
+    }
+    if (end >= n || s[end] != '"') return AS_E_MALFORMED;
+    /* Anything after the closing quote must be whitespace. */
+    for (size_t i = end + 1; i < n; i++) {
+        if (!myWS(s[i])) return AS_E_MALFORMED;
+    }
+    /* Emit decoded bytes. */
+    for (size_t i = 0; i < end; i++) {
+        char c = s[i];
+        if (c != '\\') { outByte(out, (uint8_t)c); continue; }
+        if (i + 1 >= end) return AS_E_MALFORMED;
+        char e = s[++i];
+        switch (e) {
+            case 'n':  outByte(out, 0x0A); break;
+            case 'r':  outByte(out, 0x0D); break;
+            case 't':  outByte(out, 0x09); break;
+            case '\\': outByte(out, '\\'); break;
+            case '"':  outByte(out, '"');  break;
+            case '0':  outByte(out, 0x00); break;
+            case 'x': case 'X': {
+                /* GAS reads up to 2 hex digits after \x. At least one
+                 * is required; AS_E_MALFORMED otherwise. */
+                int got = 0;
+                uint32_t v = 0;
+                while (i + 1 < end && got < 2) {
+                    char h = s[i + 1];
+                    int d = -1;
+                    if      (h >= '0' && h <= '9') d = h - '0';
+                    else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+                    else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+                    else break;
+                    v = v * 16 + (uint32_t)d;
+                    i++;
+                    got++;
+                }
+                if (got == 0) return AS_E_MALFORMED;
+                outByte(out, (uint8_t)v);
+                break;
+            }
+            default: return AS_E_MALFORMED;
+        }
+    }
+    return out->ok ? AS_OK : AS_E_NOSPACE;
+}
+
+/* .ascii — string only, no terminator.
+ * .asciz / .string — string followed by a NUL byte. On x86 GAS, the
+ * two are synonymous; some assemblers (z80, m68k) define .string
+ * differently, but we follow the host GAS the harness compares against. */
+static int encAscii(const char *o, size_t n, OutBuf *b) {
+    return parseStringOperand(o, n, b);
+}
+static int encAsciz(const char *o, size_t n, OutBuf *b) {
+    int rc = parseStringOperand(o, n, b);
+    if (rc != AS_OK) return rc;
+    outByte(b, 0);
+    return b->ok ? AS_OK : AS_E_NOSPACE;
+}
+
 /* leaq — two forms in the corpus:
  *   disp(%base), reg     opcode 8D  ModR/M(mod, dst, base) [+SIB+disp]
  *   label(%rip), reg     opcode 8D  ModR/M(00, dst, 5)     rel32=0
@@ -580,11 +664,15 @@ static const Dispatch kDispatch[] = {
     { "call",  encCall  },
     /* Data directives (D-1). .word is GAS's 2-byte form on x86, a
      * synonym for .short — both route to encShort. */
-    { ".byte",  encByte  },
-    { ".short", encShort },
-    { ".word",  encShort },
-    { ".long",  encLong  },
-    { ".quad",  encQuad  },
+    { ".byte",   encByte  },
+    { ".short",  encShort },
+    { ".word",   encShort },
+    { ".long",   encLong  },
+    { ".quad",   encQuad  },
+    /* String forms (D-2). */
+    { ".ascii",  encAscii },
+    { ".asciz",  encAsciz },
+    { ".string", encAsciz },
 };
 
 /* Names that name themselves as data-emitting. Mirrors the harness's
