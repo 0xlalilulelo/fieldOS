@@ -6,6 +6,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
+#include "holyc/eval.h"
 #include "holyc/jit.h"
 #include "holyc/runtime.h"
 #include "mm/pmm.h"
@@ -81,6 +82,7 @@ void kmain(void)
 	vmm_init();
 	slab_init();
 	holyc_jit_init();
+	holyc_init();
 	fb_init();
 	fb_puts("Hello, Field\n");
 	pmm_print_stats();
@@ -88,6 +90,7 @@ void kmain(void)
 	slab_self_test();
 	holyc_jit_self_test();
 	holyc_runtime_self_test();
+	holyc_eval_self_test();
 	serial_puts("Field OS: stage 2 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();
