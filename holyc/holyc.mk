@@ -143,3 +143,32 @@ corpus: $(CORPUS_OUTS)
 
 corpus-clean:
 	rm -rf $(CORPUS_DIR) $(HOLYC_DUMP_ASM)
+
+# --- Encoder host harness (ADR-0001 §3 step 4, sub-candidate B) -----------
+#
+# Builds kernel/holyc/asm_test.c against kernel/holyc/asm.{h,c} on the
+# host so the harness round-trips quickly during encoder development.
+# The same asm.c is compiled into the kernel ELF via kernel/kernel.mk's
+# KERNEL_C_SRCS — both compiles share the source, and host-only libc
+# usage in asm.c would be caught the moment the kernel build runs.
+#
+# v0 contract: the encoder stub returns AS_E_TODO for every line; the
+# harness reports the baseline (instruction count vs encoded count)
+# and exits 0 unless the encoder returns an unexpected failure code.
+
+HOLYC_ASM_TEST     := $(HOLYC_BUILD)/asm-test
+HOLYC_ASM_TEST_SRC := kernel/holyc/asm_test.c kernel/holyc/asm.c
+HOLYC_ASM_TEST_HDR := kernel/holyc/asm.h
+
+$(HOLYC_ASM_TEST): $(HOLYC_ASM_TEST_SRC) $(HOLYC_ASM_TEST_HDR)
+	@mkdir -p $(@D)
+	$(HOLYC_CC) -O2 -Wall -Wextra -std=c11 -Ikernel/holyc \
+	    $(HOLYC_ASM_TEST_SRC) -o $@
+
+.PHONY: asm-test asm-test-clean
+
+asm-test: $(HOLYC_ASM_TEST) $(CORPUS_OUTS)
+	$(HOLYC_ASM_TEST) $(CORPUS_OUTS)
+
+asm-test-clean:
+	rm -f $(HOLYC_ASM_TEST)

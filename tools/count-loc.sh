@@ -12,6 +12,9 @@
 #   holyc/**           forked compiler (vendored once it lands)
 #   kernel/drivers/**  driver shims (LinuxKPI port, not base)
 #   **/build/          build artifacts
+#   **/*_test.c        host-only test tooling (e.g. kernel/holyc/
+#                      asm_test.c — built host-side via holyc/holyc.mk's
+#                      `asm-test` target, never linked into the kernel)
 #
 # CI's loc-budget job invokes this. Exit codes:
 #   0  under WARN_PCT (default 90%)
@@ -39,6 +42,7 @@ collect() {
 	find "${roots[@]}" \
 		\( -path 'kernel/drivers' -o -path '*/build' \) -prune \
 		-o -type f \
+		! -name '*_test.c' \
 		\( -name '*.c' -o -name '*.h' \
 		   -o -name '*.HC' -o -name '*.HH' \
 		   -o -name '*.S' -o -name '*.ld' \) \
