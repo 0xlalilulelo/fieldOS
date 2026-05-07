@@ -22,13 +22,19 @@
 
 HOLYC_KERNEL_BUILD := build/holyc-kernel
 
-# The witness file. M3-B candidate B starts at one source — aostr.c —
-# because it is the immediate consumer of runtime.c's weak malloc/free
-# shim and therefore the smallest possible test of (A)'s integration.
-# Extending this list happens in follow-up commits as each new file's
-# undefined-symbol set is resolved.
+# Witness sources for the in-kernel hcc subset. M3-B candidate B
+# started at one file (aostr.c) at 95e8012 to exercise runtime.c's
+# weak malloc/free shim; B-followup-2 (this set) expands to the four
+# files that cctrl.c reaches for transitively — ast.c, arena.c, and
+# containers.c — so the partial-link target below can produce a
+# single relocatable .o whose residual undefined-symbol set is
+# what candidate C must close before the kernel ELF can link the
+# subset.
 HOLYC_KERNEL_SRCS := \
-    holyc/src/aostr.c
+    holyc/src/aostr.c \
+    holyc/src/ast.c \
+    holyc/src/arena.c \
+    holyc/src/containers.c
 
 HOLYC_KERNEL_OBJS := \
     $(patsubst holyc/src/%.c,$(HOLYC_KERNEL_BUILD)/%.o,$(HOLYC_KERNEL_SRCS))
@@ -68,7 +74,22 @@ $(HOLYC_KERNEL_BUILD)/%.o: holyc/src/%.c
 	@mkdir -p $(@D)
 	$(CROSS_CC) $(HOLYC_KERNEL_CFLAGS) -c $< -o $@
 
-.PHONY: holyc-kernel-subset holyc-kernel-subset-clean holyc-kernel-subset-syms
+# The kernel-side .o files the holyc subset will pair with once the
+# kernel ELF link picks it up (candidate C). Listed explicitly rather
+# than pulling in $(KERNEL_OBJS) so the partial-link target stays a
+# closure of "what runtime.c reaches for transitively" rather than a
+# whole-kernel rebuild gate.
+HOLYC_KERNEL_LINK_DEPS := \
+    $(KERNEL_BUILD)/kernel/holyc/runtime.o \
+    $(KERNEL_BUILD)/kernel/mm/slab.o \
+    $(KERNEL_BUILD)/kernel/mm/pmm.o \
+    $(KERNEL_BUILD)/kernel/lib/format.o \
+    $(KERNEL_BUILD)/kernel/arch/x86_64/serial.o
+
+HOLYC_KERNEL_LINK_O := $(HOLYC_KERNEL_BUILD)/holyc-kernel-subset.o
+
+.PHONY: holyc-kernel-subset holyc-kernel-subset-clean \
+        holyc-kernel-subset-syms holyc-kernel-subset-link
 
 holyc-kernel-subset: $(HOLYC_KERNEL_OBJS)
 	@echo "==> $(words $(HOLYC_KERNEL_OBJS)) object(s) under $(HOLYC_KERNEL_BUILD)/"
@@ -76,9 +97,10 @@ holyc-kernel-subset: $(HOLYC_KERNEL_OBJS)
 	  echo "  $$o ($$($(CROSS_OBJDUMP) -h $$o | awk '/\.text/{print $$3}' | head -1) text bytes)"; \
 	done
 
-# Discovery deliverable: the undefined symbols that the runtime must
-# eventually provide (or that vendored callers must be stripped from
-# the kernel-resident subset). Run after `make holyc-kernel-subset`.
+# Per-object undefined-symbol report. Useful for tracing which file
+# contributes which gap; noisy because cross-references between
+# subset members appear in both directions. The partial-link target
+# below is the cleaner post-resolution view.
 holyc-kernel-subset-syms: $(HOLYC_KERNEL_OBJS)
 	@echo "==> undefined symbols across the kernel-resident hcc subset"
 	@for o in $(HOLYC_KERNEL_OBJS); do \
@@ -86,6 +108,27 @@ holyc-kernel-subset-syms: $(HOLYC_KERNEL_OBJS)
 	    echo "  $$s   (in $$(basename $$o))"; \
 	  done; \
 	done | sort -u
+
+# Discovery deliverable: ld -r the holyc subset together with the
+# kernel-side .o files runtime.c reaches for, then nm -u the result.
+# Internal cross-references resolve; the residuals are the real gaps
+# that must close before candidate C can link the subset into the
+# kernel ELF. The output .o is itself partial-linkable, but is not
+# included in the kernel build — the boundary stays load-bearing.
+$(HOLYC_KERNEL_LINK_O): $(HOLYC_KERNEL_OBJS) $(HOLYC_KERNEL_LINK_DEPS)
+	@mkdir -p $(@D)
+	$(CROSS_LD) -r -o $@ $(HOLYC_KERNEL_OBJS) $(HOLYC_KERNEL_LINK_DEPS)
+
+holyc-kernel-subset-link: $(HOLYC_KERNEL_LINK_O)
+	@echo "==> partial-linked $(HOLYC_KERNEL_LINK_O)"
+	@echo "    inputs: $(words $(HOLYC_KERNEL_OBJS)) hcc + $(words $(HOLYC_KERNEL_LINK_DEPS)) kernel-side"
+	@echo "    text: $$($(CROSS_OBJDUMP) -h $(HOLYC_KERNEL_LINK_O) | awk '/\.text/{print $$3}' | head -1) bytes"
+	@echo "==> residual undefined symbols (filtered: limine_*_request_struct"
+	@echo "    are partial-link artifacts, defined in kernel/main.c which"
+	@echo "    is intentionally not in HOLYC_KERNEL_LINK_DEPS)"
+	@$(TOOLCHAIN_BIN)/$(TOOLCHAIN_TARGET)-nm -u $(HOLYC_KERNEL_LINK_O) \
+	  | awk '{print $$2}' | grep -vE '^limine_(hhdm|memmap)_request_struct$$' \
+	  | sort -u | sed 's/^/  /'
 
 holyc-kernel-subset-clean:
 	rm -rf $(HOLYC_KERNEL_BUILD)

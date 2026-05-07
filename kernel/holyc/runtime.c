@@ -114,6 +114,21 @@ int memcmp(const void *a, const void *b, size_t n)
 	return 0;
 }
 
+int strncmp(const char *a, const char *b, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		unsigned char ca = (unsigned char)a[i];
+		unsigned char cb = (unsigned char)b[i];
+		if (ca != cb) {
+			return (int)ca - (int)cb;
+		}
+		if (ca == 0) {
+			return 0;
+		}
+	}
+	return 0;
+}
+
 /* strerror returns a stub string. Vendored holyc-lang only calls
  * strerror in error-reporting paths that do not run in the M3-B
  * kernel-resident subset (no file IO, no fork/exec, no networking).
@@ -192,6 +207,78 @@ __attribute__((weak)) void *realloc(void *p, size_t bytes)
 	memcpy(q, p, copy);
 	free(p);
 	return q;
+}
+
+__attribute__((weak)) void *calloc(size_t nmemb, size_t size)
+{
+	size_t bytes = nmemb * size;
+	void *p = malloc(bytes);
+	if (p == NULL) {
+		return NULL;
+	}
+	memset(p, 0, bytes);
+	return p;
+}
+
+/* --- vendored-tree externs ------------------------------------------- */
+
+/* exit halts. The status is logged so the boundary between vendored
+ * code's normal-return path and its bail-out path is observable in
+ * the serial output. */
+_Noreturn void exit(int status)
+{
+	serial_puts("Runtime exit(");
+	format_dec((uint64_t)(unsigned int)status);
+	serial_puts(") -- halting\n");
+	for (;;) {
+		__asm__ volatile ("cli; hlt");
+	}
+}
+
+/* Kernel has no tty. The vendored tree calls isatty only to gate
+ * ANSI escapes in pretty-printers; returning 0 short-circuits them. */
+int isatty(int fd)
+{
+	(void)fd;
+	return 0;
+}
+
+/* fprintf in the kernel ignores the FILE * and routes to printf.
+ * Vendored sources use it only for diagnostic output; conflating
+ * stdout and stderr is fine for the M3 single-output-stream model. */
+int fprintf(struct __holyc_file *fp, const char *fmt, ...)
+{
+	(void)fp;
+	char    buf[512];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+	serial_puts(buf);
+	return n;
+}
+
+/* Definitions for the externs declared in <stdio.h> shim and util.h.
+ * stderr is passed only to fprintf, which discards it. is_terminal
+ * gates ANSI color paths in cctrl.c and elsewhere; mirrors what
+ * holyc/src/main.c sets it to via isatty -- always 0 here. */
+struct __holyc_file *stderr = NULL;
+struct __holyc_file *stdout = NULL;
+struct __holyc_file *stdin  = NULL;
+int is_terminal = 0;
+
+/* globalArenaAllocate is declared in holyc/src/memory.h, defined in
+ * holyc/src/memory.c (which is excluded from the kernel-resident
+ * subset per ADR-0001 §3 step 3). aostr.c calls it for AoStr struct
+ * and capacity-buffer allocation. The original is an arena bump-
+ * pointer with bulk-release semantics; the kernel shim routes to
+ * malloc -- aostr.c's aoStrRelease path frees individual allocations
+ * already, so the arena's bulk-release optimisation is unused here.
+ * If a future caller assumes "no per-allocation free is needed," the
+ * leak surfaces in slab self-test and we revisit. */
+void *globalArenaAllocate(unsigned int size)
+{
+	return malloc((size_t)size);
 }
 
 /* --- vsnprintf -------------------------------------------------------- */
