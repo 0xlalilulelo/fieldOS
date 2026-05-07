@@ -44,13 +44,18 @@ HOLYC_KERNEL_SRCS := \
     holyc/src/ast.c \
     holyc/src/arena.c \
     holyc/src/cctrl.c \
+    holyc/src/compile.c \
     holyc/src/containers.c \
     holyc/src/lexer.c \
     holyc/src/list.c \
+    holyc/src/parser.c \
+    holyc/src/prsasm.c \
     holyc/src/prslib.c \
-    holyc/src/prsutil.c
+    holyc/src/prsutil.c \
+    holyc/src/x86.c
 HOLYC_KERNEL_OBJS := \
-    $(patsubst holyc/src/%.c,$(HOLYC_KERNEL_BUILD)/%.o,$(HOLYC_KERNEL_SRCS))
+    $(patsubst holyc/src/%.c,$(HOLYC_KERNEL_BUILD)/%.o,$(HOLYC_KERNEL_SRCS)) \
+    $(HOLYC_KERNEL_BUILD)/math_shim.o
 
 # -ffreestanding         no hosted libc; we provide our own runtime
 # -nostdlib              don't link any libc

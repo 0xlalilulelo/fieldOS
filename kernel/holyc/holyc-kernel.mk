@@ -49,11 +49,22 @@ HOLYC_KERNEL_CFLAGS := \
     -w \
     -ffunction-sections -fdata-sections \
     -DIS_BSD=0 -DIS_LINUX=0 \
+    '-DOS_STR="FieldOS"' '-DARCH_STR="x86_64"' \
     -I kernel/holyc/include \
     -I kernel \
     -I holyc/src
 
 $(HOLYC_KERNEL_BUILD)/%.o: holyc/src/%.c
+	@mkdir -p $(@D)
+	$(CROSS_CC) $(HOLYC_KERNEL_CFLAGS) -c $< -o $@
+
+# kernel/holyc/math_shim.c lives outside holyc/src/ but compiles with
+# the same SSE-enabled flags so its `double fabs(double)` signature
+# matches the SysV xmm0 ABI the vendored x86.c calls into. Separate
+# rule rather than extending the pattern above because the kernel
+# proper's other kernel/holyc/*.c files (asm.c, eval.c, jit.c,
+# runtime.c) compile under KERNEL_CFLAGS' -mno-sse.
+$(HOLYC_KERNEL_BUILD)/math_shim.o: kernel/holyc/math_shim.c
 	@mkdir -p $(@D)
 	$(CROSS_CC) $(HOLYC_KERNEL_CFLAGS) -c $< -o $@
 

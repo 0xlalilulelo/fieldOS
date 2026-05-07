@@ -13,6 +13,7 @@
 
 int    memcmp(const void *a, const void *b, size_t n);
 int    strncmp(const char *a, const char *b, size_t n);
+int    strncasecmp(const char *a, const char *b, size_t n);
 char  *strncpy(char *dst, const char *src, size_t n);
 char  *strcpy(char *dst, const char *src);
 char  *strcat(char *dst, const char *src);

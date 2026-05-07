@@ -129,6 +129,26 @@ int strncmp(const char *a, const char *b, size_t n)
 	return 0;
 }
 
+static unsigned char to_lower(unsigned char c)
+{
+	return (c >= 'A' && c <= 'Z') ? (unsigned char)(c + 32) : c;
+}
+
+int strncasecmp(const char *a, const char *b, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		unsigned char ca = to_lower((unsigned char)a[i]);
+		unsigned char cb = to_lower((unsigned char)b[i]);
+		if (ca != cb) {
+			return (int)ca - (int)cb;
+		}
+		if (ca == 0) {
+			return 0;
+		}
+	}
+	return 0;
+}
+
 /* strerror returns a stub string. Vendored holyc-lang only calls
  * strerror in error-reporting paths that do not run in the M3-B
  * kernel-resident subset (no file IO, no fork/exec, no networking).
