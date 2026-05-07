@@ -19,6 +19,13 @@ void *kmalloc(uint64_t size);
  * via cli;hlt — Phase 0 has no graceful recovery path. */
 void kfree(void *ptr);
 
+/* Returns the payload capacity of a kmalloc'd pointer — the slab
+ * cache size for slab pointers, or pages*PAGE_SIZE - LARGE_HEADER_SIZE
+ * for the large path. NULL returns 0; mismatched magic panics, same
+ * dispatch as kfree. realloc in kernel/holyc/runtime.c uses this to
+ * size the old → new copy. */
+uint64_t slab_size_of(void *ptr);
+
 /* 10,000 random-sized alloc / random-order free round-trip.
  * Halts on failure or leak so CI smoke catches regressions.
  * Prints a single line. */

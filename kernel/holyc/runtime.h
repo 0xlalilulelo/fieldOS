@@ -44,8 +44,9 @@ int    snprintf(char *buf, size_t cap, const char *fmt, ...)
        __attribute__((format(printf, 3, 4)));
 int    vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap);
 
-void  *malloc(size_t bytes) __attribute__((weak));
-void   free(void *p)        __attribute__((weak));
+void  *malloc(size_t bytes)              __attribute__((weak));
+void   free(void *p)                     __attribute__((weak));
+void  *realloc(void *p, size_t bytes)    __attribute__((weak));
 
 void   holyc_runtime_self_test(void);
 

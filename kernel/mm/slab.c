@@ -235,6 +235,27 @@ void kfree(void *ptr)
 	}
 }
 
+uint64_t slab_size_of(void *ptr)
+{
+	if (ptr == NULL) {
+		return 0;
+	}
+	uint8_t *page_base = (uint8_t *)((uintptr_t)ptr & ~PAGE_MASK);
+	uint16_t magic = *(uint16_t *)page_base;
+	if (magic == SLAB_MAGIC) {
+		struct slab_header *h = (struct slab_header *)page_base;
+		return cache_sizes[h->cache_id];
+	}
+	if (magic == LARGE_MAGIC) {
+		if ((uint8_t *)ptr != page_base + LARGE_HEADER_SIZE) {
+			slab_panic("slab_size_of: bad large pointer");
+		}
+		struct large_header *h = (struct large_header *)page_base;
+		return (uint64_t)h->pages * PAGE_SIZE - LARGE_HEADER_SIZE;
+	}
+	slab_panic("slab_size_of: bad magic");
+}
+
 #define SELF_TEST_N 10000
 
 struct slab_test_record {

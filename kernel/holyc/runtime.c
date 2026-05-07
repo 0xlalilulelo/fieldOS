@@ -168,6 +168,32 @@ __attribute__((weak)) void free(void *p)
 	kfree(p);
 }
 
+/* realloc: NULL pointer reduces to malloc; size==0 frees and returns
+ * NULL; allocation failure leaves the old block intact (per C99
+ * 7.20.3.4). The new-block-then-copy-then-free path is correct but
+ * not optimal — within-cache grows could reuse the same slot. The
+ * optimisation belongs in the slab itself; runtime.c stays a thin
+ * libc-shaped surface. */
+__attribute__((weak)) void *realloc(void *p, size_t bytes)
+{
+	if (p == NULL) {
+		return malloc(bytes);
+	}
+	if (bytes == 0) {
+		free(p);
+		return NULL;
+	}
+	uint64_t old_size = slab_size_of(p);
+	void *q = malloc(bytes);
+	if (q == NULL) {
+		return NULL;
+	}
+	size_t copy = (old_size < (uint64_t)bytes) ? (size_t)old_size : bytes;
+	memcpy(q, p, copy);
+	free(p);
+	return q;
+}
+
 /* --- vsnprintf -------------------------------------------------------- */
 
 struct fmtbuf {
@@ -420,6 +446,47 @@ void holyc_runtime_self_test(void)
 		runtime_halt("malloc store");
 	}
 	free(p);
+
+	/* realloc round-trip — three grow paths, each verifies that the
+	 * old payload survives the move:
+	 *   (1) within slab cache: 100 → 120 (both land in the 128-byte
+	 *       cache; same cache_id, in-cache regrow)
+	 *   (2) across cache boundary: 100 → 300 (128-byte → 512-byte
+	 *       cache; different cache_id, slab → slab)
+	 *   (3) slab → large path: 1500 → 5000 (2048-byte cache →
+	 *       contiguous-page large path; SLAB_MAGIC → LARGE_MAGIC,
+	 *       exercises both arms of slab_size_of)
+	 * Numbers chosen so cache_id_for_size lands the bounds I expect;
+	 * if the cache size table changes, this test wants a re-check. */
+	char *r = malloc(100);
+	if (r == NULL)             runtime_halt("realloc(1) malloc");
+	memset(r, 0x33, 100);
+	r = realloc(r, 120);
+	if (r == NULL)             runtime_halt("realloc(1)");
+	for (int i = 0; i < 100; i++) {
+		if ((unsigned char)r[i] != 0x33) runtime_halt("realloc(1) preserve");
+	}
+	free(r);
+
+	r = malloc(100);
+	if (r == NULL)             runtime_halt("realloc(2) malloc");
+	memset(r, 0x55, 100);
+	r = realloc(r, 300);
+	if (r == NULL)             runtime_halt("realloc(2)");
+	for (int i = 0; i < 100; i++) {
+		if ((unsigned char)r[i] != 0x55) runtime_halt("realloc(2) preserve");
+	}
+	free(r);
+
+	r = malloc(1500);
+	if (r == NULL)             runtime_halt("realloc(3) malloc");
+	memset(r, 0x77, 1500);
+	r = realloc(r, 5000);
+	if (r == NULL)             runtime_halt("realloc(3)");
+	for (int i = 0; i < 1500; i++) {
+		if ((unsigned char)r[i] != 0x77) runtime_halt("realloc(3) preserve");
+	}
+	free(r);
 
 	serial_puts("OK\n");
 }
