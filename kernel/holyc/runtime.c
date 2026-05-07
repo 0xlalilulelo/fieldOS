@@ -281,6 +281,49 @@ void *globalArenaAllocate(unsigned int size)
 	return malloc((size_t)size);
 }
 
+/* --- time stubs ------------------------------------------------------ */
+
+/* gettimeofday returns zeros; localtime returns a static zero-filled
+ * struct tm. The vendored holyc-lang reaches these in
+ * cctrlAddBuiltinMacros to populate __TIME__, __DATE__, and
+ * __TIMESTAMP__ at parse time. The output values become "00:00:00"
+ * and "1900/01/01" inside any compiled-in-kernel module's macro
+ * expansion -- cosmetic in a single-process boot, fixable when the
+ * kernel grows a real clock source (M4 LAPIC calibration unblocks
+ * a real gettimeofday implementation alongside k_time_ns). */
+
+struct __holyc_timeval {
+	long tv_sec;
+	long tv_usec;
+};
+struct __holyc_timezone {
+	int tz_minuteswest;
+	int tz_dsttime;
+};
+
+int gettimeofday(struct __holyc_timeval *tv, struct __holyc_timezone *tz)
+{
+	(void)tz;
+	if (tv != NULL) {
+		tv->tv_sec  = 0;
+		tv->tv_usec = 0;
+	}
+	return 0;
+}
+
+struct __holyc_tm {
+	int tm_sec, tm_min, tm_hour;
+	int tm_mday, tm_mon, tm_year;
+	int tm_wday, tm_yday, tm_isdst;
+};
+
+struct __holyc_tm *localtime(const long *t)
+{
+	(void)t;
+	static struct __holyc_tm zero;
+	return &zero;
+}
+
 /* --- vsnprintf -------------------------------------------------------- */
 
 struct fmtbuf {

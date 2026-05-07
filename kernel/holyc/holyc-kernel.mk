@@ -48,6 +48,7 @@ HOLYC_KERNEL_CFLAGS := \
     -std=gnu11 \
     -w \
     -ffunction-sections -fdata-sections \
+    -DIS_BSD=0 -DIS_LINUX=0 \
     -I kernel/holyc/include \
     -I kernel \
     -I holyc/src

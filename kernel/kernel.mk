@@ -42,7 +42,12 @@ HOLYC_KERNEL_SRCS := \
     holyc/src/aostr.c \
     holyc/src/ast.c \
     holyc/src/arena.c \
-    holyc/src/containers.c
+    holyc/src/cctrl.c \
+    holyc/src/containers.c \
+    holyc/src/lexer.c \
+    holyc/src/list.c \
+    holyc/src/prslib.c \
+    holyc/src/prsutil.c
 HOLYC_KERNEL_OBJS := \
     $(patsubst holyc/src/%.c,$(HOLYC_KERNEL_BUILD)/%.o,$(HOLYC_KERNEL_SRCS))
 

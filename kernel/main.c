@@ -84,7 +84,6 @@ void kmain(void)
 	vmm_init();
 	slab_init();
 	holyc_jit_init();
-	holyc_init();
 	fb_init();
 	fb_puts("Hello, Field\n");
 	pmm_print_stats();
@@ -92,6 +91,12 @@ void kmain(void)
 	slab_self_test();
 	holyc_jit_self_test();
 	holyc_runtime_self_test();
+	/* holyc_init() runs cctrlNew, which allocates ~80 KiB through
+	 * the subset's chain (containers.c + aostr.c + arena.c +
+	 * ast.c). Deferred until after slab_self_test so the slab leak
+	 * check has run with a pristine baseline; the cctrl allocations
+	 * persist for the kernel's lifetime by design. */
+	holyc_init();
 	holyc_subset_self_test();
 	holyc_eval_self_test();
 	serial_puts("Field OS: stage 2 reached\n");

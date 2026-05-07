@@ -24,6 +24,10 @@ long long       atoll(const char *s);
 double          atof(const char *s);
 long            strtol(const char *s, char **endp, int base);
 unsigned long   strtoul(const char *s, char **endp, int base);
+long long       strtoll(const char *s, char **endp, int base);
+unsigned long long strtoull(const char *s, char **endp, int base);
+long double     strtold(const char *s, char **endp);
+double          strtod(const char *s, char **endp);
 char           *getenv(const char *name);
 int             system(const char *cmd);
 void            qsort(void *base, size_t nmemb, size_t size,
