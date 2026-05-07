@@ -7,6 +7,7 @@
 
 include tools/toolchain.mk
 include kernel/kernel.mk
+include kernel/holyc/holyc-kernel.mk
 include holyc/holyc.mk
 
 ISO         := field-os-poc.iso
@@ -25,6 +26,8 @@ help:
 	@echo "  toolchain-check   Verify the x86_64-elf cross-compiler works."
 	@echo "  holyc-host        Build the vendored holyc-lang compiler as a host tool."
 	@echo "  holyc-host-smoke  Transpile holyc/bug-tests/Bug_171.HC to confirm the host build works."
+	@echo "  holyc-kernel-subset       Compile the kernel-resident hcc subset (no link)."
+	@echo "  holyc-kernel-subset-syms  Report undefined symbols in the kernel-resident hcc subset."
 	@echo "  clean             Remove build artifacts."
 	@echo "  distclean         Remove build artifacts and toolchain install."
 	@echo "  help              This message."
@@ -75,7 +78,7 @@ $(ISO): $(KERNEL_ELF) $(LIMINE_HOST) boot/limine.conf
 iso: $(ISO)
 
 # --- clean ---------------------------------------------------------------
-clean: holyc-host-clean
+clean: holyc-host-clean holyc-kernel-subset-clean
 	rm -rf build kernel/build
 	rm -f $(ISO)
 	-$(MAKE) -C $(LIMINE_DIR) clean 2>/dev/null
