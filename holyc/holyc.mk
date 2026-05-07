@@ -163,6 +163,7 @@ HOLYC_ASM_TEST_HDR := kernel/holyc/asm.h
 $(HOLYC_ASM_TEST): $(HOLYC_ASM_TEST_SRC) $(HOLYC_ASM_TEST_HDR)
 	@mkdir -p $(@D)
 	$(HOLYC_CC) -O2 -Wall -Wextra -std=c11 -Ikernel/holyc \
+	    -DAS_BIN='"$(CROSS_AS)"' -DOBJCOPY_BIN='"$(CROSS_OBJCOPY)"' \
 	    $(HOLYC_ASM_TEST_SRC) -o $@
 
 .PHONY: asm-test asm-test-clean
