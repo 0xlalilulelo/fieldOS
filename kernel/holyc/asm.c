@@ -7,10 +7,12 @@
  * holyc/tests/corpus/ and compares output to $(CROSS_AS) byte-for-byte.
  *
  * Coverage so far:
- *   C-1: ret, leave, push reg64, pop reg64               (33/63 lines)
- *   C-2: movq (4 forms), leaq (mem-reg, RIP-rel)         (+22 lines)
- *   C-3: subq imm-reg, test reg-reg, je rel32, call      (+ 8 lines)
- *   D:   data directives (.quad, .asciz, .double)        (later)
+ *   C-1: ret, leave, push reg64, pop reg64               (33/63 inst)
+ *   C-2: movq (4 forms), leaq (mem-reg, RIP-rel)         (+22 inst)
+ *   C-3: subq imm-reg, test reg-reg, je rel32, call      (+ 8 inst)
+ *   D-1: .byte / .short / .word / .long / .quad          (1/6 dd)
+ *   D-2: .asciz / .ascii / .string                       (later)
+ *   D-3: .double / .float                                (later)
  *
  * No libc dependency. Compiles under both the host build (via the
  * asm-test rule) and the kernel build (-ffreestanding -mno-sse).
@@ -507,6 +509,35 @@ static int encCall(const char *opers, size_t n, OutBuf *out) {
     return AS_E_UNKNOWN;
 }
 
+/* --- Data-directive encoders (D-1) --------------------------------------- */
+
+/* .byte / .short / .word / .long / .quad — emit 1/2/2/4/8 little-endian
+ * bytes of a signed integer. Re-uses parseSignedInt for decimal and
+ * 0x-hex; the operand grammar is a single value (the corpus has no
+ * comma-separated lists, so we don't accept them yet). Out-of-range
+ * values are silently truncated to the directive's width — GAS warns
+ * but emits the same low N bytes, so byte-equivalence holds.
+ *
+ * The shift uses uint64_t to avoid implementation-defined behavior on
+ * arithmetic-right-shift of negative int64_t (e.g. INT64_MIN for
+ * `.quad 0x8000000000000000`). */
+static int encWidth(const char *opers, size_t n, OutBuf *out, int width) {
+    n = trimWS(&opers, n);
+    int64_t v = 0;
+    int rc = parseSignedInt(opers, n, &v);
+    if (rc != AS_OK) return rc;
+    uint64_t u = (uint64_t)v;
+    for (int i = 0; i < width; i++) {
+        outByte(out, (uint8_t)((u >> (i * 8)) & 0xFF));
+    }
+    return out->ok ? AS_OK : AS_E_NOSPACE;
+}
+
+static int encByte (const char *o, size_t n, OutBuf *b) { return encWidth(o, n, b, 1); }
+static int encShort(const char *o, size_t n, OutBuf *b) { return encWidth(o, n, b, 2); }
+static int encLong (const char *o, size_t n, OutBuf *b) { return encWidth(o, n, b, 4); }
+static int encQuad (const char *o, size_t n, OutBuf *b) { return encWidth(o, n, b, 8); }
+
 /* leaq — two forms in the corpus:
  *   disp(%base), reg     opcode 8D  ModR/M(mod, dst, base) [+SIB+disp]
  *   label(%rip), reg     opcode 8D  ModR/M(00, dst, 5)     rel32=0
@@ -547,27 +578,50 @@ static const Dispatch kDispatch[] = {
     { "test",  encTest  },
     { "je",    encJe    },
     { "call",  encCall  },
+    /* Data directives (D-1). .word is GAS's 2-byte form on x86, a
+     * synonym for .short — both route to encShort. */
+    { ".byte",  encByte  },
+    { ".short", encShort },
+    { ".word",  encShort },
+    { ".long",  encLong  },
+    { ".quad",  encQuad  },
 };
+
+/* Names that name themselves as data-emitting. Mirrors the harness's
+ * isDataDirective (asm_test.c) but the two lists are independent on
+ * purpose — the encoder must not trust the harness's classifier for
+ * correctness, and the harness must not infer encoder coverage from
+ * what dispatches today. D-1 covers the integer-width forms; .ascii
+ * et al. fall through to dispatch and return AS_E_UNKNOWN until D-2
+ * and D-3 add encoders. */
+static int isDataDirective(const char *s, size_t n) {
+    static const struct { const char *name; size_t len; } dd[] = {
+        { ".byte",   5 }, { ".short",  6 }, { ".word",   5 },
+        { ".long",   5 }, { ".quad",   5 }, { ".asciz",  6 },
+        { ".ascii",  6 }, { ".string", 7 }, { ".double", 7 },
+        { ".float",  6 },
+    };
+    for (size_t i = 0; i < sizeof(dd) / sizeof(dd[0]); i++) {
+        if (n >= dd[i].len && !myStrncmp(s, dd[i].name, dd[i].len)) {
+            if (n == dd[i].len || myWS(s[dd[i].len])) return 1;
+        }
+    }
+    return 0;
+}
 
 /* Re-classify here so asm_encode is self-contained — the harness's
  * own classifier exists for reporting; the encoder must not trust
  * it for correctness. Lines that emit zero bytes (label, comment,
  * non-data directive, blank) succeed with *out_len == 0. Data
- * directives (.quad et al.) currently fall through to instruction
- * dispatch and AS_E_UNKNOWN; D adds a directive-side branch. */
+ * directives fall through to dispatch; D-1 covers integer widths,
+ * D-2/D-3 close strings and floats. */
 static int isNonEmittingLine(const char *s, size_t n) {
     size_t i = 0;
     while (i < n && myWS(s[i])) i++;
     if (i == n) return 1;
     if (s[i] == '#') return 1;
     if (s[i] == '.') {
-        /* Distinguish data directives from non-emitting ones. For
-         * C-1, every directive is treated as non-emitting; D will
-         * route .quad/.asciz/.double to a separate dispatch.
-         * Conservative for now: even data directives return zero
-         * bytes here, so the harness reports them as "encoded"
-         * with empty output — which mismatches GAS for .quad et al.
-         * That mismatch is the bar D lifts. */
+        if (isDataDirective(s + i, n - i)) return 0;
         return 1;
     }
     size_t j = n;

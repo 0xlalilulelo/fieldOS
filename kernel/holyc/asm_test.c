@@ -143,11 +143,21 @@ static int gasAssemble(const char *line, size_t len,
 
 /* --- Stats and diagnostics ----------------------------------------------- */
 
+/* Two-axis encoded/unknown counters: the C-arc (C-1..C-3) closed the
+ * 63 instruction lines and the D-arc (D-1..D-3) is closing the 6
+ * directive-data lines. Tracking each kind separately preserves the
+ * progress shape of both arcs; the report can collapse to a single
+ * "emitting lines encoded" axis at M3-B step-4 exit. Regression
+ * buckets (mismatch / malformed / nospace / other / gas_failed)
+ * are shared because a regression is a regression regardless of
+ * whether an instruction or a data directive triggered it. */
 typedef struct {
     int counts[6];        /* by LineKind */
-    int enc_ok;           /* encoded; bytes match GAS */
+    int enc_inst_ok;      /* instruction encoded; bytes match GAS */
+    int enc_inst_unknown; /* instruction AS_E_UNKNOWN — coverage gap */
+    int enc_dd_ok;        /* directive-data encoded; bytes match GAS */
+    int enc_dd_unknown;   /* directive-data AS_E_UNKNOWN — coverage gap */
     int enc_mismatch;     /* encoded; bytes disagree (REGRESSION) */
-    int enc_unknown;      /* AS_E_UNKNOWN — coverage gap, expected */
     int enc_malformed;    /* AS_E_MALFORMED (REGRESSION) */
     int enc_nospace;      /* AS_E_NOSPACE (REGRESSION) */
     int enc_other;        /* AS_E_TODO + any unexpected rc (REGRESSION) */
@@ -178,16 +188,24 @@ static void runOnLine(const char *line, size_t len, Stats *s) {
     LineKind k = classifyLine(line, len);
     s->counts[k]++;
     s->total++;
-    if (k != LINE_INST) return;
+    if (k != LINE_INST && k != LINE_DIRECTIVE_DATA) return;
 
-    uint8_t enc[16];
+    /* enc[] sized for the longest emitting form in the corpus. C-arc
+     * instructions are <=10 bytes; D-1's .quad is 8; D-2's .asciz
+     * strings can be up to ~16 chars + NUL. 64 bytes is comfortable
+     * across all three sub-rounds. */
+    uint8_t enc[64];
     size_t  enc_len = 0;
     int rc = asm_encode(line, len, enc, sizeof(enc), &enc_len);
 
-    if (rc == AS_E_UNKNOWN)        { s->enc_unknown++;   return; }
-    if (rc == AS_E_MALFORMED)      { s->enc_malformed++; return; }
-    if (rc == AS_E_NOSPACE)        { s->enc_nospace++;   return; }
-    if (rc != AS_OK)               { s->enc_other++;     return; }
+    if (rc == AS_E_UNKNOWN) {
+        if (k == LINE_INST) s->enc_inst_unknown++;
+        else                s->enc_dd_unknown++;
+        return;
+    }
+    if (rc == AS_E_MALFORMED) { s->enc_malformed++; return; }
+    if (rc == AS_E_NOSPACE)   { s->enc_nospace++;   return; }
+    if (rc != AS_OK)          { s->enc_other++;     return; }
 
     /* Encoder accepted. Get GAS ground truth and compare. */
     uint8_t gas[64];
@@ -207,7 +225,8 @@ static void runOnLine(const char *line, size_t len, Stats *s) {
         return;
     }
 
-    s->enc_ok++;
+    if (k == LINE_INST) s->enc_inst_ok++;
+    else                s->enc_dd_ok++;
 }
 
 static int runCorpus(const char *path, Stats *s) {
@@ -231,18 +250,24 @@ static int runCorpus(const char *path, Stats *s) {
 /* --- Reporting ----------------------------------------------------------- */
 
 static int report(const Stats *s) {
-    int instructions = s->counts[LINE_INST];
+    int inst = s->counts[LINE_INST];
+    int dd   = s->counts[LINE_DIRECTIVE_DATA];
+    int emit = inst + dd;
 
     printf("    %-16s %4d\n", "blank",          s->counts[LINE_BLANK]);
     printf("    %-16s %4d\n", "comment",        s->counts[LINE_COMMENT]);
     printf("    %-16s %4d\n", "label",          s->counts[LINE_LABEL]);
     printf("    %-16s %4d\n", "directive",      s->counts[LINE_DIRECTIVE]);
-    printf("    %-16s %4d\n", "directive-data", s->counts[LINE_DIRECTIVE_DATA]);
-    printf("    %-16s %4d\n", "instruction",    instructions);
-    printf("    encoded         %4d / %d (matched GAS byte-for-byte)\n",
-           s->enc_ok, instructions);
-    printf("    unknown         %4d / %d (mnemonic not yet covered)\n",
-           s->enc_unknown, instructions);
+    printf("    %-16s %4d\n", "directive-data", dd);
+    printf("    %-16s %4d\n", "instruction",    inst);
+    printf("    encoded inst    %4d / %d (matched GAS byte-for-byte)\n",
+           s->enc_inst_ok, inst);
+    printf("    encoded dd      %4d / %d (matched GAS byte-for-byte)\n",
+           s->enc_dd_ok, dd);
+    printf("    unknown inst    %4d / %d (mnemonic not yet covered)\n",
+           s->enc_inst_unknown, inst);
+    printf("    unknown dd      %4d / %d (directive not yet covered)\n",
+           s->enc_dd_unknown, dd);
 
     int regressions = s->enc_mismatch + s->enc_malformed +
                       s->enc_nospace  + s->enc_other     + s->gas_failed;
@@ -250,19 +275,19 @@ static int report(const Stats *s) {
 
     if (s->enc_mismatch)
         printf("    mismatch        %4d / %d *** REGRESSION ***\n",
-               s->enc_mismatch, instructions);
+               s->enc_mismatch, emit);
     if (s->enc_malformed)
         printf("    malformed       %4d / %d *** REGRESSION ***\n",
-               s->enc_malformed, instructions);
+               s->enc_malformed, emit);
     if (s->enc_nospace)
         printf("    nospace         %4d / %d *** REGRESSION ***\n",
-               s->enc_nospace, instructions);
+               s->enc_nospace, emit);
     if (s->enc_other)
         printf("    other-rc        %4d / %d *** REGRESSION ***\n",
-               s->enc_other, instructions);
+               s->enc_other, emit);
     if (s->gas_failed)
         printf("    gas-failed      %4d / %d *** investigate ***\n",
-               s->gas_failed, instructions);
+               s->gas_failed, emit);
     return 1;
 }
 
