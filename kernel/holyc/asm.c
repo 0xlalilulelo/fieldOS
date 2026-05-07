@@ -77,17 +77,40 @@ static int regLookup64(const char *s, size_t n) {
 
 /* --- Output buffer ------------------------------------------------------- */
 
+/* OutBuf threads both the byte buffer and the optional relocation
+ * cursor through every encoder. `relocs` may be NULL — callers that
+ * don't want relocation reporting pay nothing; the encoder still
+ * emits the zero-filled placeholder bytes (which is what GAS does
+ * pre-link, so byte-equivalence holds either way). `ok` clears on
+ * overflow of either buffer; asm_encode maps that to AS_E_NOSPACE. */
 typedef struct {
     uint8_t *p;
     size_t   cap;
     size_t   len;
-    int      ok;     /* set to 0 on overflow */
+    int      ok;
+    Reloc   *relocs;        /* NULL = caller opted out of reloc reporting */
+    size_t   reloc_cap;
+    size_t   reloc_len;
 } OutBuf;
 
 static void outByte(OutBuf *o, uint8_t b) {
     if (!o->ok) return;
     if (o->len >= o->cap) { o->ok = 0; return; }
     o->p[o->len++] = b;
+}
+
+/* Record a relocation at the current byte-buffer position. Called
+ * just before the four zero placeholder bytes are emitted, so
+ * `o->len` is exactly the offset where the rel32 lives. No-op when
+ * the caller opted out (relocs == NULL). */
+static void outReloc(OutBuf *o, const char *sym, size_t sym_len) {
+    if (!o->ok) return;
+    if (o->relocs == NULL) return;
+    if (o->reloc_len >= o->reloc_cap) { o->ok = 0; return; }
+    o->relocs[o->reloc_len].offset  = o->len;
+    o->relocs[o->reloc_len].sym     = sym;
+    o->relocs[o->reloc_len].sym_len = sym_len;
+    o->reloc_len++;
 }
 
 /* --- Operand parsing ----------------------------------------------------- */
@@ -102,10 +125,12 @@ typedef enum {
 } OprKind;
 
 typedef struct {
-    OprKind kind;
-    int     reg;     /* OPR_REG / OPR_INDIRECT / OPR_MEM base */
-    int64_t imm;     /* OPR_IMM                               */
-    int64_t disp;    /* OPR_MEM (zero if absent)              */
+    OprKind     kind;
+    int         reg;     /* OPR_REG / OPR_INDIRECT / OPR_MEM base */
+    int64_t     imm;     /* OPR_IMM                               */
+    int64_t     disp;    /* OPR_MEM (zero if absent)              */
+    const char *sym;     /* OPR_SYMBOL / OPR_MEM_RIP — into input  */
+    size_t      sym_len; /* 0 when kind has no symbol              */
 } Oprnd;
 
 /* Trim leading and trailing whitespace; advance *psrc past leading
@@ -204,10 +229,20 @@ static int parseMemOperand(const char *s, size_t n, Oprnd *out) {
     size_t inner_len = close - paren - 1;
     inner_len = trimWS(&inner, inner_len);
     if (inner_len < 2 || inner[0] != '%') return AS_E_MALFORMED;
-    /* %rip is special — RIP-relative addressing. */
+    /* %rip is special — RIP-relative addressing. Capture the label
+     * text before '(' as the relocation symbol; trim WS on both
+     * sides. The corpus has no `0(%rip)` numeric form, so we don't
+     * try to parse a non-symbol disp here — if a future input adds
+     * one, parseSignedInt will fail and surface AS_E_MALFORMED. */
     if (inner_len == 4 &&
         inner[1] == 'r' && inner[2] == 'i' && inner[3] == 'p') {
-        out->kind = OPR_MEM_RIP;
+        const char *sp = s;
+        size_t sl = paren;
+        while (sl > 0 && myWS(sp[sl - 1])) sl--;
+        while (sl > 0 && myWS(sp[0]))      { sp++; sl--; }
+        out->kind    = OPR_MEM_RIP;
+        out->sym     = sp;
+        out->sym_len = sl;
         return AS_OK;
     }
     int rn = regLookup64(inner + 1, inner_len - 1);
@@ -250,11 +285,16 @@ static int parseOperand(const char *s, size_t n, Oprnd *out) {
     if (s[0] == '$')    return parseImmOperand(s, n, out);
     if (s[0] == '*')    return parseIndirectOperand(s, n, out);
 
-    /* A '(' anywhere means memory; otherwise treat as a bare symbol. */
+    /* A '(' anywhere means memory; otherwise treat as a bare symbol.
+     * The whole trimmed run is the symbol — call/je take a single
+     * bare label (the comma is a top-level separator handled by
+     * parseTwoOperands, which never reaches here for SYMBOL forms). */
     for (size_t i = 0; i < n; i++) {
         if (s[i] == '(') return parseMemOperand(s, n, out);
     }
-    out->kind = OPR_SYMBOL;
+    out->kind    = OPR_SYMBOL;
+    out->sym     = s;
+    out->sym_len = n;
     return AS_OK;
 }
 
@@ -290,6 +330,7 @@ static int parseTwoOperands(const char *s, size_t n, Oprnd *a, Oprnd *b) {
 static int emitMem(OutBuf *o, int reg_field, const Oprnd *mem) {
     if (mem->kind == OPR_MEM_RIP) {
         outByte(o, ((reg_field & 7) << 3) | 5);
+        outReloc(o, mem->sym, mem->sym_len);
         outByte(o, 0); outByte(o, 0); outByte(o, 0); outByte(o, 0);
         return o->ok ? AS_OK : AS_E_NOSPACE;
     }
@@ -482,6 +523,7 @@ static int encJe(const char *opers, size_t n, OutBuf *out) {
     if (a.kind != OPR_SYMBOL) return AS_E_UNKNOWN;
     outByte(out, 0x0F);
     outByte(out, 0x84);
+    outReloc(out, a.sym, a.sym_len);
     outByte(out, 0); outByte(out, 0); outByte(out, 0); outByte(out, 0);
     return out->ok ? AS_OK : AS_E_NOSPACE;
 }
@@ -497,6 +539,7 @@ static int encCall(const char *opers, size_t n, OutBuf *out) {
 
     if (a.kind == OPR_SYMBOL) {
         outByte(out, 0xE8);
+        outReloc(out, a.sym, a.sym_len);
         outByte(out, 0); outByte(out, 0); outByte(out, 0); outByte(out, 0);
         return out->ok ? AS_OK : AS_E_NOSPACE;
     }
@@ -880,8 +923,10 @@ static int isNonEmittingLine(const char *s, size_t n) {
 }
 
 int asm_encode(const char *att_line, size_t line_len,
-               uint8_t *out, size_t out_cap, size_t *out_len) {
-    if (out_len) *out_len = 0;
+               uint8_t *out, size_t out_cap, size_t *out_len,
+               Reloc *relocs, size_t reloc_cap, size_t *reloc_count) {
+    if (out_len)     *out_len     = 0;
+    if (reloc_count) *reloc_count = 0;
 
     if (isNonEmittingLine(att_line, line_len)) {
         return AS_OK;
@@ -911,9 +956,10 @@ int asm_encode(const char *att_line, size_t line_len,
         size_t dnl = myStrlen(kDispatch[k].mnemonic);
         if (dnl == mn_len &&
             !myStrncmp(att_line + mn_start, kDispatch[k].mnemonic, dnl)) {
-            OutBuf ob = { out, out_cap, 0, 1 };
+            OutBuf ob = { out, out_cap, 0, 1, relocs, reloc_cap, 0 };
             int rc = kDispatch[k].fn(opers, opers_len, &ob);
-            if (out_len) *out_len = ob.len;
+            if (out_len)     *out_len     = ob.len;
+            if (reloc_count) *reloc_count = ob.reloc_len;
             return rc;
         }
     }

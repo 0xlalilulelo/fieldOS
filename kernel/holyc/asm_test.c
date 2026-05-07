@@ -41,6 +41,19 @@
 /* Limit verbose mismatch dumps so a regression doesn't drown CI. */
 #define MAX_DIAG_PRINTS 8
 
+/* Per-line reloc cap. The corpus's most-relocating instruction
+ * touches one symbol (call/je carry one operand; leaq sym(%rip)
+ * also carries one). 4 is comfortable headroom for a future form
+ * that emits two relocations per line. */
+#define MAX_RELOCS_PER_LINE 4
+
+/* Aggregated symbol slots. Bug_171.s currently hits 7 distinct
+ * symbol names (_printf, _PrintMessage, .L0..L4 = 7 total). 32 is
+ * comfortable for the next few corpus inputs without making the
+ * harness allocate. Beyond 32, the breakdown elides — the total
+ * count is still accurate. */
+#define MAX_DISTINCT_SYMS 32
+
 /* --- Line classification -------------------------------------------------- */
 
 typedef enum {
@@ -164,7 +177,38 @@ typedef struct {
     int gas_failed;       /* GAS rejected the line — investigate */
     int total;
     int diag_prints;      /* limits verbose dumps */
+    /* Relocation surface (5-1). reloc_total is the sum across all
+     * encoded lines; sym_names/sym_counts hold the per-symbol
+     * breakdown, with sym_overflow set if more than MAX_DISTINCT_SYMS
+     * names were seen. Symbol names are copied into sym_names because
+     * Reloc.sym points into per-line input that's reused on the next
+     * fgets — without the copy, all entries would alias the line
+     * buffer's last contents. */
+    int  reloc_total;
+    int  sym_count;
+    char sym_names[MAX_DISTINCT_SYMS][64];
+    int  sym_counts[MAX_DISTINCT_SYMS];
+    int  sym_overflow;
 } Stats;
+
+static void recordSym(Stats *s, const char *sym, size_t sym_len) {
+    if (sym_len >= sizeof(s->sym_names[0])) sym_len = sizeof(s->sym_names[0]) - 1;
+    for (int i = 0; i < s->sym_count; i++) {
+        if (strlen(s->sym_names[i]) == sym_len &&
+            !memcmp(s->sym_names[i], sym, sym_len)) {
+            s->sym_counts[i]++;
+            return;
+        }
+    }
+    if (s->sym_count >= MAX_DISTINCT_SYMS) {
+        s->sym_overflow++;
+        return;
+    }
+    memcpy(s->sym_names[s->sym_count], sym, sym_len);
+    s->sym_names[s->sym_count][sym_len] = '\0';
+    s->sym_counts[s->sym_count] = 1;
+    s->sym_count++;
+}
 
 static void hexdump(FILE *f, const uint8_t *b, size_t n) {
     for (size_t i = 0; i < n; i++) fprintf(f, "%02x ", b[i]);
@@ -196,7 +240,10 @@ static void runOnLine(const char *line, size_t len, Stats *s) {
      * across all three sub-rounds. */
     uint8_t enc[64];
     size_t  enc_len = 0;
-    int rc = asm_encode(line, len, enc, sizeof(enc), &enc_len);
+    Reloc   relocs[MAX_RELOCS_PER_LINE];
+    size_t  reloc_count = 0;
+    int rc = asm_encode(line, len, enc, sizeof(enc), &enc_len,
+                        relocs, MAX_RELOCS_PER_LINE, &reloc_count);
 
     if (rc == AS_E_UNKNOWN) {
         if (k == LINE_INST) s->enc_inst_unknown++;
@@ -227,6 +274,15 @@ static void runOnLine(const char *line, size_t len, Stats *s) {
 
     if (k == LINE_INST) s->enc_inst_ok++;
     else                s->enc_dd_ok++;
+
+    /* Reloc accounting: only fold relocations into the aggregate when
+     * the line passed both encoder and GAS — a regression line's
+     * relocations would otherwise inflate the total without a
+     * meaningful coverage signal. */
+    s->reloc_total += (int)reloc_count;
+    for (size_t r = 0; r < reloc_count; r++) {
+        recordSym(s, relocs[r].sym, relocs[r].sym_len);
+    }
 }
 
 static int runCorpus(const char *path, Stats *s) {
@@ -268,6 +324,14 @@ static int report(const Stats *s) {
            s->enc_inst_unknown, inst);
     printf("    unknown dd      %4d / %d (directive not yet covered)\n",
            s->enc_dd_unknown, dd);
+    printf("    relocations     %4d (%d distinct symbol%s%s)\n",
+           s->reloc_total,
+           s->sym_count,
+           s->sym_count == 1 ? "" : "s",
+           s->sym_overflow ? ", + overflow" : "");
+    for (int i = 0; i < s->sym_count; i++) {
+        printf("      %-22s %4d\n", s->sym_names[i], s->sym_counts[i]);
+    }
 
     int regressions = s->enc_mismatch + s->enc_malformed +
                       s->enc_nospace  + s->enc_other     + s->gas_failed;
