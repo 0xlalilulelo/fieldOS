@@ -230,6 +230,24 @@ int holyc_eval(const char *src)
 	format_dec((uint64_t)unresolved);
 	serial_puts(" unresolved\n");
 
+	/* 5-3d unresolved policy: ADR-0001 §3 step 5 says holyc_eval
+	 * refuses to run a module whose externs do not all resolve. Print
+	 * each unresolved symbol so the gap is visible (not a silent
+	 * "0 relocs deferred" lie), then return -1. Skip commit — leaving
+	 * zero rel32s at unresolved sites and flipping NX off would make
+	 * a #PF panic the most likely outcome of any 5-4 invocation. */
+	if (unresolved > 0) {
+		for (size_t ei = 0; ei < holyc_extern_table.count; ei++) {
+			const HolycExternReloc *e = &holyc_extern_table.entries[ei];
+			if (abi_table_lookup(e->sym, e->sym_len) == 0) {
+				serial_puts("Eval: unresolved extern '");
+				serial_puts(e->sym);
+				serial_puts("'\n");
+			}
+		}
+		return -1;
+	}
+
 	/* JIT commit: flip NX off on the pages we just filled. After
 	 * pass-3 the rel32 sites hold the right displacements, so the
 	 * bytes are both executable and reachable — 5-4 invokes. */
@@ -286,6 +304,18 @@ void holyc_eval_self_test(void)
 	if (holyc_eval("I64 F() { return 42; } F();") != 0) {
 		eval_halt("witness");
 	}
+
+	/* 5-3d unresolved-policy witness lives in the host harness, not
+	 * here. The natural runtime construction — call a deliberately
+	 * undeclared function and assert eval returns -1 — is unreachable:
+	 * the upstream parser rejects undeclared calls during parseToAst
+	 * with "Variable or function has not been defined" and exits via
+	 * the runtime exit() shim before pass-3 sees the extern. Reaching
+	 * the unresolved path requires a parser-acceptable forward
+	 * declaration whose symbol isn't in abi_table; the witness shape
+	 * is parser-internal and out of M3-B step-5 scope. asm_test.c's
+	 * 5-3e mock injects an unresolved symbol directly into the extern
+	 * table and asserts the per-entry pass-3 behaviour. */
 
 	serial_puts("Eval: pipeline OK\n");
 }
