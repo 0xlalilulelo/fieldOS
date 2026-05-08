@@ -17,7 +17,10 @@
  *        syntax error in the M3 exit-criterion 5-line session does
  *        not halt the kernel
  *
- * holyc_repl() does not return. */
+ * holyc_repl() returns when the user types Ctrl-D (EOT, 0x04) on a
+ * line; kmain then falls through to the stage-2 sentinel and the
+ * normal halt path. The function does not return through any other
+ * code path today. */
 void holyc_repl(void);
 
 #endif
