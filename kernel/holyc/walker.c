@@ -20,6 +20,45 @@ static int isWS(char c)
 	return c == ' ' || c == '\t';
 }
 
+/* Advance `i` to the index of the next logical line break in
+ * `data[0..len)`, treating `\n` inside double-quoted runs as part of
+ * the same line. asm.c::parseStringOperand handles a literal `\n`
+ * byte inside the string operand correctly (the byte-level emit path
+ * passes any non-backslash, non-quote char through verbatim), so a
+ * quote-aware split is sufficient — asm.c does not need to change.
+ *
+ * Backslashes inside quotes consume the next byte (so `\"` does not
+ * close the quote, and `\<actual newline>` is also tolerated).
+ *
+ * compileToAsm's `.asciz "%S"` emit (x86.c:2167, aostr.c:442) writes
+ * the AoStr's raw bytes verbatim — so a HolyC source string `'X\n'`
+ * lands in the AT&T text as a literal newline inside the quoted
+ * .asciz operand. Bug_171.s's checked-in corpus uses the escaped
+ * two-char form `\n` inside its .asciz lines, so the corpus path
+ * never enters the quote-aware branch and asm-test stays byte-
+ * equivalent. */
+static size_t scan_line_end(const char *data, size_t len, size_t i)
+{
+	int in_quote = 0;
+	while (i < len) {
+		char c = data[i];
+		if (in_quote && c == '\\' && i + 1 < len) {
+			i += 2;
+			continue;
+		}
+		if (c == '"') {
+			in_quote = !in_quote;
+			i++;
+			continue;
+		}
+		if (c == '\n' && !in_quote) {
+			break;
+		}
+		i++;
+	}
+	return i;
+}
+
 /* Trim leading and trailing WS in place on a (start, len) pair. */
 static void trimRange(const char **pstart, size_t *plen)
 {
@@ -50,9 +89,7 @@ int holyc_walker_pass1(const char *data, size_t len,
 
 	while (i < len) {
 		size_t line_start = i;
-		while (i < len && data[i] != '\n') {
-			i++;
-		}
+		i = scan_line_end(data, len, i);
 		size_t line_len = i - line_start;
 		if (i < len) {
 			i++;     /* skip newline */
@@ -171,9 +208,7 @@ int holyc_walker_pass2(const char *data, size_t len,
 
 	while (i < len) {
 		size_t line_start = i;
-		while (i < len && data[i] != '\n') {
-			i++;
-		}
+		i = scan_line_end(data, len, i);
 		size_t line_len = i - line_start;
 		if (i < len) {
 			i++;     /* skip newline */
