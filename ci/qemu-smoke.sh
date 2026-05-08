@@ -17,11 +17,13 @@
 #   SMOKE_TIMEOUT  seconds to wait for sentinel (default: 30)
 #
 # Exit codes:
-#   0  ok        - sentinel found within timeout
+#   0  ok        - sentinel found and JIT witness intact within timeout
 #   1  missing   - ISO or qemu-system-x86_64 not present
 #   2  timeout   - QEMU did not print sentinel within $SMOKE_TIMEOUT
 #   3  startup   - QEMU exited unexpectedly before printing anything
 #   4  guest_err - QEMU reported guest CPU faults
+#   5  jit_witness - JIT-emitted `X` missing or out of order
+#                    relative to the entry/invoke log lines
 
 set -euo pipefail
 
@@ -59,7 +61,36 @@ while (( elapsed < TIMEOUT )); do
 	if grep -q "FIELD_OS_BOOT_OK" "$SERIAL_LOG" 2>/dev/null; then
 		kill -TERM "$QPID" 2>/dev/null || true
 		wait "$QPID" 2>/dev/null || true
-		echo "==> PASS (FIELD_OS_BOOT_OK in ${elapsed}s)"
+
+		# 5-4d JIT witness bracket. ADR-0001 §3 step 5's exit gate
+		# is that `holyc_eval("U0 F() { 'X\n'; } F();")` prints X
+		# on serial. Without this bracket a silent regression — jump
+		# to wrong offset, miss the printf rel32 patch, mis-aligned
+		# string-pool label — would just look weird in the smoke log
+		# rather than failing CI. Asserts:
+		#   1. `Eval: entry main @ N` line appears
+		#   2. before the next `Eval: invoke main` line, a line
+		#      containing exactly `X` appears
+		#   3. `Eval: invoke main` line appears
+		# awk exit codes 1/2/3 distinguish which assertion failed
+		# in stderr; the script exits 5 in any of those cases.
+		if ! awk '
+			/^Eval: entry main / { in_window = 1; saw_entry = 1; next }
+			/^Eval: invoke main/ { in_window = 0; saw_invoke = 1 }
+			in_window && $0 == "X" { found = 1 }
+			END {
+				if (!saw_entry)  exit 1
+				if (!saw_invoke) exit 2
+				if (!found)      exit 3
+			}
+		' "$SERIAL_LOG"; then
+			echo "qemu-smoke.sh: JIT witness regression — X missing or out of order" >&2
+			echo "--- serial output ---" >&2
+			cat "$SERIAL_LOG" >&2
+			exit 5
+		fi
+
+		echo "==> PASS (FIELD_OS_BOOT_OK in ${elapsed}s, JIT witness intact)"
 		echo
 		echo "--- serial output ---"
 		cat "$SERIAL_LOG"
