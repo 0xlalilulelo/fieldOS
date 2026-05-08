@@ -3,6 +3,7 @@
 #include "eval.h"
 #include "arch/x86_64/serial.h"
 #include "lib/format.h"
+#include "holyc/abi_table.h"
 #include "holyc/jit.h"
 #include "holyc/walker.h"
 
@@ -197,10 +198,41 @@ int holyc_eval(const char *src)
 		serial_puts("\n");
 	}
 
-	/* JIT commit: flip NX off on the pages we just filled. The bytes
-	 * are now executable — but extern relocs still hold zero rel32s,
-	 * so jumping to argc/argv/printf would land in an unmapped page.
-	 * 5-3 patches those before any execution attempt; 5-4 invokes. */
+	/* 5-3c pass-3: resolve extern relocations against the ABI table.
+	 * Runs BEFORE holyc_jit_commit so the buffer stays writable
+	 * irrespective of any future strict-W^X ADR (today commit only
+	 * flips NX off, but the ordering is one line either way). The
+	 * base_va parameter is the absolute VA the buffer executes at —
+	 * which is the kernel-side pointer itself, since the JIT region
+	 * is identity-mapped from the kernel's view through HOLYC_JIT_BASE.
+	 *
+	 * 5-3c logs both counts and returns 0 to eval.c on success even
+	 * with unresolved > 0; 5-3d codifies the unresolved>0 hard-error
+	 * policy. For the M3 witness `I64 F() { return 42; } F();` argc
+	 * and argv resolve via 5-3a's storage entries, leaving 0
+	 * unresolved. */
+	size_t resolved   = 0;
+	size_t unresolved = 0;
+	int p3rc = holyc_walker_pass3(&holyc_extern_table,
+	                              out_buf, out_len,
+	                              (uint64_t)(uintptr_t)out_buf,
+	                              abi_table_lookup,
+	                              &resolved, &unresolved);
+	if (p3rc != 0) {
+		serial_puts("Eval: pass3 rc=");
+		format_dec((uint64_t)(unsigned int)(-p3rc));
+		serial_puts(" (negated)\n");
+		return -1;
+	}
+	serial_puts("Eval: pass3 - ");
+	format_dec((uint64_t)resolved);
+	serial_puts(" resolved, ");
+	format_dec((uint64_t)unresolved);
+	serial_puts(" unresolved\n");
+
+	/* JIT commit: flip NX off on the pages we just filled. After
+	 * pass-3 the rel32 sites hold the right displacements, so the
+	 * bytes are both executable and reachable — 5-4 invokes. */
 	if (holyc_jit_commit(out_buf, (uint64_t)out_len) != 0) {
 		serial_puts("Eval: holyc_jit_commit failed\n");
 		return -1;
@@ -208,12 +240,13 @@ int holyc_eval(const char *src)
 
 	/* Witness line per the kickoff §"Step 5-2 — pipeline driver":
 	 *   Eval: pipeline... OK (N bytes, M relocs deferred)
-	 * M counts deferred extern relocations only — locals are patched
-	 * in place in pass-2, so they are not "deferred". */
+	 * After pass-3, M is the residual unresolved count — entries
+	 * whose symbol abi_table_lookup returned 0 for. 5-3d turns this
+	 * non-zero case into a hard error; 5-3c just reports it. */
 	serial_puts("Eval: pipeline... OK (");
 	format_dec((uint64_t)out_len);
 	serial_puts(" bytes, ");
-	format_dec((uint64_t)holyc_extern_table.count);
+	format_dec((uint64_t)unresolved);
 	serial_puts(" relocs deferred)\n");
 
 	return 0;

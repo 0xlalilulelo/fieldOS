@@ -241,3 +241,64 @@ int holyc_walker_pass2(const char *data, size_t len,
 	}
 	return 0;
 }
+
+/* --- Pass 3: extern symbol resolution ----------------------------------- */
+
+#define INT32_MIN_C ((int64_t)-0x80000000LL)
+#define INT32_MAX_C ((int64_t) 0x7FFFFFFFLL)
+
+int holyc_walker_pass3(const HolycExternTable *externs,
+                       unsigned char *out, size_t out_len,
+                       uint64_t base_va,
+                       HolycAbiLookup lookup,
+                       size_t *resolved_count,
+                       size_t *unresolved_count)
+{
+	if (resolved_count) {
+		*resolved_count = 0;
+	}
+	if (unresolved_count) {
+		*unresolved_count = 0;
+	}
+	if (externs == NULL || out == NULL || lookup == NULL) {
+		return AS_E_MALFORMED;
+	}
+
+	for (size_t i = 0; i < externs->count; i++) {
+		const HolycExternReloc *e = &externs->entries[i];
+
+		if (e->buf_offset + 4 > out_len) {
+			return AS_E_NOSPACE;
+		}
+
+		uint64_t target = lookup(e->sym, e->sym_len);
+		if (target == 0) {
+			if (unresolved_count) {
+				(*unresolved_count)++;
+			}
+			continue;
+		}
+
+		uint64_t patch_va = base_va + e->buf_offset;
+		int64_t  disp64   = (int64_t)target - (int64_t)(patch_va + 4);
+		if (disp64 < INT32_MIN_C || disp64 > INT32_MAX_C) {
+			/* Out-of-rel32-reach. M3 has no thunking; surface as a
+			 * hard error so a future allocator change that breaks
+			 * the +/- 2 GiB invariant lands as a kernel panic via
+			 * eval.c, not as a silent miscompile. */
+			return AS_E_MALFORMED;
+		}
+		int32_t disp = (int32_t)disp64;
+
+		out[e->buf_offset + 0] = (unsigned char)(disp        & 0xFF);
+		out[e->buf_offset + 1] = (unsigned char)((disp >> 8)  & 0xFF);
+		out[e->buf_offset + 2] = (unsigned char)((disp >> 16) & 0xFF);
+		out[e->buf_offset + 3] = (unsigned char)((disp >> 24) & 0xFF);
+
+		if (resolved_count) {
+			(*resolved_count)++;
+		}
+	}
+
+	return AS_OK;
+}

@@ -16,6 +16,7 @@
  * surfaces extern symbols the label table does not match. */
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct {
 	const char *name;     /* into the input buffer; NOT NUL-terminated */
@@ -61,6 +62,48 @@ typedef struct {
 int holyc_walker_pass1(const char *data, size_t len,
                        HolycLabelTable *labels,
                        size_t *total_bytes);
+
+/* ABI lookup function pointer. Pass-3 takes a function pointer rather
+ * than calling abi_table_lookup directly so walker.c stays host-buildable
+ * inside the asm-test harness without dragging abi_table.c (and its
+ * serial / format kernel-only deps) into the host link. eval.c passes
+ * &abi_table_lookup; asm_test.c (5-3e) passes a synthetic mock that
+ * maps _printf to a fixed virtual address. Returns 0 to signal not-
+ * found per the abi_table_lookup contract. */
+typedef uint64_t (*HolycAbiLookup)(const char *name, size_t name_len);
+
+/* Pass 3: extern symbol resolution.
+ *
+ * Walks `externs` (built by pass-2), calls `lookup(sym, sym_len)` for
+ * each entry, and patches the rel32 at `out + entry.buf_offset` against
+ * the resolved virtual address. The patch math is absolute-VA aware:
+ *
+ *   patch_va = base_va + entry.buf_offset
+ *   *(int32_t *)(out + entry.buf_offset) =
+ *       (int32_t)(target_va - (patch_va + 4))
+ *
+ * `base_va` is the absolute VA the `out` buffer will execute from
+ * (typically (uint64_t)(uintptr_t)out itself, since the JIT region
+ * is identity-mapped from the kernel's view). pass-3 runs before
+ * holyc_jit_commit to keep the buffer writable irrespective of any
+ * future strict-W^X ADR.
+ *
+ * Returns 0 on success with *resolved_count and *unresolved_count
+ * populated; returns AS_E_NOSPACE / negative if a buf_offset would
+ * spill past out_len, or if a resolved displacement does not fit in
+ * a signed 32-bit (rel32 reach is +/- 2 GiB; the M3 kernel and JIT
+ * region are within reach but a future allocator change might not be).
+ *
+ * Entries whose lookup returns 0 are not patched and contribute to
+ * *unresolved_count. eval.c's 5-3d policy treats unresolved > 0 as
+ * a hard error; pass-3 itself reports both counts and returns 0 so
+ * the policy can be applied at the call site. */
+int holyc_walker_pass3(const HolycExternTable *externs,
+                       unsigned char *out, size_t out_len,
+                       uint64_t base_va,
+                       HolycAbiLookup lookup,
+                       size_t *resolved_count,
+                       size_t *unresolved_count);
 
 /* Pass 2: re-walk `data[0..len)`, this time emitting bytes into
  * `out[0..out_cap)` and using `labels` (built by pass 1) to patch
