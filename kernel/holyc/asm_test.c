@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "asm.h"
+#include "jit.h"
 #include "walker.h"
 
 #ifndef AS_BIN
@@ -304,6 +305,150 @@ static int runCorpus(const char *path, Stats *s) {
     return 0;
 }
 
+/* --- Pass-3 mock lookup harness (5-3e) -----------------------------------
+ *
+ * Verifies pass-3's resolution and rel32 patch math against synthetic
+ * abi_table mocks that map _printf to a fixed virtual address (or to
+ * nothing). The expected displacement formula is
+ *
+ *   disp = (int32_t)(target_va - (base_va + buf_offset + 4))
+ *
+ * with target_va = MOCK_PRINTF_VA and base_va = HOLYC_JIT_BASE. For
+ * Bug_171.s specifically, all three deferred _printf relocs (at 73,
+ * 154, 180) must end up with disp values matching this formula and
+ * the unresolved count must be 0.
+ *
+ * The "lookup returns zero" mock exercises the 5-3d unresolved-policy
+ * path: every extern reports unresolved, no rel32 is patched, the
+ * buffer's zero-fill at extern sites is preserved. */
+
+static const char *baseName(const char *path);
+
+#define MOCK_PRINTF_VA 0x0000000010000000ULL
+
+static uint64_t mock_lookup_printf(const char *name, size_t name_len) {
+    if (name_len == 7 && !memcmp(name, "_printf", 7)) {
+        return MOCK_PRINTF_VA;
+    }
+    return 0;
+}
+
+static uint64_t mock_lookup_none(const char *name, size_t name_len) {
+    (void)name; (void)name_len;
+    return 0;
+}
+
+static int32_t readRel32(const unsigned char *p) {
+    return (int32_t)(
+        (uint32_t)p[0]
+        | ((uint32_t)p[1] << 8)
+        | ((uint32_t)p[2] << 16)
+        | ((uint32_t)p[3] << 24));
+}
+
+static int runPass3(const HolycExternTable *externs,
+                    const unsigned char *baseline,
+                    size_t out_len,
+                    const char *path) {
+    int regressions = 0;
+
+    /* Mock 1: _printf -> MOCK_PRINTF_VA. */
+    unsigned char *buf = malloc(out_len);
+    if (!buf) return -1;
+    memcpy(buf, baseline, out_len);
+
+    size_t resolved = 0, unresolved = 0;
+    int rc = holyc_walker_pass3(externs, buf, out_len,
+                                HOLYC_JIT_BASE, mock_lookup_printf,
+                                &resolved, &unresolved);
+    if (rc != AS_OK) {
+        fprintf(stderr, "    pass3: rc=%d *** REGRESSION ***\n", rc);
+        free(buf);
+        return 1;
+    }
+
+    printf("    pass3           %zu resolved, %zu unresolved "
+           "(mock _printf -> 0x%llx)\n",
+           resolved, unresolved, (unsigned long long)MOCK_PRINTF_VA);
+
+    /* Verify each rel32 the mock resolved matches the formula. */
+    for (size_t i = 0; i < externs->count; i++) {
+        const HolycExternReloc *e = &externs->entries[i];
+        if (mock_lookup_printf(e->sym, e->sym_len) == 0) continue;
+
+        uint64_t patch_va = HOLYC_JIT_BASE + e->buf_offset;
+        int64_t  disp64   = (int64_t)MOCK_PRINTF_VA - (int64_t)(patch_va + 4);
+        int32_t  expected = (int32_t)disp64;
+        int32_t  actual   = readRel32(buf + e->buf_offset);
+
+        if (actual != expected) {
+            fprintf(stderr,
+                    "    pass3: rel32 at %zu mismatch "
+                    "(expected 0x%08x, got 0x%08x) *** REGRESSION ***\n",
+                    e->buf_offset, (unsigned)expected, (unsigned)actual);
+            regressions++;
+        }
+    }
+
+    /* Bug_171.s canonical: 3 resolved (_printf x3), 0 unresolved. */
+    if (!strcmp(baseName(path), "Bug_171.s")) {
+        if (resolved != 3) {
+            fprintf(stderr,
+                    "    pass3: expected 3 resolved, got %zu "
+                    "*** REGRESSION ***\n", resolved);
+            regressions++;
+        }
+        if (unresolved != 0) {
+            fprintf(stderr,
+                    "    pass3: expected 0 unresolved, got %zu "
+                    "*** REGRESSION ***\n", unresolved);
+            regressions++;
+        }
+    }
+
+    free(buf);
+
+    /* Mock 2: lookup-returns-zero. Exercises the 5-3d unresolved-policy
+     * path: pass-3 must report every extern as unresolved, leave
+     * every rel32 site at zero, and never patch. */
+    buf = malloc(out_len);
+    if (!buf) return -1;
+    memcpy(buf, baseline, out_len);
+
+    resolved = 0; unresolved = 0;
+    rc = holyc_walker_pass3(externs, buf, out_len,
+                            HOLYC_JIT_BASE, mock_lookup_none,
+                            &resolved, &unresolved);
+    if (rc != AS_OK) {
+        fprintf(stderr, "    pass3 (none): rc=%d *** REGRESSION ***\n", rc);
+        free(buf);
+        return 1;
+    }
+
+    printf("    pass3 (none)    %zu resolved, %zu unresolved "
+           "(mock returns 0)\n", resolved, unresolved);
+
+    if (resolved != 0 || unresolved != externs->count) {
+        fprintf(stderr,
+                "    pass3 (none): expected 0/%zu, got %zu/%zu "
+                "*** REGRESSION ***\n",
+                externs->count, resolved, unresolved);
+        regressions++;
+    }
+    for (size_t i = 0; i < externs->count; i++) {
+        size_t off = externs->entries[i].buf_offset;
+        if (buf[off] | buf[off + 1] | buf[off + 2] | buf[off + 3]) {
+            fprintf(stderr,
+                    "    pass3 (none): rel32 at %zu was patched "
+                    "(expected zero) *** REGRESSION ***\n", off);
+            regressions++;
+        }
+    }
+
+    free(buf);
+    return regressions;
+}
+
 /* --- Pass-1 walker harness (5-2b) ----------------------------------------
  *
  * Slurps the whole corpus file into one buffer and runs
@@ -314,6 +459,8 @@ static int runCorpus(const char *path, Stats *s) {
  * out: _FN, _PrintMessage, _main, .L0..L4, sign_bit, one_dbl. A
  * missing canonical label is a regression and fails the harness. */
 
+/* Forward-declared above runPass3 (5-3e) so the path-canonical
+ * Bug_171.s pass-3 assertions can resolve before this definition. */
 static const char *baseName(const char *path) {
     const char *slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
@@ -452,6 +599,15 @@ static int runWalker(const char *path) {
             }
         }
     }
+
+    /* 5-3e pass-3 mock-lookup harness. Run *after* pass-2 has filled
+     * the buffer + recorded externs but *before* we free out, so the
+     * baseline byte image (locals patched, externs zero-filled) is
+     * what mock pass-3 invocations copy from. runPass3 owns its own
+     * buffer copies so successive mock runs are independent. */
+    int p3rc = runPass3(&externs, out, out_len, path);
+    if (p3rc < 0) { free(out); free(buf); return -1; }
+    regressions += p3rc;
 
     free(out);
     free(buf);
