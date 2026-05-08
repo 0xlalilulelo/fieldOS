@@ -1,11 +1,36 @@
 # Changelog
 
-All notable changes to Field OS are recorded here. The format follows
+All notable changes to **Arsenal** are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Semantic
-versioning applies once a public release is cut (v0.1 at the end of
-Phase 1).
+versioning applies once a public release is cut (M2 first public alpha;
+v1.0 daily-driver maturity per `docs/plan/ARSENAL.md`).
+
+The project was previously named **Field OS** and tracked changes through
+M0 / M1 / M2 / M3 in the entries below. The pivot to Arsenal is recorded
+in [`docs/adrs/0004-arsenal-pivot.md`](docs/adrs/0004-arsenal-pivot.md);
+the Field OS work is preserved at the `field-os-v0.1` tag.
 
 ## [Unreleased]
+
+### Changed
+
+- **Project pivoted from Field OS to Arsenal** on 2026-05-08
+  (ADR-0004). HolyC monolith → Rust monolith with capability-secured
+  userspace, LinuxKPI driver inheritance, tri-modal app distribution
+  (native Rust + Wasm components + POSIX subset). Field OS PoC at
+  M3 step 6-5 preserved at the `field-os-v0.1` tag. Naming catalog
+  and visual identity carry forward; the language and architecture
+  do not.
+- Documentation rewritten for Arsenal: CLAUDE.md, STATUS.md,
+  README.md, docs/naming.md, docs/plan/ARSENAL.md (now canonical;
+  Field OS phase docs archived to docs/plan/legacy/).
+
+## [Field OS — archived at field-os-v0.1]
+
+The entries below describe the Field OS arc (2026-04-29 through
+2026-05-08, M0 through M3 step 6-5). They are preserved unchanged as
+historical record. The code these entries describe is reachable via
+`git checkout field-os-v0.1`.
 
 ### Added
 

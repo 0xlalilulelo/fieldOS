@@ -1,61 +1,93 @@
-# Field OS
+# Arsenal
 
-A from-scratch desktop operating system in HolyC for x86_64 — and later
-ARM64 Snapdragon X and Apple Silicon M1/M2. Inspired by the technical
-primitives of TempleOS (HolyC as the universal language, the Brief
-executable-document format, the shell-is-the-compiler REPL, the F5
-hot-patch live-coding loop, the source-as-documentation `#help_index`
-model, the line-count discipline) and the visual identity of macOS Big
-Sur (translucent vibrancy, 8/12/20 px corner radii, 4 px spacing grid,
-IBM Plex SIL OFL typography).
+A from-scratch desktop operating system written primarily in Rust,
+targeting commodity 2026 hardware (Framework 13 AMD/Intel, Snapdragon X
+laptops, Apple Silicon M1/M2 Macs, generic AMD/Intel desktops).
 
-Field OS is paged, user/kernel-separated, preemptively scheduled. It
-carries forward none of TempleOS's religious framing or
-ring-0 / identity-mapped architecture. It happens to feel as immediate
-and direct as Terry Davis's original.
+Arsenal commits explicitly that **performance, usability, and security
+are peer concerns**. None is subordinated to the others. When two
+pillars conflict, the resolution is an Architecture Decision Record,
+not a silent ranking.
 
-Built by one person, evenings and weekends, on a multi-year arc.
+The kernel is a Rust monolith with capability-secured userspace.
+Drivers are inherited from Linux 6.12 LTS via a LinuxKPI-style shim.
+The compositor is a custom wgpu/Skia "Stage" rendering an iDroid + Big
+Sur fusion identity. Applications ship in three tiers: native Rust,
+sandboxed Wasm components (WASI 0.2 → 0.3), and a curated POSIX subset
+(relibc-style) for ports of Firefox / mpv / git / foot.
+
+Built by one person, evenings and weekends, on a multi-year arc — solo
+today, designed to support a small-team transition around year 3–4.
+
+## History
+
+Arsenal was previously called **Field OS** and explored a TempleOS-
+modernization framing in HolyC. The project pivoted on technical merit
+on 2026-05-08 at the `field-os-v0.1` tag. Decision rationale is in
+[`docs/adrs/0004-arsenal-pivot.md`](docs/adrs/0004-arsenal-pivot.md).
+
+The C kernel from the Field OS arc is preserved at the tag;
+`git checkout field-os-v0.1` resurrects it. The naming catalog and
+visual identity carry forward; the language and architecture do not.
 
 ## Status
 
-See [`STATUS.md`](STATUS.md). The project is in **Phase 0 — QEMU Proof
-of Concept**.
+See [`STATUS.md`](STATUS.md). The project is in **Pre-M0 — Field OS →
+Arsenal transition**. After the transition completes, ARSENAL.md M0
+(boot and breathe) begins; ~9 calendar months part-time per the
+timeline.
 
 ## Plan
 
-The full multi-year roadmap is in [`PLAN.md`](PLAN.md), with detailed
-phase plans in [`docs/plan/`](docs/plan/):
+The canonical plan is [`docs/plan/ARSENAL.md`](docs/plan/ARSENAL.md).
+Milestones:
 
-- **Phase 0** (M0–M10): QEMU PoC. HolyC on bare metal, Brief renderer,
-  software compositor, PS/2 input, BGA framebuffer. 12–18 months
-  part-time.
-- **Phase 1** (M11–M50): Real hardware on Framework 13 AMD. v0.1
-  release. 18–30 months part-time.
-- **Phase 2** (M51–M90): Snapdragon X bring-up, WASM Tabernacles,
-  pro-tier apps, stable ABI. v1.0 release. 24–36 months part-time.
-- **Phase 3** (M91–M130): Apple Silicon M1/M2, full tablet experience,
-  Stencil and Sequence apps. v2.0 release. 24–36 months part-time.
+- **M0 — Boot and breathe** (months 0–9). Rust kernel skeleton, UEFI
+  via Limine, serial console, virtio drivers in QEMU, basic scheduler,
+  smoltcp + rustls, simple shell. Boots to a `>` prompt in QEMU.
+- **M1 — Real iron** (months 9–24). LinuxKPI shim, amdgpu KMS, NVMe /
+  xHCI / iwlwifi, first boot on real Framework 13 AMD. Slint app in
+  software-rendered framebuffer.
+- **M2 — It looks like Arsenal** (months 24–36). Stage compositor with
+  iDroid/Big Sur identity, Wayland shim, first five native apps.
+  **First public alpha.**
+- **v0.5** (months 42–60). Wasm component runtime, POSIX/relibc subset,
+  ports of Firefox / mpv / foot, Brief notebook app, Cardboard Box.
+- **v1.0** (months 60–84). Daily-driver maturity on Framework 13 AMD.
+  Snapdragon X port. Cassette / Stencil / Sequence apps. Mail / music /
+  video / IDE. Accessibility shipped.
+- **v2.0** (months 84–120). Apple Silicon via Asahi collaboration.
+  Tablet experience. CHERI experimental support if commodity silicon
+  arrives.
 
-Total to v2.0: 6–9 calendar years from M0.
+Total to v1.0: 5–7 calendar years. Total to v2.0: 7–10 calendar years.
+Calibrated against Redox / SerenityOS / Genode / Asahi.
 
 ## Build
 
-The Phase 0 build chain is not yet wired. Once M0 lands, the canonical
-loop will be:
+The Rust scaffolding lands in Phase C of the transition (currently in
+progress). Once M0 step 1 lands, the canonical loop will be:
 
 ```
-make iso && tools/qemu-run.sh
+cargo build --release
+cargo xtask iso
+ci/qemu-smoke.sh arsenal-poc.iso
 ```
+
+asserting `ARSENAL_BOOT_OK` on COM1 within seconds. Until then, the
+historical Field OS build (`make iso && ci/qemu-smoke.sh`) works at
+the `field-os-v0.1` tag.
 
 ## Naming
 
 System component names follow the catalog in
 [`docs/naming.md`](docs/naming.md). The aesthetic is MGS3-warm and
-tactical: Patrol, Stage, Channel, Cardboard Box, Cache, Operator,
-Brief. No religious framing, ever.
+tactical: Patrol, Stage, Cache, Operator, Cardboard Box, Comm Tower,
+Inspector. No religious framing, ever.
 
 ## License
 
-BSD-2-Clause. See [`LICENSE`](LICENSE). Driver shims and vendored
-libraries retain their upstream licenses at the LinuxKPI / Cardboard
-Box boundary.
+BSD-2-Clause. See [`LICENSE`](LICENSE). Inherited Linux drivers
+(landing in M1) retain their original GPLv2 at the LinuxKPI shim
+boundary; Arsenal ships as a *combined work* with explicit license
+boundaries (the FreeBSD / drm-kmod pattern).
