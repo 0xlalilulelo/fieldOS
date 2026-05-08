@@ -68,6 +68,17 @@ $(HOLYC_KERNEL_BUILD)/math_shim.o: kernel/holyc/math_shim.c
 	@mkdir -p $(@D)
 	$(CROSS_CC) $(HOLYC_KERNEL_CFLAGS) -c $< -o $@
 
+# kernel/holyc/eval.c is the kernel-side bridge into the in-kernel
+# hcc pipeline. It compiles with the kernel proper's -mno-sse flags
+# (no float work happens in eval.c itself) but needs the upstream
+# vendored headers + the freestanding shim include path so it can
+# reference Cctrl, Lexer, AoStr, etc. directly. The override only
+# adds -I paths; everything else mirrors the default $(KERNEL_BUILD)/%.o
+# rule from kernel/kernel.mk.
+$(KERNEL_BUILD)/kernel/holyc/eval.o: kernel/holyc/eval.c
+	@mkdir -p $(@D)
+	$(CROSS_CC) $(KERNEL_CFLAGS) -I kernel/holyc/include -I holyc/src -c $< -o $@
+
 # The kernel-side .o files the holyc subset will pair with once the
 # kernel ELF link picks it up (candidate C). Listed explicitly rather
 # than pulling in $(KERNEL_OBJS) so the partial-link target stays a

@@ -3,27 +3,27 @@
 #include "eval.h"
 #include "arch/x86_64/serial.h"
 
-/* Forward-declare the vendored Cctrl handle. Cctrl is the global
- * compiler state (token tables, type maps, register sets, AST list,
- * macro defs, ...); cctrlNew() in holyc/src/cctrl.c allocates and
- * populates it. We treat it as opaque on the kernel side — eval.c
- * never reaches into Cctrl's fields, only through the function
- * surface (cctrlNew at M3-B/C-real; cctrlInitParse, cctrlTokenGet,
- * etc. at step 4+). The struct shape is frozen by the holyc/VERSION
- * pin per ADR-0001 §1.
- *
- * HCC_VERSION mirrors holyc/src/version.h's literal; defining it
+/* Vendored upstream headers — reachable because the per-file rule for
+ * eval.o in kernel/holyc/holyc-kernel.mk extends KERNEL_CFLAGS with
+ * -I holyc/src and -I kernel/holyc/include (the freestanding shim).
+ * No SSE is enabled in this TU; eval.c does not touch double / xmm. */
+#include "aostr.h"
+#include "cctrl.h"
+#include "compile.h"
+#include "lexer.h"
+#include "parser.h"
+
+extern void *malloc(size_t);    /* runtime.c shim */
+
+/* HCC_VERSION mirrors holyc/src/version.h's literal; defining it
  * here keeps the version-string observability concern local to
  * eval.c rather than depending on the vendored header chain. */
-typedef struct Cctrl Cctrl;
-extern Cctrl *cctrlNew(void);
-
 #define HCC_VERSION "beta-v0.0.10"
 
 /* The Cctrl handle replaces M3-B/C-minimal's static-int flag. NULL
  * means cctrlNew has not been called or returned NULL on OOM;
- * non-NULL is the live compiler-control struct that future steps
- * (parse, codegen) will thread through. */
+ * non-NULL is the live compiler-control struct that the pipeline
+ * threads through cctrlInitParse + parseToAst + compileToAsm. */
 static Cctrl *holyc_cctrl;
 
 void holyc_init(void)
@@ -50,10 +50,61 @@ int holyc_eval(const char *src)
 	if (src[0] == '\0') {
 		return 0;
 	}
-	/* Skeleton: parser/codegen not yet wired. Any non-empty source
-	 * returns -1. ADR-0001 §3 step 4 (in-tree x86_64 encoder) and
-	 * step 5 (JIT integration) close this gap. */
-	return -1;
+
+	/* Bypass holyc/src/compile.c's compileToAst, which assumes a
+	 * file path (lexPushFile -> open / read). lexInit accepts a
+	 * source pointer directly; we feed it the caller's string and
+	 * synthesize a minimal cur_file so error-reporting paths
+	 * (lexer.c:1322 #define syntax, lexer.c:1726 lexerReportLine)
+	 * have something to point at. The string is aliased — aoStr's
+	 * aoStrRelease is a vendored no-op, so nothing frees it.
+	 *
+	 * No CCF_PRE_PROC: 5-2a's witness contains no #include / #define
+	 * and we have no built-in tos.HH header to feed. The audit's
+	 * step 4 mention of preprocessor support is deferred. */
+	Lexer *l = (Lexer *)malloc(sizeof(Lexer));
+	if (l == NULL) {
+		return -1;
+	}
+	lexInit(l, (char *)src, 0);
+
+	LexFile *lf = (LexFile *)malloc(sizeof(LexFile));
+	if (lf == NULL) {
+		return -1;
+	}
+	AoStr *fname = aoStrNew();
+	aoStrCat(fname, "<eval>");
+	AoStr *srcbuf = aoStrNew();
+	srcbuf->data     = (char *)src;
+	srcbuf->capacity = 0;          /* sentinel: not owned, not freed */
+	size_t slen = 0;
+	while (src[slen]) {
+		slen++;
+	}
+	srcbuf->len      = slen;
+	lf->filename = fname;
+	lf->ptr      = (char *)src;
+	lf->lineno   = 1;
+	lf->src      = srcbuf;
+	l->cur_file  = lf;
+
+	cctrlInitParse(holyc_cctrl, l);
+	parseToAst(holyc_cctrl);
+
+	AoStr *asmbuf = compileToAsm(holyc_cctrl);
+	if (asmbuf == NULL) {
+		return -1;
+	}
+
+	/* Log the AT&T text on serial, fenced so the smoke output stays
+	 * readable when multiple eval calls run back-to-back. The bytes
+	 * are 5-2a's witness; 5-2b walks the same buffer to build the
+	 * label table, 5-2c re-walks to fill the JIT region. */
+	serial_puts("Eval: compileToAsm ---\n");
+	serial_puts(asmbuf->data);
+	serial_puts("Eval: compileToAsm ---\n");
+
+	return 0;
 }
 
 static _Noreturn void eval_halt(const char *reason)
@@ -68,7 +119,7 @@ static _Noreturn void eval_halt(const char *reason)
 
 void holyc_eval_self_test(void)
 {
-	serial_puts("Eval: skeleton... ");
+	serial_puts("Eval: pipeline\n");
 
 	if (holyc_eval("") != 0) {
 		eval_halt("empty");
@@ -76,11 +127,22 @@ void holyc_eval_self_test(void)
 	if (holyc_eval(NULL) != -1) {
 		eval_halt("null");
 	}
-	if (holyc_eval("y = 6 * 7;") != -1) {
-		eval_halt("non-empty");
+	/* 5-2a witness (kickoff §"Step 5-2 — pipeline driver"): a
+	 * function definition followed by a call. compileToAsm produces
+	 * the AT&T text 5-2b's line walker will consume. The asm dump
+	 * lands between the two "---" fences in the smoke output.
+	 *
+	 * I64 (not U0) for F's return type: the kickoff's literal U0 is
+	 * a HolyC type-mismatch (returning 42 from a void) and trips the
+	 * upstream type checker's loggerWarning, which renders cosmetically
+	 * through our vsnprintf shim's incomplete %.*s handling. The
+	 * compileToAsm output is structurally identical for I64; only the
+	 * informational warning goes away. */
+	if (holyc_eval("I64 F() { return 42; } F();") != 0) {
+		eval_halt("witness");
 	}
 
-	serial_puts("OK\n");
+	serial_puts("Eval: pipeline OK\n");
 }
 
 void holyc_subset_self_test(void)
@@ -94,8 +156,8 @@ void holyc_subset_self_test(void)
 	 * variadic path including aoStrPrintfVa with %s formatting),
 	 * arena.c (arenaInit, arenaAlloc), and ast.c (astGlobalCmdArgs +
 	 * the whole AstType allocation chain). The handle being non-NULL
-	 * is therefore a strong signal that the 9-file subset is
-	 * observably linked into the kernel ELF and works at runtime.
+	 * is therefore a strong signal that the kernel-resident subset
+	 * is observably linked into the kernel ELF and works at runtime.
 	 *
 	 * cctrlNew's allocation footprint is ~80 KiB (maps/sets + the
 	 * built_in_types AstType array + 60 entries in libc_functions

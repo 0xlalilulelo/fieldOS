@@ -102,6 +102,25 @@ char *strdup(const char *s)
 	return p;
 }
 
+/* strndup — copy at most n bytes plus a NUL terminator. Used by
+ * lexer.c (lexDefine) and x86.c (asmBinaryOp). The vendored callers
+ * always pass a length they computed from a known-good source range,
+ * so we trust n. */
+char *strndup(const char *s, size_t n)
+{
+	size_t len = 0;
+	while (len < n && s[len]) {
+		len++;
+	}
+	char *p = malloc(len + 1);
+	if (p == NULL) {
+		return NULL;
+	}
+	memcpy(p, s, len);
+	p[len] = '\0';
+	return p;
+}
+
 int memcmp(const void *a, const void *b, size_t n)
 {
 	const unsigned char *p = a;
@@ -262,6 +281,105 @@ int isatty(int fd)
 	(void)fd;
 	return 0;
 }
+
+/* --- numeric parsers ------------------------------------------------- */
+
+/* strtoull / strtoll — used by lexer.c:lexNumeric for hex (0x...) and
+ * decimal integer literals. We honour leading whitespace, optional
+ * sign for strtoll, and 0x/0X prefix when base==16 or base==0. The
+ * vendored caller passes base 10 or 16 explicitly, so the auto-detect
+ * branch (base==0) is uncovered today; if a future caller needs it,
+ * the test surfaces. *endptr is set to the first unconsumed byte. */
+unsigned long long strtoull(const char *nptr, char **endptr, int base)
+{
+	const char *p = nptr;
+	while (*p == ' ' || *p == '\t' || *p == '\n') {
+		p++;
+	}
+	if (*p == '+') {
+		p++;
+	}
+	if ((base == 0 || base == 16)
+	    && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+		p += 2;
+		base = 16;
+	} else if (base == 0) {
+		base = (*p == '0') ? 8 : 10;
+	}
+	unsigned long long v = 0;
+	while (*p) {
+		int d = -1;
+		char c = *p;
+		if      (c >= '0' && c <= '9')              d = c - '0';
+		else if (base == 16 && c >= 'a' && c <= 'f') d = c - 'a' + 10;
+		else if (base == 16 && c >= 'A' && c <= 'F') d = c - 'A' + 10;
+		else break;
+		if (d >= base) {
+			break;
+		}
+		v = v * (unsigned long long)base + (unsigned long long)d;
+		p++;
+	}
+	if (endptr != NULL) {
+		*endptr = (char *)p;
+	}
+	return v;
+}
+
+long long strtoll(const char *nptr, char **endptr, int base)
+{
+	const char *p = nptr;
+	while (*p == ' ' || *p == '\t' || *p == '\n') {
+		p++;
+	}
+	int neg = 0;
+	if (*p == '-') {
+		neg = 1;
+		p++;
+	} else if (*p == '+') {
+		p++;
+	}
+	unsigned long long u = strtoull(p, endptr, base);
+	return neg ? -(long long)u : (long long)u;
+}
+
+/* --- deferred POSIX surface -----------------------------------------
+ *
+ * The vendored holyc-lang reaches for POSIX file IO and a long-double
+ * parser through code paths the kernel-resident pipeline does not
+ * exercise: lexReadfile (called from lexPushFile, which fires only on
+ * #include resolution; CCF_PRE_PROC is off in eval.c) and strtold
+ * (called from lexNumeric only when a float literal appears in the
+ * token stream; M3-B's witnesses are integer-only). --gc-sections
+ * keeps the call sites because lexPushFile and lexNumeric are
+ * themselves reachable from lex(); the link demands real symbols.
+ *
+ * Each stub halts loudly so a future input that does reach them
+ * surfaces as a kernel panic with the function name, not a silent
+ * miscompile. Real implementations land when the witness needs them
+ * (#include support is a step-6 REPL nicety; float literals come
+ * with the M3 exit criterion's full feature set). */
+
+_Noreturn static void deferred_halt(const char *fn)
+{
+	serial_puts("Runtime: deferred POSIX stub reached: ");
+	serial_puts(fn);
+	serial_puts("\n");
+	for (;;) {
+		__asm__ volatile ("cli; hlt");
+	}
+}
+
+int    open (const char *p, int f, ...)        { (void)p; (void)f; deferred_halt("open"); }
+long   lseek(int fd, long off, int w)          { (void)fd; (void)off; (void)w; deferred_halt("lseek"); }
+long   read (int fd, void *b, unsigned long n) { (void)fd; (void)b; (void)n; deferred_halt("read"); }
+int    close(int fd)                           { (void)fd; deferred_halt("close"); }
+
+/* strtold — long double parser. lexNumeric calls this only when the
+ * token text contains '.', 'e', or 'E'; M3-B witnesses are integer-
+ * only. Long double uses x87 ST(0)/ST(1), independent of SSE, so
+ * this signature compiles under -mno-sse. */
+long double strtold(const char *nptr, char **endptr) { (void)nptr; (void)endptr; deferred_halt("strtold"); }
 
 /* fprintf in the kernel ignores the FILE * and routes to printf.
  * Vendored sources use it only for diagnostic output; conflating
