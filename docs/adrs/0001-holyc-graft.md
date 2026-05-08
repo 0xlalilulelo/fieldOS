@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0004](0004-arsenal-pivot.md). Accepted through
+2026-05-08; the project pivoted from Field OS (HolyC monolith) to Arsenal
+(Rust monolith) on technical merit. The graft strategy below reached its
+exit gate at M3 step 6-5 (`field-os-v0.1` tag) before the pivot; the
+content is preserved as historical record.
 
 ## Context
 

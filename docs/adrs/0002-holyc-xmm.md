@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0004](0004-arsenal-pivot.md). The HolyC subset this
+ADR governed no longer ships in Arsenal; SSE activation and FP
+save/restore obligations are re-evaluated under the Rust kernel's own
+calling-convention regime (which never enabled SSE in the first place
+since the C kernel forbade SIMD; Rust kernel decisions land in their own
+ADRs). Preserved as historical record of the M3-B / C-minimal landing.
 
 ## Context
 

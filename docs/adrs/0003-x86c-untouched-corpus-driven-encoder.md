@@ -2,10 +2,11 @@
 
 ## Status
 
-Accepted. Supersedes ADR-0001 §3 step 4's "Files modified: holyc/src/x86.c
-— output sink redirected from `fprintf` to an `AoStr` consumed by `asm.c`"
-line. Leaves ADR-0001 §2 (in-tree minimal encoder) and the rest of §3
-step 4 in force.
+Superseded by [ADR-0004](0004-arsenal-pivot.md). Previously: Accepted,
+superseding ADR-0001 §3 step 4's `x86.c` output-sink edit while leaving
+ADR-0001 §2 (in-tree encoder) and the rest of §3 step 4 in force. The
+encoder, x86.c, and the entire HolyC graft no longer ship in Arsenal;
+preserved as historical record.
 
 ## Context
 
