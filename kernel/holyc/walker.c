@@ -131,10 +131,13 @@ static int sym_eq(const char *a, size_t alen, const char *b, size_t blen)
 /* Look up `name[0..nlen)` in the label table. Returns 1 on hit with
  * *out_offset filled; 0 on miss. Linear scan — Bug_171.s has 11
  * labels; a hash is config-without-consumer until corpus inputs grow
- * past ~50 per module. */
-static int label_lookup(const HolycLabelTable *labels,
-                        const char *name, size_t nlen,
-                        size_t *out_offset)
+ * past ~50 per module.
+ *
+ * Public so eval.c can find the upstream-emitted `main` wrapper's
+ * offset for the 5-4 invocation; pass-2 below is the original caller. */
+int holyc_label_lookup(const HolycLabelTable *labels,
+                       const char *name, size_t nlen,
+                       size_t *out_offset)
 {
 	for (size_t i = 0; i < labels->count; i++) {
 		if (sym_eq(labels->entries[i].name, labels->entries[i].name_len,
@@ -199,8 +202,8 @@ int holyc_walker_pass2(const char *data, size_t len,
 			size_t abs_off = offset + per_line[r].offset;
 			size_t target  = 0;
 
-			if (label_lookup(labels, per_line[r].sym,
-			                 per_line[r].sym_len, &target)) {
+			if (holyc_label_lookup(labels, per_line[r].sym,
+			                       per_line[r].sym_len, &target)) {
 				int32_t disp = (int32_t)(target - (abs_off + 4));
 				out[abs_off + 0] = (unsigned char)(disp        & 0xFF);
 				out[abs_off + 1] = (unsigned char)((disp >> 8)  & 0xFF);

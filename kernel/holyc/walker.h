@@ -63,6 +63,16 @@ int holyc_walker_pass1(const char *data, size_t len,
                        HolycLabelTable *labels,
                        size_t *total_bytes);
 
+/* Look up `name[0..nlen)` in `labels`. Returns 1 on hit with *out_offset
+ * filled, 0 on miss. Linear scan — same shape as pass-2's internal
+ * helper, but exposed so eval.c can locate the entry-point label
+ * (`main`) for the 5-4 invocation. The label table's name pointers
+ * alias into the AoStr that compileToAsm returned, so callers must
+ * use this only between successive holyc_eval calls. */
+int holyc_label_lookup(const HolycLabelTable *labels,
+                       const char *name, size_t nlen,
+                       size_t *out_offset);
+
 /* ABI lookup function pointer. Pass-3 takes a function pointer rather
  * than calling abi_table_lookup directly so walker.c stays host-buildable
  * inside the asm-test harness without dragging abi_table.c (and its

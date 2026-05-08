@@ -230,6 +230,25 @@ int holyc_eval(const char *src)
 	format_dec((uint64_t)unresolved);
 	serial_puts(" unresolved\n");
 
+	/* 5-4a entry-point lookup. The upstream emit always wraps the
+	 * source unit in a `main(int argc, char **argv)` whose prologue
+	 * stores rdi/rsi into argc/argv before calling user code. 5-4b
+	 * casts (out_buf + main_offset) and invokes; 5-4a logs the offset
+	 * so a regression in the upstream's wrapper shape (rename, change
+	 * of entry symbol) shows up in the smoke output before the call
+	 * site dereferences a stale pointer. Logged before the unresolved-
+	 * policy gate so the diagnostic still lands when we early-return. */
+	size_t entry_offset = 0;
+	int entry_found = holyc_label_lookup(&holyc_label_table,
+	                                     "main", 4, &entry_offset);
+	if (entry_found) {
+		serial_puts("Eval: entry main @ ");
+		format_dec((uint64_t)entry_offset);
+		serial_puts("\n");
+	} else {
+		serial_puts("Eval: entry main not found\n");
+	}
+
 	/* 5-3d unresolved policy: ADR-0001 §3 step 5 says holyc_eval
 	 * refuses to run a module whose externs do not all resolve. Print
 	 * each unresolved symbol so the gap is visible (not a silent
