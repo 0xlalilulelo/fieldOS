@@ -269,11 +269,55 @@ int holyc_eval(const char *src)
 
 	/* JIT commit: flip NX off on the pages we just filled. After
 	 * pass-3 the rel32 sites hold the right displacements, so the
-	 * bytes are both executable and reachable — 5-4 invokes. */
+	 * bytes are both executable and reachable — 5-4b invokes below. */
 	if (holyc_jit_commit(out_buf, (uint64_t)out_len) != 0) {
 		serial_puts("Eval: holyc_jit_commit failed\n");
 		return -1;
 	}
+
+	/* 5-4b: invoke the JIT region. The upstream emit unconditionally
+	 * wraps the source unit in
+	 *
+	 *   int main(int argc, char **argv) { ...; call F; ...; return; }
+	 *
+	 * with a SysV prologue that stores rdi/rsi into argc/argv before
+	 * calling user code. Cast (out_buf + entry_offset) to a function
+	 * pointer of the matching shape and invoke with (0, NULL); the
+	 * return value lands on serial as a diagnostic.
+	 *
+	 * IF=0 invariant. ADR-0002 §1: the kernel runs with IF=0 from
+	 * boot through M3, and JIT-resident code runs at the same ring
+	 * with IF inherited. No new exception path opens here; the M4
+	 * fxsave/fxrstor obligation in ADR-0002 §2 does not move forward
+	 * because the witness has no float / xmm touch (5-4c's 'X\\n' is
+	 * a string, not a double).
+	 *
+	 * Where the call lives (HANDOFF.md trade-off pair 3): inside
+	 * holyc_eval, naturally co-located with the rest of the pipeline.
+	 * A holyc_jit_invoke(addr, argc, argv) helper in jit.c is the
+	 * right shape for M4 once Patrol exists and a second caller
+	 * appears; M3 has only one. Promote at that point.
+	 *
+	 * Entry-point absence (5-4a's `entry_found == 0` branch) is a
+	 * hard error here: the bytes have been committed but we have no
+	 * symbol to enter them at. */
+	if (!entry_found) {
+		serial_puts("Eval: invoke skipped (no main entry)\n");
+		return -1;
+	}
+
+	int (*entry_fn)(int, char **) =
+		(int (*)(int, char **))(out_buf + entry_offset);
+	int rc = entry_fn(0, NULL);
+
+	serial_puts("Eval: invoke main(0, NULL) -> rc=");
+	/* format_dec is unsigned; the I64 witness returns 42 (positive),
+	 * the U0 witness returns whatever %rax held after the inner call
+	 * (printf's return on 'X\\n', typically 2). Negative returns
+	 * would print as a large unsigned — acceptable for a diagnostic
+	 * until a witness exercises that path. */
+	format_dec((uint64_t)(unsigned int)rc);
+	serial_puts("\n");
 
 	/* Witness line per the kickoff §"Step 5-2 — pipeline driver":
 	 *   Eval: pipeline... OK (N bytes, M relocs deferred)
