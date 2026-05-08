@@ -3,6 +3,7 @@
 
 #include "abi_table.h"
 #include "arch/x86_64/serial.h"
+#include "holyc/runtime.h"
 #include "lib/format.h"
 
 /* argc / argv storage. The upstream main wrapper auto-emits
@@ -28,11 +29,23 @@ typedef struct {
  * bump), and as later witnesses pull in additional ABI symbols.
  * Linear scan is fine while the count stays small; a hash is
  * config-without-consumer until corpus inputs push past ~50. */
+/* Direct-address aliasing for printf: the symbol the upstream emits
+ * (`_printf` on macOS Mach-O hosts, `printf` on the cross-GCC ELF
+ * target) resolves directly to runtime.c's existing printf. No
+ * k_printf shim TU is written in M3-B; the abi.h k_* contract is
+ * honoured the first time a HolyC source unit calls a k_* symbol
+ * (5-4 or later). The format-string surface is already exercised
+ * by holyc_runtime_self_test (snprintf ladder + printf via the same
+ * vsnprintf path), so 5-3b's only new witness is that the table
+ * resolves _printf. The actual rel32 patch + execution lands in
+ * 5-3c + 5-4 respectively. */
 static const AbiEntry abi_entries[] = {
-	{"argc",  (uint64_t)(uintptr_t)&abi_argc_storage},
-	{"_argc", (uint64_t)(uintptr_t)&abi_argc_storage},
-	{"argv",  (uint64_t)(uintptr_t)&abi_argv_storage},
-	{"_argv", (uint64_t)(uintptr_t)&abi_argv_storage},
+	{"argc",    (uint64_t)(uintptr_t)&abi_argc_storage},
+	{"_argc",   (uint64_t)(uintptr_t)&abi_argc_storage},
+	{"argv",    (uint64_t)(uintptr_t)&abi_argv_storage},
+	{"_argv",   (uint64_t)(uintptr_t)&abi_argv_storage},
+	{"printf",  (uint64_t)(uintptr_t)&printf},
+	{"_printf", (uint64_t)(uintptr_t)&printf},
 };
 
 #define ABI_ENTRIES_N (sizeof(abi_entries) / sizeof(abi_entries[0]))
@@ -52,17 +65,32 @@ uint64_t abi_table_lookup(const char *name, size_t name_len)
 	return 0;
 }
 
+static _Noreturn void abi_halt(const char *reason)
+{
+	serial_puts("ABI panic: ");
+	serial_puts(reason);
+	serial_puts("\n");
+	for (;;) {
+		__asm__ volatile ("cli; hlt");
+	}
+}
+
 void holyc_abi_self_test(void)
 {
 	serial_puts("ABI: ");
 	format_dec((uint64_t)ABI_ENTRIES_N);
-	serial_puts(" entries, argc -> ");
-	uint64_t addr = abi_table_lookup("argc", 4);
-	if (addr == 0) {
-		serial_puts("NULL\n");
-		for (;;) {
-			__asm__ volatile ("cli; hlt");
-		}
+	serial_puts(" entries, argc/_printf -> ");
+	if (abi_table_lookup("argc", 4) == 0) {
+		abi_halt("argc lookup");
+	}
+	if (abi_table_lookup("_printf", 7) == 0) {
+		abi_halt("_printf lookup");
+	}
+	/* Cross-platform aliasing check: the unprefixed and prefixed
+	 * entries for printf must resolve to the same address. Cheap
+	 * canary against accidental drift in the table's pair shape. */
+	if (abi_table_lookup("printf", 6) != abi_table_lookup("_printf", 7)) {
+		abi_halt("printf/_printf alias drift");
 	}
 	serial_puts("NONZERO... OK\n");
 }
