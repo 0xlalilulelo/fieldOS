@@ -353,18 +353,19 @@ void holyc_eval_self_test(void)
 	if (holyc_eval(NULL) != -1) {
 		eval_halt("null");
 	}
-	/* 5-2a witness (kickoff §"Step 5-2 — pipeline driver"): a
-	 * function definition followed by a call. compileToAsm produces
-	 * the AT&T text 5-2b's line walker will consume. The asm dump
-	 * lands between the two "---" fences in the smoke output.
+	/* 5-4c witness — ADR-0001 §3 step 5 verbatim. `U0 F() { 'X\n';
+	 * } F();` lowers (per the upstream emit) to a printf call against
+	 * a string-pool .asciz with the literal X+newline as bytes. The
+	 * upstream emits the raw bytes of the source string into the AT&T
+	 * text via x86.c:2167's `.asciz "%S"`; 5-4c-prep's quote-aware
+	 * walker is what makes that survive line iteration.
 	 *
-	 * I64 (not U0) for F's return type: the kickoff's literal U0 is
-	 * a HolyC type-mismatch (returning 42 from a void) and trips the
-	 * upstream type checker's loggerWarning, which renders cosmetically
-	 * through our vsnprintf shim's incomplete %.*s handling. The
-	 * compileToAsm output is structurally identical for I64; only the
-	 * informational warning goes away. */
-	if (holyc_eval("I64 F() { return 42; } F();") != 0) {
+	 * The actual X (followed by a newline from the embedded 0x0A)
+	 * lands on serial between `Eval: invoke main(0, NULL) -> rc=N`
+	 * and `Eval: pipeline... OK (...)`. 5-4d's smoke bracket grep-
+	 * asserts the position so a silent regression (jump to wrong
+	 * offset, miss the printf call, etc.) fails CI. */
+	if (holyc_eval("U0 F() { 'X\n'; } F();") != 0) {
 		eval_halt("witness");
 	}
 
