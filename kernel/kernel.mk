@@ -18,6 +18,7 @@ KERNEL_C_SRCS := \
     kernel/holyc/eval.c \
     kernel/holyc/jit.c \
     kernel/holyc/runtime.c \
+    kernel/holyc/walker.c \
     kernel/lib/format.c \
     kernel/mm/pmm.c \
     kernel/mm/slab.c \

@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "asm.h"
+#include "walker.h"
 
 #ifndef AS_BIN
 #define AS_BIN "as"
@@ -303,6 +304,90 @@ static int runCorpus(const char *path, Stats *s) {
     return 0;
 }
 
+/* --- Pass-1 walker harness (5-2b) ----------------------------------------
+ *
+ * Slurps the whole corpus file into one buffer and runs
+ * holyc_walker_pass1 against it, mirroring what eval.c does on the
+ * AoStr compileToAsm returns at boot. Reports the cumulative byte
+ * count + label table; for Bug_171.s specifically (the only corpus
+ * input today) asserts the canonical label set the kickoff calls
+ * out: _FN, _PrintMessage, _main, .L0..L4, sign_bit, one_dbl. A
+ * missing canonical label is a regression and fails the harness. */
+
+static const char *baseName(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static int labelTablesContains(const HolycLabelTable *t,
+                               const char *name) {
+    size_t nlen = strlen(name);
+    for (size_t i = 0; i < t->count; i++) {
+        if (t->entries[i].name_len == nlen &&
+            !memcmp(t->entries[i].name, name, nlen)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int runWalker(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return -1; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+
+    HolycLabelTable labels;
+    size_t total = 0;
+    int rc = holyc_walker_pass1(buf, got, &labels, &total);
+    if (rc != 0) {
+        fprintf(stderr, "    walker: rc=%d *** REGRESSION ***\n", rc);
+        free(buf);
+        return 1;
+    }
+
+    printf("    walker          %4zu bytes, %zu label(s)%s\n",
+           total, labels.count,
+           labels.overflow ? " + overflow" : "");
+    for (size_t i = 0; i < labels.count; i++) {
+        printf("      %-22.*s @ %zu\n",
+               (int)labels.entries[i].name_len,
+               labels.entries[i].name,
+               labels.entries[i].offset);
+    }
+
+    /* Bug_171.s canonical-label assertion. Other corpus paths skip
+     * this check; their canonical sets land alongside their entries
+     * if more inputs join. */
+    int regressions = 0;
+    if (!strcmp(baseName(path), "Bug_171.s")) {
+        static const char *const expected[] = {
+            "sign_bit", "one_dbl",
+            ".L0", ".L1", ".L2", ".L3", ".L4",
+            "_FN", "_PrintMessage", "_main",
+            NULL,
+        };
+        for (int i = 0; expected[i] != NULL; i++) {
+            if (!labelTablesContains(&labels, expected[i])) {
+                fprintf(stderr,
+                        "    walker: missing canonical label '%s' "
+                        "*** REGRESSION ***\n",
+                        expected[i]);
+                regressions++;
+            }
+        }
+    }
+
+    free(buf);
+    return regressions ? 1 : 0;
+}
+
 /* --- Reporting ----------------------------------------------------------- */
 
 static int report(const Stats *s) {
@@ -370,5 +455,16 @@ int main(int argc, char **argv) {
 
     printf("==> asm-test: %d line(s) across %d corpus file(s)\n",
            s.total, argc - 1);
-    return report(&s);
+    int rc = report(&s);
+
+    /* Walker pass — runs after the per-line encoder report so the
+     * existing parity numbers stay first in the output stream. */
+    for (int i = 1; i < argc; i++) {
+        printf("==> walker: %s\n", argv[i]);
+        int wrc = runWalker(argv[i]);
+        if (wrc != 0) {
+            rc = 1;
+        }
+    }
+    return rc;
 }

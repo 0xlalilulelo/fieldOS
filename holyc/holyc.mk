@@ -157,8 +157,8 @@ corpus-clean:
 # and exits 0 unless the encoder returns an unexpected failure code.
 
 HOLYC_ASM_TEST     := $(HOLYC_BUILD)/asm-test
-HOLYC_ASM_TEST_SRC := kernel/holyc/asm_test.c kernel/holyc/asm.c
-HOLYC_ASM_TEST_HDR := kernel/holyc/asm.h
+HOLYC_ASM_TEST_SRC := kernel/holyc/asm_test.c kernel/holyc/asm.c kernel/holyc/walker.c
+HOLYC_ASM_TEST_HDR := kernel/holyc/asm.h kernel/holyc/walker.h
 
 $(HOLYC_ASM_TEST): $(HOLYC_ASM_TEST_SRC) $(HOLYC_ASM_TEST_HDR)
 	@mkdir -p $(@D)

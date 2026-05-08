@@ -2,6 +2,8 @@
 
 #include "eval.h"
 #include "arch/x86_64/serial.h"
+#include "lib/format.h"
+#include "holyc/walker.h"
 
 /* Vendored upstream headers — reachable because the per-file rule for
  * eval.o in kernel/holyc/holyc-kernel.mk extends KERNEL_CFLAGS with
@@ -25,6 +27,14 @@ extern void *malloc(size_t);    /* runtime.c shim */
  * non-NULL is the live compiler-control struct that the pipeline
  * threads through cctrlInitParse + parseToAst + compileToAsm. */
 static Cctrl *holyc_cctrl;
+
+/* Pass-1 walker output. Stored at file scope so 5-2c can consume the
+ * table without re-walking; for now only 5-2b's smoke uses it. The
+ * label name pointers alias into the AoStr the most-recent
+ * compileToAsm returned, so the table is valid only between successive
+ * holyc_eval calls. */
+static HolycLabelTable holyc_label_table;
+static size_t          holyc_total_bytes;
 
 void holyc_init(void)
 {
@@ -103,6 +113,40 @@ int holyc_eval(const char *src)
 	serial_puts("Eval: compileToAsm ---\n");
 	serial_puts(asmbuf->data);
 	serial_puts("Eval: compileToAsm ---\n");
+
+	/* 5-2b pass-1 walker. Builds the label table the JIT-fill pass
+	 * (5-2c) consumes when patching local rel32 relocations. The
+	 * static table inside holyc_label_table sidesteps the question
+	 * of where the table's storage lives across the two passes —
+	 * 5-2c will read it back; not freed until the next eval call. */
+	int wrc = holyc_walker_pass1(asmbuf->data, asmbuf->len,
+	                             &holyc_label_table,
+	                             &holyc_total_bytes);
+	if (wrc != 0) {
+		serial_puts("Eval: walker rc=");
+		format_dec((uint64_t)(unsigned int)(-wrc));
+		serial_puts(" (negated)\n");
+		return -1;
+	}
+	serial_puts("Eval: walker - ");
+	format_dec((uint64_t)holyc_total_bytes);
+	serial_puts(" bytes, ");
+	format_dec((uint64_t)holyc_label_table.count);
+	serial_puts(" label(s)");
+	if (holyc_label_table.overflow) {
+		serial_puts(" + overflow");
+	}
+	serial_puts(":\n");
+	for (size_t li = 0; li < holyc_label_table.count; li++) {
+		const HolycLabel *e = &holyc_label_table.entries[li];
+		serial_puts("  ");
+		for (size_t j = 0; j < e->name_len; j++) {
+			serial_putc(e->name[j]);
+		}
+		serial_puts(" @ ");
+		format_dec((uint64_t)e->offset);
+		serial_puts("\n");
+	}
 
 	return 0;
 }
