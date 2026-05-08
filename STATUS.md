@@ -20,18 +20,21 @@ inheritance, tri-modal app distribution). Rationale is in
 
 ### Active work
 
-**Phase A — Paper deliverables (in progress).** Updating every document
-in the repo to describe Arsenal accurately while the C kernel still
-exists in the working tree. Sessions land ADR-0004, the CLAUDE.md
-rewrite, the naming.md merge, this STATUS.md update, the phase-doc
-archival, README / PLAN / CHANGELOG, and a pivot devlog.
+**Phase A — Paper deliverables (complete).** Every document in the repo
+describes Arsenal: ADR-0004, the CLAUDE.md rewrite, the naming.md merge,
+the README / CHANGELOG / ARSENAL.md rewrites, three legacy archive
+READMEs, and the pivot devlog landed across nine commits ending at
+`4ecd0b4` on 2026-05-08.
 
-**Phase B — Code archival (next session).** Single removal commit takes
-out `kernel/`, the vendored `holyc/` tree, the cross-GCC toolchain, and
-the Field OS Makefile. Access path to the C kernel preserved via
-`git checkout field-os-v0.1`.
+**Phase B — Code archival (complete).** Removal commit `a35c473`
+(2026-05-08) deleted `kernel/`, the vendored `holyc/` tree, `base/`,
+`assets/`, the top-level `Makefile`, `ci/qemu-smoke.sh`, the cross-GCC
+toolchain scripts, `tools/count-loc.sh`, and `tools/qemu-run.sh` —
+196 files, 43,322 lines. Follow-up `0370b1f` stubbed
+`.github/workflows/ci.yml` to a noop placeholder. Access path to the
+C kernel preserved via `git checkout field-os-v0.1`.
 
-**Phase C — Rust scaffolding (subsequent sessions).** Cargo workspace +
+**Phase C — Rust scaffolding (next session).** Cargo workspace +
 `arsenal-kernel` crate + Limine boot + COM1 sentinel `ARSENAL_BOOT_OK`.
 This is the first Arsenal commit that boots; ARSENAL.md M0 step 1.
 
