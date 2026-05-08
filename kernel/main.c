@@ -10,6 +10,7 @@
 #include "holyc/abi_table.h"
 #include "holyc/eval.h"
 #include "holyc/jit.h"
+#include "holyc/repl.h"
 #include "holyc/runtime.h"
 #include "mm/pmm.h"
 #include "mm/slab.h"
@@ -101,6 +102,13 @@ void kmain(void)
 	holyc_init();
 	holyc_subset_self_test();
 	holyc_eval_self_test();
+#ifdef FIELDOS_REPL
+	/* Interactive build (`make repl-iso`). Enters the REPL before the
+	 * stage-2 sentinel so the smoke script's FIELD_OS_BOOT_OK grep
+	 * cannot pass against the REPL ISO — repl-iso is for manual
+	 * sessions, not CI. ADR-0001 §3 step 6. */
+	holyc_repl();
+#endif
 	serial_puts("Field OS: stage 2 reached\n");
 	serial_puts("FIELD_OS_BOOT_OK\n");
 	halt();

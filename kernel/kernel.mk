@@ -3,7 +3,12 @@
 # Kernel build rules. Included from the top-level Makefile after
 # tools/toolchain.mk, so $(CROSS_CC) and $(CROSS_LD) are available.
 
-KERNEL_BUILD := kernel/build
+# REPL=1 (set by `make repl-iso` at the top level) selects a separate
+# build dir + ISO and adds -DFIELDOS_REPL=1 to KERNEL_CFLAGS so kmain
+# enters holyc_repl() at end-of-boot. Default builds (REPL unset) stay
+# byte-identical to the smoke path: same flags, same kernel/build,
+# same field-os-poc.iso. ADR-0001 §3 step 6.
+KERNEL_BUILD := kernel/build$(if $(REPL),-repl,)
 KERNEL_ELF   := $(KERNEL_BUILD)/field-kernel.elf
 
 KERNEL_C_SRCS := \
@@ -18,6 +23,7 @@ KERNEL_C_SRCS := \
     kernel/holyc/asm.c \
     kernel/holyc/eval.c \
     kernel/holyc/jit.c \
+    kernel/holyc/repl.c \
     kernel/holyc/runtime.c \
     kernel/holyc/walker.c \
     kernel/lib/format.c \
@@ -76,7 +82,8 @@ KERNEL_CFLAGS := \
     -std=gnu11 \
     -ffunction-sections -fdata-sections \
     -I kernel \
-    -I vendor/limine
+    -I vendor/limine \
+    $(if $(REPL),-DFIELDOS_REPL=1,)
 
 # --gc-sections strips unreached .text.* / .data.* / .rodata.*
 # sections so the kernel-resident hcc subset (ast.o etc.) does not

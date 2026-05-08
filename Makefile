@@ -10,19 +10,23 @@ include kernel/kernel.mk
 include kernel/holyc/holyc-kernel.mk
 include holyc/holyc.mk
 
-ISO         := field-os-poc.iso
-ISO_ROOT    := build/iso-root
+# REPL=1 (set by the `repl-iso` phony below via recursive make) selects
+# field-os-poc-repl.iso + a separate build dir; default builds stay
+# byte-identical to the smoke path. ADR-0001 §3 step 6.
+ISO         := field-os-poc$(if $(REPL),-repl,).iso
+ISO_ROOT    := build/iso-root$(if $(REPL),-repl,)
 LIMINE_DIR  := vendor/limine
 LIMINE_HOST := $(LIMINE_DIR)/limine
 
 .DEFAULT_GOAL := help
-.PHONY: help toolchain-check iso limine-host clean distclean
+.PHONY: help toolchain-check iso repl-iso limine-host clean distclean
 
 # --- help ----------------------------------------------------------------
 help:
 	@echo "Field OS build targets"
 	@echo ""
-	@echo "  iso               Build $(ISO)."
+	@echo "  iso               Build $(ISO) (smoke-side; FIELDOS_REPL off)."
+	@echo "  repl-iso          Build field-os-poc-repl.iso (interactive; FIELDOS_REPL=1)."
 	@echo "  toolchain-check   Verify the x86_64-elf cross-compiler works."
 	@echo "  holyc-host        Build the vendored holyc-lang compiler as a host tool."
 	@echo "  holyc-host-smoke  Transpile holyc/bug-tests/Bug_171.HC to confirm the host build works."
@@ -78,10 +82,18 @@ $(ISO): $(KERNEL_ELF) $(LIMINE_HOST) boot/limine.conf
 
 iso: $(ISO)
 
+# --- repl-iso ------------------------------------------------------------
+# Recursive make with REPL=1 reparses the includes with a separate
+# KERNEL_BUILD ($(KERNEL_BUILD)-repl), -DFIELDOS_REPL=1 in CFLAGS, and
+# the -repl ISO suffix. ADR-0001 §3 step 6: the flag is off until M3
+# exits so smoke stays green during step-6 development.
+repl-iso:
+	$(MAKE) iso REPL=1
+
 # --- clean ---------------------------------------------------------------
 clean: holyc-host-clean holyc-kernel-subset-clean
-	rm -rf build kernel/build
-	rm -f $(ISO)
+	rm -rf build kernel/build kernel/build-repl
+	rm -f field-os-poc.iso field-os-poc-repl.iso
 	-$(MAKE) -C $(LIMINE_DIR) clean 2>/dev/null
 
 distclean: clean
