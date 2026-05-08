@@ -362,10 +362,11 @@ static int runWalker(const char *path) {
                labels.entries[i].offset);
     }
 
+    int regressions = 0;
+
     /* Bug_171.s canonical-label assertion. Other corpus paths skip
      * this check; their canonical sets land alongside their entries
      * if more inputs join. */
-    int regressions = 0;
     if (!strcmp(baseName(path), "Bug_171.s")) {
         static const char *const expected[] = {
             "sign_bit", "one_dbl",
@@ -384,6 +385,75 @@ static int runWalker(const char *path) {
         }
     }
 
+    /* 5-2c pass-2: emit + patch + defer externs. The byte buffer is
+     * sized from pass-1's total; pass-2 fills it then we cross-check
+     * each reloc against the label table independently to catch any
+     * drift between pass-1's recording and pass-2's resolution. */
+    unsigned char *out = malloc(total);
+    if (!out) { free(buf); return -1; }
+    HolycExternTable externs;
+    size_t out_len = 0, local_patched = 0;
+    int prc = holyc_walker_pass2(buf, got, &labels,
+                                 out, total, &out_len,
+                                 &externs, &local_patched);
+    if (prc != 0) {
+        fprintf(stderr, "    pass2:  rc=%d *** REGRESSION ***\n", prc);
+        free(out); free(buf);
+        return 1;
+    }
+
+    printf("    pass2           %4zu bytes, %zu local patched, "
+           "%zu extern deferred%s\n",
+           out_len, local_patched, externs.count,
+           externs.overflow ? " + overflow" : "");
+    for (size_t i = 0; i < externs.count; i++) {
+        printf("      %-22s @ %zu\n",
+               externs.entries[i].sym, externs.entries[i].buf_offset);
+    }
+
+    if (out_len != total) {
+        fprintf(stderr, "    pass2: byte count drift pass1=%zu pass2=%zu "
+                "*** REGRESSION ***\n", total, out_len);
+        regressions++;
+    }
+
+    /* Verify every extern reloc has zero bytes at its site. */
+    for (size_t i = 0; i < externs.count; i++) {
+        size_t off = externs.entries[i].buf_offset;
+        if (out[off] | out[off + 1] | out[off + 2] | out[off + 3]) {
+            fprintf(stderr,
+                    "    pass2: extern '%s' @ %zu not zero-filled "
+                    "*** REGRESSION ***\n",
+                    externs.entries[i].sym, off);
+            regressions++;
+        }
+    }
+
+    /* Bug_171.s canonical pass-2 split: 6 local relocs (.L0..L4 +
+     * _PrintMessage) patched, 3 extern relocs (_printf x3) deferred.
+     * Total 9 matches asm-test's per-line reloc count. */
+    if (!strcmp(baseName(path), "Bug_171.s")) {
+        if (local_patched != 6) {
+            fprintf(stderr, "    pass2: expected 6 local patched, got %zu "
+                    "*** REGRESSION ***\n", local_patched);
+            regressions++;
+        }
+        if (externs.count != 3) {
+            fprintf(stderr, "    pass2: expected 3 extern deferred, got %zu "
+                    "*** REGRESSION ***\n", externs.count);
+            regressions++;
+        }
+        for (size_t i = 0; i < externs.count; i++) {
+            if (strcmp(externs.entries[i].sym, "_printf") != 0) {
+                fprintf(stderr, "    pass2: extern[%zu] '%s' (expected _printf) "
+                        "*** REGRESSION ***\n",
+                        i, externs.entries[i].sym);
+                regressions++;
+            }
+        }
+    }
+
+    free(out);
     free(buf);
     return regressions ? 1 : 0;
 }

@@ -28,13 +28,17 @@ extern void *malloc(size_t);    /* runtime.c shim */
  * threads through cctrlInitParse + parseToAst + compileToAsm. */
 static Cctrl *holyc_cctrl;
 
-/* Pass-1 walker output. Stored at file scope so 5-2c can consume the
- * table without re-walking; for now only 5-2b's smoke uses it. The
- * label name pointers alias into the AoStr the most-recent
- * compileToAsm returned, so the table is valid only between successive
- * holyc_eval calls. */
-static HolycLabelTable holyc_label_table;
-static size_t          holyc_total_bytes;
+/* Pass-1 walker output. Stored at file scope so 5-2c consumes the
+ * table without re-walking. The label name pointers alias into the
+ * AoStr the most-recent compileToAsm returned, so the table is valid
+ * only between successive holyc_eval calls.
+ *
+ * holyc_extern_table holds extern relocations 5-3 will resolve against
+ * the static ABI table in abi_table.c; symbol names are copied so the
+ * entries outlive the per-line input that asm_encode aliased into. */
+static HolycLabelTable  holyc_label_table;
+static HolycExternTable holyc_extern_table;
+static size_t           holyc_total_bytes;
 
 void holyc_init(void)
 {
@@ -145,6 +149,47 @@ int holyc_eval(const char *src)
 		}
 		serial_puts(" @ ");
 		format_dec((uint64_t)e->offset);
+		serial_puts("\n");
+	}
+
+	/* 5-2c pass-2: emit bytes + patch local rel32s + record externs.
+	 * The byte buffer is a malloc on the kernel slab for now; 5-2d
+	 * routes the same allocation through holyc_jit_alloc. Sized from
+	 * pass-1's total so we never overflow. */
+	unsigned char *out_buf = (unsigned char *)malloc(holyc_total_bytes);
+	if (out_buf == NULL) {
+		serial_puts("Eval: malloc(out_buf) failed\n");
+		return -1;
+	}
+	size_t out_len       = 0;
+	size_t local_patched = 0;
+	int prc = holyc_walker_pass2(asmbuf->data, asmbuf->len,
+	                             &holyc_label_table,
+	                             out_buf, holyc_total_bytes, &out_len,
+	                             &holyc_extern_table, &local_patched);
+	if (prc != 0) {
+		serial_puts("Eval: pass2 rc=");
+		format_dec((uint64_t)(unsigned int)(-prc));
+		serial_puts(" (negated)\n");
+		return -1;
+	}
+	serial_puts("Eval: pass2 - ");
+	format_dec((uint64_t)out_len);
+	serial_puts(" bytes, ");
+	format_dec((uint64_t)local_patched);
+	serial_puts(" local patched, ");
+	format_dec((uint64_t)holyc_extern_table.count);
+	serial_puts(" extern deferred");
+	if (holyc_extern_table.overflow) {
+		serial_puts(" + overflow");
+	}
+	serial_puts(":\n");
+	for (size_t ei = 0; ei < holyc_extern_table.count; ei++) {
+		const HolycExternReloc *e = &holyc_extern_table.entries[ei];
+		serial_puts("  ");
+		serial_puts(e->sym);
+		serial_puts(" @ ");
+		format_dec((uint64_t)e->buf_offset);
 		serial_puts("\n");
 	}
 
