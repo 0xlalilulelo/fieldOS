@@ -6,64 +6,73 @@
 
 ## Current milestone
 
-**M3 — HolyC Runtime on Bare Metal** *(not yet started; the
-Big Risk milestone, est. 3–6 FT-weeks → ~7–14 calendar weeks
-part-time)*
+**Pre-M0 — Field OS → Arsenal transition** *(ADR-0004 landed
+2026-05-08; transition runs ~2–3 sessions)*
 
-### Scope
+### What's happening
 
-A HolyC compiler running inside the kernel that can accept
-source over serial, compile to native x86_64 in memory,
-execute, and print the result. The tiniest possible REPL.
-Bootstrap stays C; the C kernel calls `holyc_init()` once
-memory and serial are up, then `holyc_repl()`. Do not boot
-directly into HolyC (DWARF, incremental verification,
-recovery, ABI clarity — see `docs/plan/phase-0.md §M3`).
+The project pivoted from **Field OS** (TempleOS-modernization in HolyC,
+M3 step 6-5 working REPL at the `field-os-v0.1` tag) to **Arsenal**
+(Rust monolith with capability-secured userspace, LinuxKPI driver
+inheritance, tri-modal app distribution). Rationale is in
+[ADR-0004](docs/adrs/0004-arsenal-pivot.md); the canonical plan is
+[`docs/plan/ARSENAL.md`](docs/plan/ARSENAL.md).
 
-### Exit criterion
+### Active work
 
-`y = 6 * 7;` typed at the serial REPL prints `42`. The forked
-`holyc-lang` backend emits position-independent x86_64 into a
-JIT-allocated buffer; an ~20-function C → HolyC ABI surface
-(`abi.h`) is documented and stable.
+**Phase A — Paper deliverables (in progress).** Updating every document
+in the repo to describe Arsenal accurately while the C kernel still
+exists in the working tree. Sessions land ADR-0004, the CLAUDE.md
+rewrite, the naming.md merge, this STATUS.md update, the phase-doc
+archival, README / PLAN / CHANGELOG, and a pivot devlog.
 
-## Active work
+**Phase B — Code archival (next session).** Single removal commit takes
+out `kernel/`, the vendored `holyc/` tree, the cross-GCC toolchain, and
+the Field OS Makefile. Access path to the C kernel preserved via
+`git checkout field-os-v0.1`.
 
-**M2 — Memory Management — complete (2026-05-05 → 2026-05-06,
-four commits, +1,814 LOC base-system).** The PMM landed first
-as a packed bitmap with a uint64_t two-finger cursor over the
-Limine memmap; the VMM followed as a 4-level walker over the
-HHDM (no recursive mapping, 1 GiB self-test every boot
-retaining 513 pages = 2052 KiB of page tables); the slab heap
-closed with eight per-size caches plus a contiguous-page large
-path and a 10,000 random-alloc / random-free no-leaks
-self-test. M2-D consolidated four near-identical
-`serial_print_dec` / `put_dec` helpers into
-`kernel/lib/format.{h,c}::format_dec(uint64_t)` and bumped the
-stage marker to `stage 2 reached`. Boot-to-sentinel ~2 s on
-TCG. LOC: 1,980 / 100,000 (2 %), 23 base-system files.
+**Phase C — Rust scaffolding (subsequent sessions).** Cargo workspace +
+`arsenal-kernel` crate + Limine boot + COM1 sentinel `ARSENAL_BOOT_OK`.
+This is the first Arsenal commit that boots; ARSENAL.md M0 step 1.
 
-**M3 preview.** First step is the JIT memory region: reserve
-16 MiB of higher-half VA, back lazily, flip NX off only for
-emitted pages via `vmm_remap` (no global W^X violation).
-Second is the holyc-lang backend graft per
-`docs/skills/holyc-lang-audit.md` — replace file-emit with
-buffer-emit, resolve externs against a static ABI table.
-Third is the smallest possible REPL on COM1. The audit's
-six-step roadmap is the contract; deviations get an ADR.
+### After the transition
+
+Arsenal M0 in full per ARSENAL.md § "Three Concrete Starting Milestones"
+→ M0: boot to a `>` prompt in QEMU, virtio block + virtio-net,
+smoltcp + rustls, basic scheduler, framebuffer console, paging, SMP.
+Performance gate: boot to prompt in < 2 s under QEMU. Security gate:
+zero `unsafe` Rust outside designated FFI boundaries. Usability gate:
+prompt is keyboard-navigable; shows hardware summary.
+
+Estimated 9 calendar months part-time per the new timeline.
 
 ## Last completed milestone
 
-**M2 — Memory Management** (2026-05-05 → 2026-05-06, four
-commits). Tag `M2-complete` on commit `6cd9855`.
+**Field OS PoC v0.1** (tag `field-os-v0.1`, commit `dffe259`,
+2026-05-08). M3 step 6-5: per-eval cctrl reset, the HolyC REPL working
+in QEMU under `make repl-iso`. Encoder byte-equivalent with GAS across
+a 63-instruction corpus; JIT path landed `X` on serial through a
+six-step pipeline (parse → codegen → encode → relocate → commit →
+invoke); the M3 5-line exit-criterion session worked in miniature.
+~6,274 LOC of base-system C across 56 files at the high-water mark.
 
-**M1 — Boot to Long Mode** (2026-04-30 → 2026-05-04, four
-commits, +700 LOC base-system). Boot path: GDT + TSS, IDT with
-256 stubs and IST stacks for #DF/#NMI/#MC, software framebuffer
-with TempleOS 8×8 font, "Hello, Field" rendered, zero
-exceptions taken. Tag `M1-complete` on commit `c211cf8`.
+The C kernel is preserved at the tag; `git checkout field-os-v0.1`
+resurrects it. Bringing it back into `main` would require reverting
+Phase B's removal commit.
 
-**M0 — Tooling and Bootstrap** (2026-04-29 → 2026-04-30, six
-commits, ~190 LOC of base-system C, 21,000 LOC vendored at
-arm's length under `vendor/limine/` and `holyc/`). Tag
-`M0-complete` on commit `60e1a48`.
+## Earlier milestones
+
+**M2 — Memory Management** (2026-05-05 → 2026-05-06, four commits,
++1,814 LOC). Tag `M2-complete` on commit `6cd9855`. PMM + VMM + slab.
+
+**M1 — Boot to Long Mode** (2026-04-30 → 2026-05-04, four commits,
++700 LOC). Tag `M1-complete` on commit `c211cf8`. GDT + TSS, IDT, BGA
+framebuffer with 8×8 font, "Hello, Field" rendered.
+
+**M0 — Tooling and Bootstrap** (2026-04-29 → 2026-04-30, six commits,
+~190 LOC base-system C, ~21,000 LOC vendored). Tag `M0-complete` on
+commit `60e1a48`. Cross-GCC toolchain, Limine vendored, `make iso`
+producing a bootable ISO.
+
+These tags remain in place; the work is preserved at `field-os-v0.1`
+along with everything else from the Field OS arc.
