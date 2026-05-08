@@ -3,6 +3,7 @@
 #include "eval.h"
 #include "arch/x86_64/serial.h"
 #include "lib/format.h"
+#include "lib/setjmp.h"
 #include "holyc/abi_table.h"
 #include "holyc/jit.h"
 #include "holyc/walker.h"
@@ -41,6 +42,23 @@ static Cctrl *holyc_cctrl;
 static HolycLabelTable  holyc_label_table;
 static HolycExternTable holyc_extern_table;
 static size_t           holyc_total_bytes;
+
+/* Set up by holyc_eval before any vendored-tree call that can hit a
+ * panic path; cleared after the path closes naturally. runtime.c::exit
+ * reads holyc_eval_active through holyc_eval_try_longjmp; if set, it
+ * longjmps back to holyc_eval's setjmp call site rather than halting.
+ * volatile because the longjmp source (exit) and the setjmp site
+ * (holyc_eval) share state through a non-local jump. */
+static jmp_buf       holyc_eval_jmp_buf;
+static volatile int  holyc_eval_active;
+
+void holyc_eval_try_longjmp(int status)
+{
+	if (holyc_eval_active) {
+		holyc_eval_active = 0;
+		longjmp(holyc_eval_jmp_buf, status != 0 ? status : 1);
+	}
+}
 
 void holyc_init(void)
 {
@@ -105,9 +123,39 @@ int holyc_eval(const char *src)
 	l->cur_file  = lf;
 
 	cctrlInitParse(holyc_cctrl, l);
+
+	/* setjmp arms the longjmp landing site that runtime.c::exit
+	 * reaches via holyc_eval_try_longjmp. Direct call returns 0 and
+	 * we proceed into the parser; a longjmp from exit() returns the
+	 * caught status (or 1 if exit was called with 0). The window
+	 * spans parseToAst + compileToAsm; everything after asmGenerate
+	 * (walker, JIT, invoke) is our own code and does not reach
+	 * runtime.c::exit, so we close the window once asmbuf is in
+	 * hand. ADR-0001 §3 step 6. */
+	int jmp_rc = setjmp(holyc_eval_jmp_buf);
+	if (jmp_rc != 0) {
+		serial_puts("Eval: longjmp caught from exit(");
+		if (jmp_rc < 0) {
+			serial_puts("-");
+			format_dec((uint64_t)(unsigned int)(-jmp_rc));
+		} else {
+			format_dec((uint64_t)(unsigned int)jmp_rc);
+		}
+		serial_puts(")\n");
+		return -1;
+	}
+	holyc_eval_active = 1;
+
 	parseToAst(holyc_cctrl);
 
 	AoStr *asmbuf = compileToAsm(holyc_cctrl);
+
+	/* Past the vendored panic-reachable surface; the walker, JIT
+	 * region, and invoke path are our own code. Clear active so a
+	 * future stray exit() falls through to runtime.c's halt rather
+	 * than longjmping into a stale jmp_buf. */
+	holyc_eval_active = 0;
+
 	if (asmbuf == NULL) {
 		return -1;
 	}

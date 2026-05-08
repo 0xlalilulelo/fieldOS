@@ -4,6 +4,7 @@
 
 #include "runtime.h"
 #include "arch/x86_64/serial.h"
+#include "eval.h"
 #include "lib/format.h"
 #include "mm/slab.h"
 
@@ -261,11 +262,22 @@ __attribute__((weak)) void *calloc(size_t nmemb, size_t size)
 
 /* --- vendored-tree externs ------------------------------------------- */
 
-/* exit halts. The status is logged so the boundary between vendored
- * code's normal-return path and its bail-out path is observable in
- * the serial output. */
+/* If a holyc_eval call has armed its longjmp landing site (post-
+ * cctrlInitParse, pre-walker — see eval.c), route the exit back into
+ * holyc_eval rather than halting. The REPL loop's parse-error
+ * recovery contract is built on this: parser panics in the vendored
+ * tree (cctrl.c parseDecl, ast.c loggerPanic, ...) reach exit() with
+ * a non-zero status; we longjmp; holyc_eval logs and returns -1; the
+ * REPL prompt redraws. ADR-0001 §3 step 6.
+ *
+ * holyc_eval_try_longjmp returns iff no eval is active; in that case
+ * we fall through to the original halt path. The status is logged so
+ * the boundary between normal-return and bail-out paths stays
+ * observable on serial whether the longjmp fires or not. */
 _Noreturn void exit(int status)
 {
+	holyc_eval_try_longjmp(status);
+
 	serial_puts("Runtime exit(");
 	format_dec((uint64_t)(unsigned int)status);
 	serial_puts(") -- halting\n");

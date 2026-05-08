@@ -27,6 +27,16 @@ int holyc_eval(const char *src);
  * unexpected return so CI smoke catches regressions. */
 void holyc_eval_self_test(void);
 
+/* runtime.c::exit calls this when the vendored tree's parser /
+ * codegen hits a panic path. If a holyc_eval call is currently in
+ * the longjmp window (post-cctrlInitParse, pre-walker), the helper
+ * longjmps back to setjmp's call site in holyc_eval — which then
+ * logs the caught status and returns -1 to the REPL. If no eval is
+ * active (e.g., exit called from kmain self-test pre-step-6), the
+ * helper returns and runtime.c::exit falls through to its halt
+ * path. ADR-0001 §3 step 6. */
+void holyc_eval_try_longjmp(int status);
+
 /* Boot probe of the kernel-resident hcc subset (M3-B candidate
  * C-minimal). Allocates an AoStr via vendored holyc/src/aostr.c,
  * concatenates HCC_VERSION + " linked", prints to serial. Witnesses

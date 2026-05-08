@@ -33,7 +33,8 @@ KERNEL_C_SRCS := \
 
 KERNEL_S_SRCS := \
     kernel/arch/x86_64/gdt_load.S \
-    kernel/arch/x86_64/exceptions.S
+    kernel/arch/x86_64/exceptions.S \
+    kernel/lib/setjmp.S
 
 KERNEL_OBJS := \
     $(patsubst %.c,$(KERNEL_BUILD)/%.o,$(KERNEL_C_SRCS)) \
