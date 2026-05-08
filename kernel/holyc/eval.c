@@ -3,6 +3,7 @@
 #include "eval.h"
 #include "arch/x86_64/serial.h"
 #include "lib/format.h"
+#include "holyc/jit.h"
 #include "holyc/walker.h"
 
 /* Vendored upstream headers — reachable because the per-file rule for
@@ -152,13 +153,16 @@ int holyc_eval(const char *src)
 		serial_puts("\n");
 	}
 
-	/* 5-2c pass-2: emit bytes + patch local rel32s + record externs.
-	 * The byte buffer is a malloc on the kernel slab for now; 5-2d
-	 * routes the same allocation through holyc_jit_alloc. Sized from
-	 * pass-1's total so we never overflow. */
-	unsigned char *out_buf = (unsigned char *)malloc(holyc_total_bytes);
+	/* 5-2d: emit into the JIT region. holyc_jit_alloc bumps a cursor
+	 * over the 16 MiB higher-half VA reserved at boot (HOLYC_JIT_BASE)
+	 * and lazily backs pages W+NX. After pass-2 fills the buffer we
+	 * call holyc_jit_commit to flip NX off via vmm_remap on every page
+	 * the range touches; that's the W^X-safe handoff to executable —
+	 * 5-3 then resolves the extern relocations and 5-4 jumps in. */
+	unsigned char *out_buf =
+		(unsigned char *)holyc_jit_alloc((uint64_t)holyc_total_bytes);
 	if (out_buf == NULL) {
-		serial_puts("Eval: malloc(out_buf) failed\n");
+		serial_puts("Eval: holyc_jit_alloc failed\n");
 		return -1;
 	}
 	size_t out_len       = 0;
@@ -192,6 +196,25 @@ int holyc_eval(const char *src)
 		format_dec((uint64_t)e->buf_offset);
 		serial_puts("\n");
 	}
+
+	/* JIT commit: flip NX off on the pages we just filled. The bytes
+	 * are now executable — but extern relocs still hold zero rel32s,
+	 * so jumping to argc/argv/printf would land in an unmapped page.
+	 * 5-3 patches those before any execution attempt; 5-4 invokes. */
+	if (holyc_jit_commit(out_buf, (uint64_t)out_len) != 0) {
+		serial_puts("Eval: holyc_jit_commit failed\n");
+		return -1;
+	}
+
+	/* Witness line per the kickoff §"Step 5-2 — pipeline driver":
+	 *   Eval: pipeline... OK (N bytes, M relocs deferred)
+	 * M counts deferred extern relocations only — locals are patched
+	 * in place in pass-2, so they are not "deferred". */
+	serial_puts("Eval: pipeline... OK (");
+	format_dec((uint64_t)out_len);
+	serial_puts(" bytes, ");
+	format_dec((uint64_t)holyc_extern_table.count);
+	serial_puts(" relocs deferred)\n");
 
 	return 0;
 }
