@@ -7,6 +7,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
+#include "holyc/abi_table.h"
 #include "holyc/eval.h"
 #include "holyc/jit.h"
 #include "holyc/runtime.h"
@@ -91,6 +92,7 @@ void kmain(void)
 	slab_self_test();
 	holyc_jit_self_test();
 	holyc_runtime_self_test();
+	holyc_abi_self_test();
 	/* holyc_init() runs cctrlNew, which allocates ~80 KiB through
 	 * the subset's chain (containers.c + aostr.c + arena.c +
 	 * ast.c). Deferred until after slab_self_test so the slab leak
