@@ -2,17 +2,17 @@
 
 #include "repl.h"
 #include "arch/x86_64/serial.h"
+#include "holyc/eval.h"
+#include "lib/format.h"
 
-/* 6-2 lands the line buffer with local echo and backspace. 6-3 will
- * dispatch the captured buffer to holyc_eval; 6-4 wires setjmp /
- * longjmp parse-error recovery so the REPL loop survives the
- * deliberate syntax error in the M3 exit-criterion 5-line session.
- *
- * The witness for this commit is per-line round-trip: typed input
- * echoes character-by-character, backspace erases the previous cell,
- * and on Enter the captured buffer prints back as `[buf] <contents>`
- * with the prompt redrawn beneath it. Ctrl-D halts the loop with a
- * message so the banner's promise is honoured. */
+/* 6-3 lands holyc_eval dispatch on the captured buffer. The REPL is
+ * the second caller of holyc_eval (the first being holyc_eval_self_test
+ * in kmain, which stays smoke-side); each non-empty line goes through
+ * the same parse + codegen + encode + relocate + commit + invoke
+ * pipeline that printed `X` for the M3 step-5 witness. 6-4 wires
+ * setjmp / longjmp parse-error recovery so the deliberate syntax
+ * error in the M3 exit-criterion 5-line session does not halt the
+ * kernel via runtime.c's exit() shim. */
 
 /* HolyC source lines are usually short; 256 chars is comfortably
  * above the longest one-liner the M3 exit-criterion session (6-6)
@@ -50,9 +50,22 @@ void holyc_repl(void)
 		if (c == '\r' || c == '\n') {
 			serial_puts("\r\n");
 			buf[len] = '\0';
-			serial_puts("[buf] ");
-			serial_puts(buf);
-			serial_puts("\r\n");
+			/* Empty Enter just redraws the prompt; calling
+			 * holyc_eval("") returns 0 silently but the rc log
+			 * would be needless noise for a bare keystroke. */
+			if (len > 0) {
+				int rc = holyc_eval(buf);
+				serial_puts("eval rc=");
+				if (rc < 0) {
+					serial_puts("-");
+					format_dec(
+					    (uint64_t)(unsigned int)(-rc));
+				} else {
+					format_dec(
+					    (uint64_t)(unsigned int)rc);
+				}
+				serial_puts("\r\n");
+			}
 			len = 0;
 			prompt();
 			continue;
