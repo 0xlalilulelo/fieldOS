@@ -16,6 +16,7 @@
 #include "cctrl.h"
 #include "compile.h"
 #include "lexer.h"
+#include "list.h"
 #include "parser.h"
 
 extern void *malloc(size_t);    /* runtime.c shim */
@@ -83,6 +84,63 @@ int holyc_eval(const char *src)
 	}
 	if (src[0] == '\0') {
 		return 0;
+	}
+
+	/* Per-eval cctrl reset. cctrl.h §43-133 splits compiler state
+	 * across many fields; cctrlInitParse (cctrl.c:340) only sets the
+	 * lexer + token buffer, leaving the rest accumulating across
+	 * calls. Two consequences surfaced from 6-3 / 6-4:
+	 *   (1) initalisers (cctrl.h:103, "Top level statements, calls
+	 *       and globals") accumulates every top-level statement; on
+	 *       each eval compileToAsm re-emits a main that runs them
+	 *       all, so a session of `'one\n'; 'two\n';` re-prints `one`
+	 *       on the second eval.
+	 *   (2) After a longjmp from runtime.c::exit() the tmp_* fields
+	 *       (tmp_locals, tmp_func, localenv, tmp_loop_*, tmp_default_
+	 *       case) are mid-parse-mutated; the next eval inherits the
+	 *       garbage and the parser misclassifies tokens (the 6-4
+	 *       witness's third line surfaced this).
+	 *
+	 * Reset clears initalisers + initaliser_locals (so top-level
+	 * does not accumulate) and NULLs the tmp_* fields (so a prior
+	 * mid-parse longjmp leaves no residue). ast_list (cctrl.h:84)
+	 * and global_env (cctrl.h:47) are intentionally LEFT in place —
+	 * they hold function definitions and the user-defined symbol
+	 * table that the M3 exit-criterion 5-line session needs sticky
+	 * across lines (line 5's `G();` reads G defined on line 2).
+	 *
+	 * listClear with NULL freeValue frees the per-node list cells
+	 * via runtime.c::free -> slab; the AST values they point at are
+	 * arena-allocated and intentionally leak in the cctrl arena
+	 * until reboot. For M3 5-line sessions: negligible. */
+	listClear(holyc_cctrl->initalisers,       NULL);
+	listClear(holyc_cctrl->initaliser_locals, NULL);
+	holyc_cctrl->tmp_locals       = NULL;
+	holyc_cctrl->tmp_func         = NULL;
+	holyc_cctrl->tmp_rettype      = NULL;
+	holyc_cctrl->tmp_params       = NULL;
+	holyc_cctrl->tmp_case_list    = NULL;
+	holyc_cctrl->localenv         = NULL;
+	holyc_cctrl->func_params      = NULL;
+	holyc_cctrl->tmp_loop_begin   = NULL;
+	holyc_cctrl->tmp_loop_end     = NULL;
+	holyc_cctrl->tmp_default_case = NULL;
+	holyc_cctrl->tmp_asm_fname    = NULL;
+	holyc_cctrl->tmp_fname        = NULL;
+
+	/* The token ring buffer (cctrl.c:232 token_ring_buffer) holds
+	 * Lexeme* entries from the most recent parse. cctrlInitParse
+	 * (cctrl.c:340) does NOT reset its tail / head / size — it just
+	 * calls cctrLoadNextTokens to push more tokens. After a longjmp
+	 * out of a mid-parse, the buffer contains live indices pointing
+	 * at Lexemes whose source string aliased into the prior eval's
+	 * input (now freed at the slab level via the next REPL line). On
+	 * the first eval, token_buffer is still NULL — cctrlInitParse
+	 * allocates it lazily. Skip the reset in that case. */
+	if (holyc_cctrl->token_buffer != NULL) {
+		holyc_cctrl->token_buffer->tail = 0;
+		holyc_cctrl->token_buffer->head = 0;
+		holyc_cctrl->token_buffer->size = 0;
 	}
 
 	/* Bypass holyc/src/compile.c's compileToAst, which assumes a
