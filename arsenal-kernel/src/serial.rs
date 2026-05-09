@@ -40,6 +40,16 @@ pub fn write_str(s: &str) {
     }
 }
 
+/// `core::fmt::Write` adapter so `write!` / `writeln!` work against COM1.
+pub struct Writer;
+
+impl core::fmt::Write for Writer {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        write_str(s);
+        Ok(())
+    }
+}
+
 fn write_byte(b: u8) {
     // SAFETY: same reasoning as init() — COM1 is a dedicated UART.
     // Reading LSR is side-effect-free; writing PORT_DATA transmits.
