@@ -30,10 +30,29 @@ on `ubuntu-24.04`. Devlog at
 - `f947d04` linked-list allocator with free path
 - `df16d9f` reclaim BOOTLOADER_RECLAIMABLE into frame pool
 
-**3B — scheduler skeleton (next).** Per-CPU data, task struct,
-cooperative scheduler with yield points, two-task ping-pong demo.
-Sub-commit decomposition deferred to next session start. Per the
-3A → 3G shape, 4–6 commits across 2–3 sessions.
+**3B — scheduler skeleton (complete, 2026-05-09).** Panic handler
+prints to serial; per-CPU data area; Task struct + 16-KiB Box-owned
+kernel stacks; cooperative `switch_to` in `global_asm!` (callee-save
+GP regs only); scheduler `init` / `spawn` / `yield_now` over an
+`AtomicPtr<Task>` current + `Mutex<VecDeque<Box<Task>>>` runqueue;
+two-task ping-pong demo printing `ping`/`pong` for three rounds each
+before the last finisher prints `ARSENAL_SCHED_OK`. Smoke now asserts
+four sentinels; first switch crosses cleanly off Limine's boot stack
+into the idle task's heap-allocated stack. ELF ~47 KB, smoke still
+~1 s locally.
+
+3B sub-commits:
+- `da3627e` panic handler prints to serial before halt
+- `7795073` per-CPU data area
+- `b2c748c` task struct + 16 KiB kernel stacks
+- `7eadc79` cooperative context switch via global_asm
+- `46b005f` scheduler init, spawn idle task
+- `1264c20` ARSENAL_SCHED_OK after ping-pong demo
+
+**3C — virtio bring-up (next).** virtio-blk + virtio-net (the two M0
+needs for `>` prompt traffic). MMIO transport probe via PCI scan,
+queue setup, descriptor management. ARSENAL.md budgets the bulk of
+M0 step 3's remaining months for 3C plus 3D (smoltcp + rustls).
 
 ### Step 3 performance + security + usability gates (from ARSENAL.md)
 
