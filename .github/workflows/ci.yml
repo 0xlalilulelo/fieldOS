@@ -1,12 +1,9 @@
 name: ci
 
-# CI is intentionally dormant between configurations.
-# Phase B (chore: remove Field OS C kernel and HolyC tree) deleted the
-# Makefile, ci/qemu-smoke.sh, and the cross-toolchain scripts that the
-# previous jobs (build-iso / smoke / asm-test / loc-budget) consumed.
-# CI re-arms in Phase C against ARSENAL_BOOT_OK on a Cargo + xtask
-# build of the Rust kernel. Until then this workflow exits 0 so the
-# branch shows green-by-design rather than red-by-neglect.
+# Build the Arsenal kernel, assemble the bootable ISO via xtask, and
+# assert ARSENAL_BOOT_OK on COM1 under headless QEMU TCG. Always TCG —
+# GitHub-hosted runners lack /dev/kvm. The rust-toolchain.toml pin
+# governs which rustc version installs.
 
 on:
   push:
@@ -19,7 +16,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  placeholder:
+  build-and-smoke:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - run: echo "CI re-armed in Phase C against ARSENAL_BOOT_OK."
+      - uses: actions/checkout@v4
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 xorriso build-essential
+
+      - name: Install Rust target
+        run: rustup target add x86_64-unknown-none
+
+      - name: Clippy (kernel)
+        run: cargo clippy -p arsenal-kernel --target x86_64-unknown-none --release -- -D warnings
+
+      - name: Clippy (xtask)
+        run: cargo clippy -p xtask --release -- -D warnings
+
+      - name: Assemble ISO
+        run: cargo xtask iso
+
+      - name: Smoke test
+        run: ci/qemu-smoke.sh arsenal.iso
