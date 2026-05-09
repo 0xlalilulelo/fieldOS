@@ -13,6 +13,7 @@
 // external bookkeeping.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use limine::memory_map::{Entry, EntryType};
 use spin::Mutex;
@@ -23,12 +24,14 @@ const FRAME_SIZE: u64 = 4096;
 
 pub struct FrameAllocator {
     free: Mutex<Vec<u64>>,
+    total_added: AtomicUsize,
 }
 
 impl FrameAllocator {
     pub const fn new() -> Self {
         Self {
             free: Mutex::new(Vec::new()),
+            total_added: AtomicUsize::new(0),
         }
     }
 
@@ -46,6 +49,7 @@ impl FrameAllocator {
         for i in 0..count as u64 {
             frames.push(aligned_base + i * FRAME_SIZE);
         }
+        self.total_added.fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn alloc_frame(&self) -> Option<PhysFrame<Size4KiB>> {
@@ -55,6 +59,14 @@ impl FrameAllocator {
 
     pub fn free_frame(&self, frame: PhysFrame<Size4KiB>) {
         self.free.lock().push(frame.start_address().as_u64());
+    }
+
+    pub fn free_count(&self) -> usize {
+        self.free.lock().len()
+    }
+
+    pub fn total_added(&self) -> usize {
+        self.total_added.load(Ordering::Relaxed)
     }
 }
 
@@ -91,4 +103,19 @@ pub fn init(entries: &[&Entry], heap_phys_start: u64, heap_phys_end: u64) {
         .alloc_frame()
         .expect("frames: alloc returned None on a freshly-populated pool");
     FRAMES.free_frame(test);
+}
+
+/// Add every BOOTLOADER_RECLAIMABLE region to the free pool. Safe to
+/// call only after `paging::init` deep-clones every page-table page —
+/// before then the kernel is still walking through Limine's tables
+/// (in BOOTLOADER_RECLAIMABLE memory) and reclaiming would race with
+/// our own reads. Returns the number of frames newly added.
+pub fn reclaim_bootloader(entries: &[&Entry]) -> usize {
+    let before = FRAMES.free_count();
+    for entry in entries {
+        if entry.entry_type == EntryType::BOOTLOADER_RECLAIMABLE {
+            FRAMES.add_region(entry.base, entry.length);
+        }
+    }
+    FRAMES.free_count() - before
 }

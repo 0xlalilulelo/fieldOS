@@ -44,7 +44,7 @@ static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[unsafe(link_section = ".requests_end_marker")]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 
-const HEAP_CAP: usize = 1 << 20; // 1 MiB — sufficient for M0 step 2.
+const HEAP_CAP: usize = 16 << 20; // 16 MiB — sustains frame-allocator Vec growth (the reclaim path doubles to ~1 MiB) plus future-step churn without re-tuning every milestone.
 
 #[unsafe(no_mangle)]
 extern "C" fn _start() -> ! {
@@ -78,6 +78,15 @@ extern "C" fn _start() -> ! {
 
     heap_round_trip();
     serial::write_str("ARSENAL_HEAP_OK\n");
+
+    let reclaimed = frames::reclaim_bootloader(memmap.entries());
+    let _ = writeln!(
+        serial::Writer,
+        "frames: reclaimed {reclaimed} bootloader frames; {} free / {} total",
+        frames::FRAMES.free_count(),
+        frames::FRAMES.total_added()
+    );
+    serial::write_str("ARSENAL_FRAMES_OK\n");
 
     halt();
 }
