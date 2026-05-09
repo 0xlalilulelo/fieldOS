@@ -9,6 +9,7 @@ use limine::BaseRevision;
 use limine::memory_map::EntryType;
 use limine::request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker};
 
+mod gdt;
 mod heap;
 mod serial;
 
@@ -52,6 +53,7 @@ extern "C" fn _start() -> ! {
     serial::write_str("ARSENAL_BOOT_OK\n");
 
     init_heap();
+    gdt::init();
 
     halt();
 }
