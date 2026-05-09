@@ -247,23 +247,15 @@ pub fn init() -> ! {
     unreachable!("sched::init: switch into idle returned");
 }
 
-/// Idle task entry. Yields once per loop iteration so any new
-/// runnable task picks up promptly; halts if no one was runnable
-/// (which in 3B-4 means the runqueue is empty and stays that way,
-/// since cooperative single-CPU has no IRQs to wake hlt). 3B-5
-/// ping-pong tasks land alongside idle; 3F's preemptive timer
-/// turns hlt into a proper power-saving sleep that the LAPIC tick
-/// wakes up.
+/// Idle task entry. Yields forever. 3B-4 had a hlt at the bottom
+/// of this loop which was correct only when the runqueue was empty;
+/// once 3B-5 adds non-idle tasks, hlting on a cooperative-no-IRQ
+/// CPU would halt the only core forever and starve the workers.
+/// 3F's preemptive timer brings hlt back as a proper power-save.
 fn idle_loop() -> ! {
     serial::write_str("sched: idle running\n");
     loop {
         yield_now();
-        // SAFETY: hlt halts until next interrupt. In 3B with no
-        // IRQs configured, this halts forever — but we only reach
-        // here when yield_now found nothing to switch to, which
-        // means no work exists. Smoke times out QEMU on its own
-        // clock; real hardware would idle the CPU.
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
 

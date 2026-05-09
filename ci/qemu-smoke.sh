@@ -32,8 +32,8 @@ TIMEOUT="${SMOKE_TIMEOUT:-15}"
 # when a milestone wants its "this subsystem survived" assertion in
 # CI; remove one only when the underlying assertion is folded into a
 # stronger downstream sentinel.
-FINAL_SENTINEL="ARSENAL_FRAMES_OK"
-REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK")
+FINAL_SENTINEL="ARSENAL_SCHED_OK"
+REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_SCHED_OK")
 SERIAL_LOG=$(mktemp -t arsenal-smoke-serial.XXXXXX)
 QEMU_LOG=$(mktemp -t arsenal-smoke-qemu.XXXXXX)
 trap 'rm -f "$SERIAL_LOG" "$QEMU_LOG"' EXIT

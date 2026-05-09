@@ -8,6 +8,7 @@ extern crate alloc;
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::BaseRevision;
 use limine::memory_map::EntryType;
 use limine::request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker};
@@ -112,10 +113,54 @@ extern "C" fn _start() -> ! {
 
     sched::switch_test();
 
+    // Ping-pong demo: spawn two cooperative tasks before handing
+    // control to the scheduler. Each runs PING_PONG_ROUNDS rounds
+    // of (print + yield); the last to finish prints
+    // ARSENAL_SCHED_OK. After that they both yield-loop forever
+    // (no destructive task exit yet — that wires in 3B-7+) so the
+    // runqueue keeps rotating until smoke kills QEMU.
+    sched::spawn(ping_entry);
+    sched::spawn(pong_entry);
+
     // Cross the threshold from main's Limine boot stack into the
     // scheduler-managed idle task. Never returns; main's stack
     // becomes dead.
     sched::init();
+}
+
+const PING_PONG_ROUNDS: usize = 3;
+const PING_PONG_TASKS: usize = 2;
+static TASKS_FINISHED: AtomicUsize = AtomicUsize::new(0);
+
+fn ping_entry() -> ! {
+    for _ in 0..PING_PONG_ROUNDS {
+        serial::write_str("ping\n");
+        sched::yield_now();
+    }
+    finish();
+}
+
+fn pong_entry() -> ! {
+    for _ in 0..PING_PONG_ROUNDS {
+        serial::write_str("pong\n");
+        sched::yield_now();
+    }
+    finish();
+}
+
+/// Common tail for ping_entry and pong_entry. The last task to
+/// reach here prints ARSENAL_SCHED_OK; the others just enter the
+/// trailing yield-loop. The yield-loop keeps each finished task in
+/// the runqueue (still cooperative) so idle and the still-running
+/// peer keep rotating through it harmlessly until QEMU dies.
+fn finish() -> ! {
+    let prev = TASKS_FINISHED.fetch_add(1, Ordering::Relaxed);
+    if prev + 1 == PING_PONG_TASKS {
+        serial::write_str("ARSENAL_SCHED_OK\n");
+    }
+    loop {
+        sched::yield_now();
+    }
 }
 
 /// Placeholder entry for the 3B-2 Task::new smoke. 3B-3 lands the
