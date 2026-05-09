@@ -1,0 +1,12 @@
+[package]
+name = "arsenal-kernel"
+version = "0.0.0"
+edition = "2024"
+license = "BSD-2-Clause"
+publish = false
+
+[[bin]]
+name = "arsenal-kernel"
+path = "src/main.rs"
+test = false
+bench = false

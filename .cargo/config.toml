@@ -1,0 +1,10 @@
+# Linker flags for the bare-metal kernel target. xtask invokes
+# `cargo build --target x86_64-unknown-none -p arsenal-kernel`; the
+# host-side xtask crate builds for the native target and is unaffected.
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tarsenal-kernel/linker.ld",
+    "-C", "code-model=kernel",
+    "-C", "relocation-model=static",
+]
