@@ -19,6 +19,7 @@ mod heap;
 mod idt;
 mod paging;
 mod serial;
+mod task;
 
 // Limine base-revision-1+ requires explicit start/end marker pairs around
 // the .requests section so the bootloader can bound its scan; without
@@ -92,6 +93,28 @@ extern "C" fn _start() -> ! {
     let cpu = cpu::current_cpu();
     let _ = writeln!(serial::Writer, "cpu: id={} (single-CPU stage)", cpu.id);
 
+    // Smoke the Task allocator: build one, log its shape, drop it.
+    // 3B-3 wires the asm that actually runs through saved_rsp. For
+    // 3B-2 the assertion is just that Task::new returns a sensibly-
+    // shaped struct and the heap can absorb / return 16 KiB without
+    // tripping the linked-list allocator.
+    let t = task::Task::new(task_smoke_entry);
+    let _ = writeln!(
+        serial::Writer,
+        "task: built (entry={:#018x}, saved_rsp={:#018x}, state={:?}, stack={} KiB)",
+        t.entry as usize as u64,
+        t.saved_rsp,
+        t.state,
+        task::STACK_SIZE / 1024
+    );
+    drop(t);
+
+    halt();
+}
+
+/// Placeholder entry for the 3B-2 Task::new smoke. 3B-3 lands the
+/// asm that would actually invoke this; today it's never executed.
+fn task_smoke_entry() -> ! {
     halt();
 }
 
