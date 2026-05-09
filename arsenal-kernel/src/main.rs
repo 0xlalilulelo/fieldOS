@@ -2,6 +2,7 @@
 
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
@@ -11,6 +12,7 @@ use limine::request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, Requests
 
 mod gdt;
 mod heap;
+mod idt;
 mod serial;
 
 // Limine base-revision-1+ requires explicit start/end marker pairs around
@@ -54,6 +56,15 @@ extern "C" fn _start() -> ! {
 
     init_heap();
     gdt::init();
+    idt::init();
+
+    // Self-test: trigger a breakpoint and confirm we re-enter _start.
+    // The handler prints "EXCEPTION #BP at <addr>" and returns; if
+    // the IDT is mis-loaded we'd triple-fault here instead.
+    // SAFETY: int3 is the architecturally-defined breakpoint trap;
+    // its only effect is to dispatch through IDT entry 3 to our
+    // breakpoint handler, which prints and returns.
+    unsafe { core::arch::asm!("int3", options(nomem, nostack, preserves_flags)) };
 
     halt();
 }
