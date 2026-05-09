@@ -27,7 +27,13 @@ set -euo pipefail
 
 ISO="${1:-arsenal.iso}"
 TIMEOUT="${SMOKE_TIMEOUT:-15}"
-SENTINEL="ARSENAL_BOOT_OK"
+# Final sentinel triggers the pass check; required sentinels must all
+# appear (in any order) for the smoke to pass. Add a sentinel here
+# when a milestone wants its "this subsystem survived" assertion in
+# CI; remove one only when the underlying assertion is folded into a
+# stronger downstream sentinel.
+FINAL_SENTINEL="ARSENAL_HEAP_OK"
+REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK")
 SERIAL_LOG=$(mktemp -t arsenal-smoke-serial.XXXXXX)
 QEMU_LOG=$(mktemp -t arsenal-smoke-qemu.XXXXXX)
 trap 'rm -f "$SERIAL_LOG" "$QEMU_LOG"' EXIT
@@ -57,10 +63,18 @@ QPID=$!
 
 elapsed=0
 while (( elapsed < TIMEOUT )); do
-	if grep -q "$SENTINEL" "$SERIAL_LOG" 2>/dev/null; then
+	if grep -q "$FINAL_SENTINEL" "$SERIAL_LOG" 2>/dev/null; then
 		kill -TERM "$QPID" 2>/dev/null || true
 		wait "$QPID" 2>/dev/null || true
-		echo "==> PASS ($SENTINEL in ${elapsed}s)"
+		for s in "${REQUIRED_SENTINELS[@]}"; do
+			if ! grep -q "$s" "$SERIAL_LOG" 2>/dev/null; then
+				echo "qemu-smoke.sh: required sentinel missing: $s" >&2
+				echo "--- serial output ---" >&2
+				cat "$SERIAL_LOG" >&2
+				exit 5
+			fi
+		done
+		echo "==> PASS (${#REQUIRED_SENTINELS[@]} sentinels in ${elapsed}s)"
 		echo
 		echo "--- serial output ---"
 		cat "$SERIAL_LOG"
@@ -90,7 +104,7 @@ if grep -qE "guest CPU|cpu_reset|panic|triple fault" "$QEMU_LOG" 2>/dev/null; th
 	exit 4
 fi
 
-echo "qemu-smoke.sh: sentinel not seen within ${TIMEOUT}s" >&2
+echo "qemu-smoke.sh: $FINAL_SENTINEL not seen within ${TIMEOUT}s" >&2
 echo "--- serial output ---" >&2
 cat "$SERIAL_LOG" >&2
 exit 2

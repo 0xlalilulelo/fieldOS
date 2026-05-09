@@ -71,7 +71,30 @@ extern "C" fn _start() -> ! {
 
     paging::init(hhdm_offset);
 
+    heap_round_trip();
+    serial::write_str("ARSENAL_HEAP_OK\n");
+
     halt();
+}
+
+/// Allocate, mutate, and read back through the global allocator after
+/// the kernel-owned PML4 is live. A failure here would manifest as a
+/// page fault on heap addresses that resolved fine before CR3 swap —
+/// the load-bearing assertion that paging::init preserved HHDM.
+fn heap_round_trip() {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+
+    let b = Box::new(0xDEAD_BEEF_u32);
+    assert_eq!(*b, 0xDEAD_BEEF);
+    drop(b);
+
+    let mut v: Vec<u32> = Vec::with_capacity(8);
+    for i in 0..8u32 {
+        v.push(i * i);
+    }
+    let sum: u32 = v.iter().sum();
+    assert_eq!(sum, 140);
 }
 
 fn init_heap() -> u64 {
