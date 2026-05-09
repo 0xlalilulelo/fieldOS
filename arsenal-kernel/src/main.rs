@@ -18,6 +18,7 @@ mod gdt;
 mod heap;
 mod idt;
 mod paging;
+mod sched;
 mod serial;
 mod task;
 
@@ -108,6 +109,8 @@ extern "C" fn _start() -> ! {
         task::STACK_SIZE / 1024
     );
     drop(t);
+
+    sched::switch_test();
 
     halt();
 }
