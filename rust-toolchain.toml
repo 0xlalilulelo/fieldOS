@@ -1,0 +1,5 @@
+# Pinned to 1.85 — the version that stabilized x86_64-unknown-none.
+[toolchain]
+channel = "1.85"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-none"]

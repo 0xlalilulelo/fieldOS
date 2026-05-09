@@ -1,6 +1,7 @@
 # Build artifacts
 build/
 dist/
+target/
 *.o
 *.elf
 *.iso
@@ -12,10 +13,6 @@ dist/
 # rules above so they win as the last matching rule.
 !vendor/**/*.bin
 !vendor/**/*.sys
-
-# Toolchain build scratch (the cross-compiler installs to
-# $HOME/.local/x86_64-elf, not in-tree)
-toolchain/src/
 
 # CI / smoke test artifacts
 serial.log
@@ -40,6 +37,3 @@ vendor/*/build/
 # also generates a .dSYM debug-symbol bundle alongside the binary.
 vendor/limine/limine
 vendor/limine/limine.dSYM/
-
-# HolyC fork build artifacts
-holyc/build/
