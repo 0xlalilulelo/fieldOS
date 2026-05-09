@@ -4,6 +4,8 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use limine::BaseRevision;
@@ -13,6 +15,7 @@ use limine::request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, Requests
 mod gdt;
 mod heap;
 mod idt;
+mod paging;
 mod serial;
 
 // Limine base-revision-1+ requires explicit start/end marker pairs around
@@ -54,7 +57,7 @@ extern "C" fn _start() -> ! {
     serial::init();
     serial::write_str("ARSENAL_BOOT_OK\n");
 
-    init_heap();
+    let hhdm_offset = init_heap();
     gdt::init();
     idt::init();
 
@@ -66,10 +69,12 @@ extern "C" fn _start() -> ! {
     // breakpoint handler, which prints and returns.
     unsafe { core::arch::asm!("int3", options(nomem, nostack, preserves_flags)) };
 
+    paging::init(hhdm_offset);
+
     halt();
 }
 
-fn init_heap() {
+fn init_heap() -> u64 {
     let memmap = MEMMAP_REQUEST
         .get_response()
         .expect("limine: memory map response missing");
@@ -104,6 +109,8 @@ fn init_heap() {
         "mm: {usable_count} usable regions; heap @ {heap_virt:#018x} size {} KiB",
         heap_size / 1024
     );
+
+    hhdm_offset as u64
 }
 
 #[panic_handler]
