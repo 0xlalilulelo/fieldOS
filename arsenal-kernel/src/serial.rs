@@ -8,7 +8,11 @@
 use core::arch::asm;
 
 const COM1_BASE: u16 = 0x3F8;
-const PORT_DATA: u16 = COM1_BASE;
+const PORT_DATA: u16 = COM1_BASE;     // and DLL when DLAB=1
+const PORT_IER: u16 = COM1_BASE + 1;  // and DLH when DLAB=1
+const PORT_FCR: u16 = COM1_BASE + 2;
+const PORT_LCR: u16 = COM1_BASE + 3;
+const PORT_MCR: u16 = COM1_BASE + 4;
 const PORT_LSR: u16 = COM1_BASE + 5;
 
 const LSR_THRE: u8 = 1 << 5; // Transmitter Holding Register Empty
@@ -20,13 +24,13 @@ pub fn init() {
     // data sheet (TI SPRG228 Table 4-1). No other hardware aliases
     // these ports.
     unsafe {
-        outb(COM1_BASE + 1, 0x00); // disable IRQs
-        outb(COM1_BASE + 3, 0x80); // enable DLAB
-        outb(COM1_BASE + 0, 0x01); // divisor low (115200 baud)
-        outb(COM1_BASE + 1, 0x00); // divisor high
-        outb(COM1_BASE + 3, 0x03); // 8N1, DLAB off
-        outb(COM1_BASE + 2, 0xC7); // FIFO on, clear, 14-byte threshold
-        outb(COM1_BASE + 4, 0x0B); // RTS/DTR set, OUT2 set
+        outb(PORT_IER, 0x00);  // disable IRQs
+        outb(PORT_LCR, 0x80);  // enable DLAB
+        outb(PORT_DATA, 0x01); // divisor low (115200 baud)
+        outb(PORT_IER, 0x00);  // divisor high
+        outb(PORT_LCR, 0x03);  // 8N1, DLAB off
+        outb(PORT_FCR, 0xC7);  // FIFO on, clear, 14-byte threshold
+        outb(PORT_MCR, 0x0B);  // RTS/DTR set, OUT2 set
     }
 }
 
