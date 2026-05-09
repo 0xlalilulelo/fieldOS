@@ -10,32 +10,37 @@
 
 ### Active work
 
-**M0 step 1 — first boot (complete, 2026-05-09).** Cargo workspace +
-`arsenal-kernel` crate + Limine handshake + COM1 sentinel
-`ARSENAL_BOOT_OK` landed across seven commits ending at `304bfa2`.
-Boot time ~0.5 s under headless QEMU TCG locally; CI green on
-`ubuntu-24.04` in ~1 minute end-to-end (apt install → rustup target →
-clippy → `cargo xtask iso` → `ci/qemu-smoke.sh`). Devlog at
-[`docs/devlogs/2026-05-arsenal-first-boot.md`](docs/devlogs/2026-05-arsenal-first-boot.md).
+**M0 step 2 — paging + GDT + IDT (complete, 2026-05-09).** Five
+substantive commits plus the nightly toolchain pin landed across two
+sessions. The kernel now owns its allocator, GDT, IDT, and CR3 —
+Limine's hand-off versions are all replaced. Smoke asserts both
+`ARSENAL_BOOT_OK` and `ARSENAL_HEAP_OK` (the latter fires only if a
+heap round trip survives the CR3 swap). End-to-end smoke in ~1 s
+locally, ~45 s on `ubuntu-24.04`. Devlog at
+[`docs/devlogs/2026-05-arsenal-paging.md`](docs/devlogs/2026-05-arsenal-paging.md).
 
-**M0 step 2 — paging + GDT + IDT (next).** 4-level paging mapped
-against the Limine `MemoryMapRequest` response; GDT with kernel CS/DS
-plus a TSS; IDT with 256 stub handlers, exceptions 0–31 routed to a
-shared panic path; IST stacks for `#DF` / `#NMI` / `#MC`; a first
-allocator under `core::alloc::GlobalAlloc` so subsequent steps have a
-heap. Per ARSENAL.md § "Three Concrete Starting Milestones" → M0,
-calibrated as 2–4 FT-weeks of work — ~5–10 calendar weeks at the
-project's 15 h/wk part-time rate.
+Sub-commits:
+- `f2663b5` ingest Limine memory map + bump allocator
+- `ca6a390` GDT + TSS with IST stack reservations
+- `8bfa5f2` pin nightly Rust toolchain for x86-interrupt ABI
+- `556bcd2` IDT with stub handlers, IST routing for #DF/#NMI/#MC
+- `9c38083` 4-level paging, take ownership of CR3
+- `8cd0186` smoke requires ARSENAL_HEAP_OK after paging
 
-### After step 2
+**M0 step 3 — toward `>` prompt (next).** Per ARSENAL.md M0 the
+remaining bullets: deep-clone page tables (so we can reclaim
+`BOOTLOADER_RECLAIMABLE` physical RAM), real frame allocator,
+linked-list (or buddy) allocator with a free path, basic scheduler,
+virtio block + virtio-net, smoltcp + rustls, framebuffer console,
+basic SMP, boot to a `>` prompt. Sub-step decomposition deferred to
+the next session start; per ARSENAL.md this is the bulk of M0,
+~6–8 calendar months of part-time work.
 
-Arsenal M0 in full per ARSENAL.md → M0 steps 3–6: virtio block +
-virtio-net, smoltcp + rustls, basic scheduler, framebuffer console,
-SMP, boot to a `>` prompt. Performance gate: boot to prompt in < 2 s
-under QEMU. Security gate: zero `unsafe` Rust outside designated FFI
-boundaries. Usability gate: prompt is keyboard-navigable; shows
-hardware summary. Estimated 9 calendar months total per the new
-timeline.
+### Step 3 performance + security + usability gates (from ARSENAL.md)
+
+- Performance: boot to prompt in < 2 s under QEMU.
+- Security: zero `unsafe` Rust outside designated FFI boundaries.
+- Usability: prompt is keyboard-navigable; shows hardware summary.
 
 ## Last completed milestone
 
