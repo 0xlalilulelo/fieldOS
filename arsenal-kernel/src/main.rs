@@ -12,6 +12,7 @@ use limine::BaseRevision;
 use limine::memory_map::EntryType;
 use limine::request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker};
 
+mod frames;
 mod gdt;
 mod heap;
 mod idt;
@@ -57,7 +58,7 @@ extern "C" fn _start() -> ! {
     serial::init();
     serial::write_str("ARSENAL_BOOT_OK\n");
 
-    let hhdm_offset = init_heap();
+    let mem = init_heap();
     gdt::init();
     idt::init();
 
@@ -69,12 +70,22 @@ extern "C" fn _start() -> ! {
     // breakpoint handler, which prints and returns.
     unsafe { core::arch::asm!("int3", options(nomem, nostack, preserves_flags)) };
 
-    paging::init(hhdm_offset);
+    let memmap = MEMMAP_REQUEST
+        .get_response()
+        .expect("limine: memory map response missing post-int3");
+    frames::init(memmap.entries(), mem.heap_phys_start, mem.heap_phys_end);
+    paging::init(mem.hhdm_offset);
 
     heap_round_trip();
     serial::write_str("ARSENAL_HEAP_OK\n");
 
     halt();
+}
+
+struct BootMem {
+    hhdm_offset: u64,
+    heap_phys_start: u64,
+    heap_phys_end: u64,
 }
 
 /// Allocate, mutate, and read back through the global allocator after
@@ -97,7 +108,7 @@ fn heap_round_trip() {
     assert_eq!(sum, 140);
 }
 
-fn init_heap() -> u64 {
+fn init_heap() -> BootMem {
     let memmap = MEMMAP_REQUEST
         .get_response()
         .expect("limine: memory map response missing");
@@ -133,7 +144,11 @@ fn init_heap() -> u64 {
         heap_size / 1024
     );
 
-    hhdm_offset as u64
+    BootMem {
+        hhdm_offset: hhdm_offset as u64,
+        heap_phys_start: heap_phys as u64,
+        heap_phys_end: (heap_phys + heap_size) as u64,
+    }
 }
 
 #[panic_handler]
