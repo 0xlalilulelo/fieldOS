@@ -1,60 +1,94 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //
-// Take ownership of CR3 by allocating a fresh PML4 and shallow-cloning
-// Limine's existing top-level table into it. Lower-level tables (PDPT,
-// PD, PT) remain Limine's, in BOOTLOADER_RECLAIMABLE memory — a future
-// step deep-clones or rebuilds them when we want to actually reclaim
-// that physical RAM. For M0 step 2 the contract is narrower: the
-// kernel's own CR3 points at a frame the kernel owns, so subsequent
-// steps can mutate top-level entries without racing the bootloader's
-// view of memory.
+// Take ownership of every level of the page-table tree by deep-cloning
+// Limine's PML4 → PDPT → PD → PT down through every present, non-huge
+// entry. Leaf entries (PT-level entries, or huge-page entries at PDPT
+// / PD level) are copied verbatim — their target physical frames stay
+// the same, since they describe what is mapped, not where the table
+// lives. After init the kernel owns every page table; Limine's
+// BOOTLOADER_RECLAIMABLE memory becomes free for 3-4 to add to the
+// frame allocator.
 
-use core::alloc::Layout;
 use core::fmt::Write;
 use x86_64::PhysAddr;
 use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::{PhysFrame, Size4KiB};
+use x86_64::structures::paging::{PageTable, PageTableFlags, PhysFrame, Size4KiB};
 
+use crate::frames;
 use crate::serial;
 
 const PAGE_SIZE: usize = 4096;
 
-pub fn init(hhdm_offset: u64) {
-    let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).expect("PML4 layout");
+/// Deep-clone a page table at `level` (4 = PML4, 3 = PDPT, 2 = PD,
+/// 1 = PT). Returns the physical frame of the new table. Leaf
+/// entries — anything at level 1, or any HUGE_PAGE-flagged entry at
+/// level 2 or 3 — are copied verbatim so the new table reproduces
+/// the source's mappings exactly. Non-leaf entries get a fresh
+/// child via recursion.
+///
+/// # Safety
+/// `src_phys` must point at a valid PageTable mapped via the HHDM
+/// at `src_phys + hhdm_offset`. The frame allocator must be
+/// initialized and contain enough frames for the entire walk —
+/// running out mid-clone leaves the source intact (we never mutate
+/// `src`) but the partial new tree leaks until the kernel halts.
+unsafe fn deep_clone_table(
+    src_phys: PhysAddr,
+    level: u8,
+    hhdm_offset: u64,
+) -> PhysFrame<Size4KiB> {
+    let new_frame = frames::FRAMES
+        .alloc_frame()
+        .expect("paging: OOM during deep clone");
+    let new_virt = (new_frame.start_address().as_u64() + hhdm_offset) as *mut PageTable;
+    let src_virt = (src_phys.as_u64() + hhdm_offset) as *const PageTable;
 
-    // SAFETY: the bump allocator from heap.rs is initialized; the
-    // layout is non-zero; alloc_zeroed returns null only on OOM,
-    // which we assert against. The returned pointer is exclusive,
-    // 4-KiB-aligned, 4-KiB long, and zeroed.
-    let new_pml4_virt = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    assert!(!new_pml4_virt.is_null(), "paging: OOM allocating new PML4");
-
-    // Heap virtuals live in HHDM (heap_phys + hhdm_offset). Subtract
-    // to recover the physical address of the new PML4 frame.
-    let new_pml4_phys = (new_pml4_virt as u64).wrapping_sub(hhdm_offset);
-
-    let (cur_pml4_frame, _) = Cr3::read();
-    let cur_pml4_virt =
-        (cur_pml4_frame.start_address().as_u64() + hhdm_offset) as *const u8;
-
-    // SAFETY: cur_pml4_virt points at the live PML4 Limine installed,
-    // mapped via the HHDM. new_pml4_virt is the freshly allocated
-    // zeroed page. Neither overlaps and both are valid for 4 KiB.
+    // SAFETY: new_virt addresses freshly allocated, exclusively-owned
+    // memory mapped by HHDM. Zeroing it produces an all-unused
+    // PageTable layout. src_virt points at the live table.
     unsafe {
-        core::ptr::copy_nonoverlapping(cur_pml4_virt, new_pml4_virt, PAGE_SIZE);
+        core::ptr::write_bytes(new_virt as *mut u8, 0, PAGE_SIZE);
+        let new = &mut *new_virt;
+        let src = &*src_virt;
+        for (i, src_entry) in src.iter().enumerate() {
+            if src_entry.is_unused() {
+                continue;
+            }
+            let is_leaf =
+                level == 1 || src_entry.flags().contains(PageTableFlags::HUGE_PAGE);
+            if is_leaf {
+                new[i] = src_entry.clone();
+            } else {
+                let child_phys = src_entry.addr();
+                let new_child = deep_clone_table(child_phys, level - 1, hhdm_offset);
+                new[i].set_addr(new_child.start_address(), src_entry.flags());
+            }
+        }
     }
 
-    let new_frame =
-        PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(new_pml4_phys));
+    new_frame
+}
 
-    // SAFETY: new_pml4 is a verbatim copy of Limine's PML4, so every
-    // transitive mapping (kernel ELF, HHDM, heap, current stack,
-    // Limine response data) resolves identically after the CR3
-    // write. The CR3 write itself flushes the TLB.
-    unsafe { Cr3::write(new_frame, Cr3Flags::empty()) };
+pub fn init(hhdm_offset: u64) {
+    let (cur_pml4_frame, _) = Cr3::read();
+
+    // SAFETY: cur_pml4_frame is the live PML4 — written either by
+    // Limine or by the shallow clone in step 2-4 (we replace that
+    // shallow clone with this deep clone here). HHDM maps every
+    // physical frame, page tables included.
+    let new_pml4 =
+        unsafe { deep_clone_table(cur_pml4_frame.start_address(), 4, hhdm_offset) };
+
+    // SAFETY: new_pml4 is a deep clone — every transitive mapping
+    // is reproduced through tables we allocated. The kernel ELF,
+    // HHDM, heap, current stack, and Limine response data all
+    // resolve identically after the CR3 write. The CR3 write
+    // flushes the TLB.
+    unsafe { Cr3::write(new_pml4, Cr3Flags::empty()) };
 
     let _ = writeln!(
         serial::Writer,
-        "paging: cr3 -> {new_pml4_phys:#018x} (kernel-owned PML4, shallow clone)"
+        "paging: deep-cloned cr3 -> {:#018x} (all levels kernel-owned)",
+        new_pml4.start_address().as_u64()
     );
 }
