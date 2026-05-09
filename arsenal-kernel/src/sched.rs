@@ -36,6 +36,9 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use alloc::boxed::Box;
+
+use crate::cpu;
 use crate::serial;
 use crate::task;
 
@@ -132,3 +135,135 @@ pub fn switch_test() {
     // the heap. 3B-4's scheduler will own task lifetime properly.
     drop(task);
 }
+
+// ---------------------------------------------------------------
+// 3B-4 — scheduler proper: spawn, yield_now, init.
+// ---------------------------------------------------------------
+//
+// Cooperative single-CPU round-robin. spawn enqueues a Ready task;
+// yield_now rotates the runqueue (current → back, front → current);
+// init builds the idle task and switches into it from _start's
+// Limine boot stack (which is then abandoned).
+//
+// Box ownership: a task's Box lives either in `cpu.runqueue` (Ready)
+// or in `cpu.current` (Running, as a Box::into_raw'd raw pointer).
+// yield_now swaps current via AtomicPtr::swap so there's no window
+// where two Boxes alias the same Task. Single-CPU cooperative means
+// no preemption races — once the migration to preemptive (3F) lands,
+// the lock-then-swap dance grows accordingly.
+
+/// Add a fresh Ready task to this CPU's runqueue.
+#[allow(dead_code)] // wired by 3B-5's ping-pong demo
+pub fn spawn(entry: fn() -> !) {
+    let task = task::Task::new(entry);
+    cpu::current_cpu().runqueue.lock().push_back(task);
+}
+
+/// Cooperatively yield to the next runnable task. If the runqueue
+/// is empty, return immediately without switching — caller resumes.
+pub fn yield_now() {
+    let cpu = cpu::current_cpu();
+
+    // Pop next runnable. Empty → no one to switch to; caller resumes.
+    let next_box = match cpu.runqueue.lock().pop_front() {
+        Some(t) => t,
+        None => return,
+    };
+
+    let next_saved_rsp = next_box.saved_rsp;
+    let next_ptr = Box::into_raw(next_box);
+
+    // Atomically install next as current; receive prev. Single-CPU
+    // cooperative makes the swap formally redundant, but the shape
+    // is the one preemptive 3F needs: the swap closes the brief
+    // window between "decided next" and "made next visible".
+    let prev_ptr = cpu.current.swap(next_ptr, Ordering::Relaxed);
+    assert!(
+        !prev_ptr.is_null(),
+        "yield_now: cpu.current was null — sched::init not run?"
+    );
+
+    // Pointer to prev's saved_rsp slot. Stable across the move into
+    // the runqueue because Box's heap address doesn't change when
+    // the Box itself migrates between containers. Captured here
+    // before re-Boxing so we can keep using it after the move.
+    // SAFETY: prev_ptr came from a prior Box::into_raw on a Task,
+    // so the pointee is a live Task on the heap until we re-Box and
+    // drop. The &raw mut projection is valid for the field offset.
+    let prev_saved_rsp_ptr = unsafe { &raw mut (*prev_ptr).saved_rsp };
+
+    // Re-enqueue prev at the back of the runqueue.
+    // SAFETY: prev_ptr was the unique raw pointer to the prev Task
+    // (the previous content of cpu.current); reclaiming it as a
+    // Box is the matching free for the Box::into_raw that originally
+    // installed it.
+    let prev_box = unsafe { Box::from_raw(prev_ptr) };
+    cpu.runqueue.lock().push_back(prev_box);
+
+    // Switch. When prev later resumes (some future yield picks it
+    // off the runqueue and swaps it back into current), control
+    // returns to the instruction after this asm call; locals here
+    // are no longer relevant — ownership transfers happened above.
+    // SAFETY: prev_saved_rsp_ptr points into prev's Task on the
+    // heap (lifetime tied to the Box now in the runqueue, which
+    // outlives this switch). next_saved_rsp was the saved_rsp of
+    // the task currently installed as cpu.current; its frame is
+    // either Task::new's synthetic init frame (fresh) or a
+    // previously-suspended switch_to frame.
+    unsafe { switch_to(prev_saved_rsp_ptr, next_saved_rsp) };
+}
+
+/// Bring the scheduler online. Builds the idle task, installs it as
+/// `current`, and switches into it from the caller's stack. Never
+/// returns; the caller's stack is abandoned. Call from `_start`
+/// after every other init has run.
+pub fn init() -> ! {
+    let cpu = cpu::current_cpu();
+
+    let idle_task = task::Task::new(idle_loop);
+    let idle_saved_rsp = idle_task.saved_rsp;
+    let idle_ptr = Box::into_raw(idle_task);
+
+    cpu.idle.store(idle_ptr, Ordering::Relaxed);
+    cpu.current.store(idle_ptr, Ordering::Relaxed);
+
+    serial::write_str("sched: init complete; switching to idle\n");
+
+    // Throwaway storage for the outgoing RSP. The caller's stack
+    // (the Limine boot stack) is abandoned after this switch — its
+    // BOOTLOADER_RECLAIMABLE frames were already added to the frame
+    // allocator in 3A-4, so anyone allocating from FRAMES could
+    // overwrite the saved bytes, which is fine because we never
+    // read them. The asm still performs the write before swapping
+    // RSP.
+    let mut throwaway_rsp: u64 = 0;
+    // SAFETY: idle_saved_rsp points at Task::new's synthetic frame
+    // for idle_task; throwaway_rsp is a writable u64 on this stack.
+    // We never resume on this stack frame (the function is `-> !`),
+    // and the asm's write to throwaway_rsp completes before RSP is
+    // swapped to idle's stack.
+    unsafe { switch_to(&raw mut throwaway_rsp, idle_saved_rsp) };
+
+    unreachable!("sched::init: switch into idle returned");
+}
+
+/// Idle task entry. Yields once per loop iteration so any new
+/// runnable task picks up promptly; halts if no one was runnable
+/// (which in 3B-4 means the runqueue is empty and stays that way,
+/// since cooperative single-CPU has no IRQs to wake hlt). 3B-5
+/// ping-pong tasks land alongside idle; 3F's preemptive timer
+/// turns hlt into a proper power-saving sleep that the LAPIC tick
+/// wakes up.
+fn idle_loop() -> ! {
+    serial::write_str("sched: idle running\n");
+    loop {
+        yield_now();
+        // SAFETY: hlt halts until next interrupt. In 3B with no
+        // IRQs configured, this halts forever — but we only reach
+        // here when yield_now found nothing to switch to, which
+        // means no work exists. Smoke times out QEMU on its own
+        // clock; real hardware would idle the CPU.
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
+}
+

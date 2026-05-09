@@ -112,7 +112,10 @@ extern "C" fn _start() -> ! {
 
     sched::switch_test();
 
-    halt();
+    // Cross the threshold from main's Limine boot stack into the
+    // scheduler-managed idle task. Never returns; main's stack
+    // becomes dead.
+    sched::init();
 }
 
 /// Placeholder entry for the 3B-2 Task::new smoke. 3B-3 lands the
