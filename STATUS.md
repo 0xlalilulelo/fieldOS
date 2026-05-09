@@ -6,48 +6,36 @@
 
 ## Current milestone
 
-**Pre-M0 — Field OS → Arsenal transition** *(ADR-0004 landed
-2026-05-08; transition runs ~2–3 sessions)*
-
-### What's happening
-
-The project pivoted from **Field OS** (TempleOS-modernization in HolyC,
-M3 step 6-5 working REPL at the `field-os-v0.1` tag) to **Arsenal**
-(Rust monolith with capability-secured userspace, LinuxKPI driver
-inheritance, tri-modal app distribution). Rationale is in
-[ADR-0004](docs/adrs/0004-arsenal-pivot.md); the canonical plan is
-[`docs/plan/ARSENAL.md`](docs/plan/ARSENAL.md).
+**Arsenal M0 — Boot and breathe** *(0–9 months per ARSENAL.md timeline)*
 
 ### Active work
 
-**Phase A — Paper deliverables (complete).** Every document in the repo
-describes Arsenal: ADR-0004, the CLAUDE.md rewrite, the naming.md merge,
-the README / CHANGELOG / ARSENAL.md rewrites, three legacy archive
-READMEs, and the pivot devlog landed across nine commits ending at
-`4ecd0b4` on 2026-05-08.
+**M0 step 1 — first boot (complete, 2026-05-09).** Cargo workspace +
+`arsenal-kernel` crate + Limine handshake + COM1 sentinel
+`ARSENAL_BOOT_OK` landed across seven commits ending at `304bfa2`.
+Boot time ~0.5 s under headless QEMU TCG locally; CI green on
+`ubuntu-24.04` in ~1 minute end-to-end (apt install → rustup target →
+clippy → `cargo xtask iso` → `ci/qemu-smoke.sh`). Devlog at
+[`docs/devlogs/2026-05-arsenal-first-boot.md`](docs/devlogs/2026-05-arsenal-first-boot.md).
 
-**Phase B — Code archival (complete).** Removal commit `a35c473`
-(2026-05-08) deleted `kernel/`, the vendored `holyc/` tree, `base/`,
-`assets/`, the top-level `Makefile`, `ci/qemu-smoke.sh`, the cross-GCC
-toolchain scripts, `tools/count-loc.sh`, and `tools/qemu-run.sh` —
-196 files, 43,322 lines. Follow-up `0370b1f` stubbed
-`.github/workflows/ci.yml` to a noop placeholder. Access path to the
-C kernel preserved via `git checkout field-os-v0.1`.
+**M0 step 2 — paging + GDT + IDT (next).** 4-level paging mapped
+against the Limine `MemoryMapRequest` response; GDT with kernel CS/DS
+plus a TSS; IDT with 256 stub handlers, exceptions 0–31 routed to a
+shared panic path; IST stacks for `#DF` / `#NMI` / `#MC`; a first
+allocator under `core::alloc::GlobalAlloc` so subsequent steps have a
+heap. Per ARSENAL.md § "Three Concrete Starting Milestones" → M0,
+calibrated as 2–4 FT-weeks of work — ~5–10 calendar weeks at the
+project's 15 h/wk part-time rate.
 
-**Phase C — Rust scaffolding (next session).** Cargo workspace +
-`arsenal-kernel` crate + Limine boot + COM1 sentinel `ARSENAL_BOOT_OK`.
-This is the first Arsenal commit that boots; ARSENAL.md M0 step 1.
+### After step 2
 
-### After the transition
-
-Arsenal M0 in full per ARSENAL.md § "Three Concrete Starting Milestones"
-→ M0: boot to a `>` prompt in QEMU, virtio block + virtio-net,
-smoltcp + rustls, basic scheduler, framebuffer console, paging, SMP.
-Performance gate: boot to prompt in < 2 s under QEMU. Security gate:
-zero `unsafe` Rust outside designated FFI boundaries. Usability gate:
-prompt is keyboard-navigable; shows hardware summary.
-
-Estimated 9 calendar months part-time per the new timeline.
+Arsenal M0 in full per ARSENAL.md → M0 steps 3–6: virtio block +
+virtio-net, smoltcp + rustls, basic scheduler, framebuffer console,
+SMP, boot to a `>` prompt. Performance gate: boot to prompt in < 2 s
+under QEMU. Security gate: zero `unsafe` Rust outside designated FFI
+boundaries. Usability gate: prompt is keyboard-navigable; shows
+hardware summary. Estimated 9 calendar months total per the new
+timeline.
 
 ## Last completed milestone
 
