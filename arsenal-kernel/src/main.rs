@@ -161,7 +161,13 @@ fn init_heap() -> BootMem {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    // PanicInfo's Display impl already includes the message and (when
+    // present) the location, so a single writeln! is the whole
+    // diagnostic. The 3-4 silent OOM during 3A cost an hour because
+    // there was nothing on the wire; the 3B context-switch work is
+    // the next place a silent panic could hide.
+    let _ = writeln!(serial::Writer, "ARSENAL_PANIC {info}");
     halt();
 }
 
