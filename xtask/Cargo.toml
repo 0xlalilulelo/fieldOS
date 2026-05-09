@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+license = "BSD-2-Clause"
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"

@@ -8,3 +8,6 @@ rustflags = [
     "-C", "code-model=kernel",
     "-C", "relocation-model=static",
 ]
+
+[alias]
+xtask = "run --release --package xtask --"
