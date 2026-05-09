@@ -10,31 +10,30 @@
 
 ### Active work
 
-**M0 step 2 — paging + GDT + IDT (complete, 2026-05-09).** Five
-substantive commits plus the nightly toolchain pin landed across two
-sessions. The kernel now owns its allocator, GDT, IDT, and CR3 —
-Limine's hand-off versions are all replaced. Smoke asserts both
-`ARSENAL_BOOT_OK` and `ARSENAL_HEAP_OK` (the latter fires only if a
-heap round trip survives the CR3 swap). End-to-end smoke in ~1 s
-locally, ~45 s on `ubuntu-24.04`. Devlog at
-[`docs/devlogs/2026-05-arsenal-paging.md`](docs/devlogs/2026-05-arsenal-paging.md).
+**M0 step 3 — toward `>` prompt.** Multi-block effort comprising 3A
+(memory subsystem), 3B (scheduler), 3C (virtio), 3D (network),
+3E (framebuffer), 3F (SMP), 3G (`>` prompt + perf gate). ARSENAL.md
+budgets the bulk of M0's remaining 6–8 calendar months for this work.
 
-Sub-commits:
-- `f2663b5` ingest Limine memory map + bump allocator
-- `ca6a390` GDT + TSS with IST stack reservations
-- `8bfa5f2` pin nightly Rust toolchain for x86-interrupt ABI
-- `556bcd2` IDT with stub handlers, IST routing for #DF/#NMI/#MC
-- `9c38083` 4-level paging, take ownership of CR3
-- `8cd0186` smoke requires ARSENAL_HEAP_OK after paging
+**3A — memory subsystem completion (complete, 2026-05-09).** Frame
+allocator + deep-clone page tables + linked-list heap with a real
+free path + reclaim of `BOOTLOADER_RECLAIMABLE` into the frame pool.
+Smoke now asserts `ARSENAL_BOOT_OK`, `ARSENAL_HEAP_OK`, and
+`ARSENAL_FRAMES_OK`; final sentinel reports 61277 free / 61287 total
+4-KiB frames on QEMU 256 MB. End-to-end smoke ~1 s locally, ~45 s
+on `ubuntu-24.04`. Devlog at
+[`docs/devlogs/2026-05-arsenal-mm-complete.md`](docs/devlogs/2026-05-arsenal-mm-complete.md).
 
-**M0 step 3 — toward `>` prompt (next).** Per ARSENAL.md M0 the
-remaining bullets: deep-clone page tables (so we can reclaim
-`BOOTLOADER_RECLAIMABLE` physical RAM), real frame allocator,
-linked-list (or buddy) allocator with a free path, basic scheduler,
-virtio block + virtio-net, smoltcp + rustls, framebuffer console,
-basic SMP, boot to a `>` prompt. Sub-step decomposition deferred to
-the next session start; per ARSENAL.md this is the bulk of M0,
-~6–8 calendar months of part-time work.
+3A sub-commits:
+- `2719e3f` frame allocator over Limine memory map
+- `3135ad6` deep-clone page tables, take ownership of all levels
+- `f947d04` linked-list allocator with free path
+- `df16d9f` reclaim BOOTLOADER_RECLAIMABLE into frame pool
+
+**3B — scheduler skeleton (next).** Per-CPU data, task struct,
+cooperative scheduler with yield points, two-task ping-pong demo.
+Sub-commit decomposition deferred to next session start. Per the
+3A → 3G shape, 4–6 commits across 2–3 sessions.
 
 ### Step 3 performance + security + usability gates (from ARSENAL.md)
 
