@@ -12,6 +12,7 @@ use limine::BaseRevision;
 use limine::memory_map::EntryType;
 use limine::request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker};
 
+mod cpu;
 mod frames;
 mod gdt;
 mod heap;
@@ -87,6 +88,9 @@ extern "C" fn _start() -> ! {
         frames::FRAMES.total_added()
     );
     serial::write_str("ARSENAL_FRAMES_OK\n");
+
+    let cpu = cpu::current_cpu();
+    let _ = writeln!(serial::Writer, "cpu: id={} (single-CPU stage)", cpu.id);
 
     halt();
 }
