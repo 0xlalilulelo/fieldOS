@@ -10,3 +10,6 @@ name = "arsenal-kernel"
 path = "src/main.rs"
 test = false
 bench = false
+
+[dependencies]
+limine = "0.5"
