@@ -19,6 +19,7 @@ mod gdt;
 mod heap;
 mod idt;
 mod paging;
+mod pci;
 mod sched;
 mod serial;
 mod task;
@@ -112,6 +113,11 @@ extern "C" fn _start() -> ! {
     drop(t);
 
     sched::switch_test();
+
+    // PCI bus scan. Prints every present device and tags virtio
+    // ones; 3C-1's transport probe consumes the locations we
+    // emit here.
+    pci::scan();
 
     // Ping-pong demo: spawn two cooperative tasks before handing
     // control to the scheduler. Each runs PING_PONG_ROUNDS rounds
