@@ -10,6 +10,7 @@
 // frame allocator.
 
 use core::fmt::Write;
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::PhysAddr;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::{PageTable, PageTableFlags, PhysFrame, Size4KiB};
@@ -18,6 +19,18 @@ use crate::frames;
 use crate::serial;
 
 const PAGE_SIZE: usize = 4096;
+
+/// HHDM offset captured at init. Other subsystems (virtio MMIO, future
+/// driver code) need it to translate physical BAR addresses into kernel
+/// virtual addresses without re-querying Limine.
+static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// HHDM offset reported by Limine and stashed by `init`. Reads are
+/// undefined before `init` runs — callers gate themselves behind
+/// post-init points in the boot sequence.
+pub fn hhdm_offset() -> u64 {
+    HHDM_OFFSET.load(Ordering::Relaxed)
+}
 
 /// Deep-clone a page table at `level` (4 = PML4, 3 = PDPT, 2 = PD,
 /// 1 = PT). Returns the physical frame of the new table. Leaf
@@ -70,6 +83,7 @@ unsafe fn deep_clone_table(
 }
 
 pub fn init(hhdm_offset: u64) {
+    HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
     let (cur_pml4_frame, _) = Cr3::read();
 
     // SAFETY: cur_pml4_frame is the live PML4 — written either by

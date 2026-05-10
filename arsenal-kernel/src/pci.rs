@@ -39,7 +39,7 @@ const VIRTIO_VENDOR: u16 = 0x1AF4;
 /// the 256-byte legacy config space (0..0xFC). I/O ports CF8/CFC are
 /// reserved for PCI configuration access on every x86 chipset; no
 /// other hardware aliases them.
-unsafe fn config_read32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
+pub(crate) unsafe fn config_read32(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
     debug_assert!(dev < 32, "pci: dev must be 0..32");
     debug_assert!(func < 8, "pci: func must be 0..8");
     debug_assert_eq!(offset & 0x03, 0, "pci: offset must be dword-aligned");

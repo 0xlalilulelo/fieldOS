@@ -23,6 +23,7 @@ mod pci;
 mod sched;
 mod serial;
 mod task;
+mod virtio;
 
 // Limine base-revision-1+ requires explicit start/end marker pairs around
 // the .requests section so the bootloader can bound its scan; without
@@ -118,6 +119,12 @@ extern "C" fn _start() -> ! {
     // ones; 3C-1's transport probe consumes the locations we
     // emit here.
     pci::scan();
+
+    // virtio modern PCI transport probe. For each virtio device,
+    // walks the PCI capability list and resolves the common /
+    // notify / isr / device cfg pointers via HHDM. Logs only;
+    // 3C-2 builds queues on top.
+    virtio::probe();
 
     // Ping-pong demo: spawn two cooperative tasks before handing
     // control to the scheduler. Each runs PING_PONG_ROUNDS rounds

@@ -54,6 +54,7 @@ qemu-system-x86_64 \
 	-m 256M -smp 1 \
 	-machine q35 \
 	-accel tcg -cpu max \
+	-device virtio-rng-pci \
 	-display none \
 	-no-reboot -no-shutdown \
 	-serial "file:$SERIAL_LOG" \
