@@ -25,6 +25,7 @@ mod serial;
 mod task;
 mod virtio;
 mod virtio_blk;
+mod virtio_net;
 
 // Limine base-revision-1+ requires explicit start/end marker pairs around
 // the .requests section so the bootloader can bound its scan; without
@@ -165,6 +166,13 @@ extern "C" fn _start() -> ! {
     // takes over so blocking-via-yield works against the
     // single-CPU cooperative scheduler.
     virtio_blk::smoke();
+
+    // virtio-net smoke: locate the device, init, set up RX + TX
+    // queues, send one zero-filled 64-byte frame, assert the TX
+    // descriptor returns used. RX correctness is 3D's domain when
+    // smoltcp drives the protocol stack; for 3C-4 we only verify
+    // the doorbell fires and the device acknowledges TX.
+    virtio_net::smoke();
 
     // Ping-pong demo: spawn two cooperative tasks before handing
     // control to the scheduler. Each runs PING_PONG_ROUNDS rounds

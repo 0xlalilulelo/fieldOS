@@ -323,6 +323,178 @@ unsafe fn bar_address(bus: u8, dev: u8, func: u8, bar: u8) -> u64 {
 }
 
 // ---------------------------------------------------------------
+// Transport-level helpers used by every virtio driver.
+// ---------------------------------------------------------------
+//
+// COMMON_CFG register offsets (virtio v1.2 § 4.1.4.3) and the cc_*
+// volatile read/write primitives that drivers use to read and write
+// them. Lifted out of virtio_blk.rs in 3C-4 because virtio-net wants
+// the same primitives — drivers should not be redefining the
+// register map, and feature negotiation is identical across them.
+
+pub(crate) const CC_DEVICE_FEATURE_SELECT: usize = 0x00;
+pub(crate) const CC_DEVICE_FEATURE: usize = 0x04;
+pub(crate) const CC_DRIVER_FEATURE_SELECT: usize = 0x08;
+pub(crate) const CC_DRIVER_FEATURE: usize = 0x0C;
+#[allow(dead_code)] // num_queues is informational; drivers read directly when interested
+pub(crate) const CC_NUM_QUEUES: usize = 0x12;
+pub(crate) const CC_DEVICE_STATUS: usize = 0x14;
+pub(crate) const CC_QUEUE_SELECT: usize = 0x16;
+pub(crate) const CC_QUEUE_SIZE: usize = 0x18;
+pub(crate) const CC_QUEUE_ENABLE: usize = 0x1C;
+pub(crate) const CC_QUEUE_NOTIFY_OFF: usize = 0x1E;
+pub(crate) const CC_QUEUE_DESC: usize = 0x20;
+pub(crate) const CC_QUEUE_DRIVER: usize = 0x28;
+pub(crate) const CC_QUEUE_DEVICE: usize = 0x30;
+
+pub(crate) const STATUS_ACKNOWLEDGE: u8 = 1;
+pub(crate) const STATUS_DRIVER: u8 = 2;
+pub(crate) const STATUS_DRIVER_OK: u8 = 4;
+pub(crate) const STATUS_FEATURES_OK: u8 = 8;
+#[allow(dead_code)]
+pub(crate) const STATUS_FAILED: u8 = 0x80;
+
+pub(crate) const VIRTIO_F_VERSION_1: u32 = 1; // bit 32 → bit 0 of upper dword
+
+/// SAFETY for all cc_*: caller's contract — `common` is a valid
+/// COMMON_CFG MMIO base (mapped via paging::map_mmio at find_device
+/// time) and `off` is a dword/word/byte-aligned offset within the
+/// 4 KiB region.
+pub(crate) unsafe fn cc_read8(common: *mut u8, off: usize) -> u8 {
+    unsafe { core::ptr::read_volatile(common.add(off)) }
+}
+pub(crate) unsafe fn cc_write8(common: *mut u8, off: usize, v: u8) {
+    unsafe { core::ptr::write_volatile(common.add(off), v) }
+}
+pub(crate) unsafe fn cc_read16(common: *mut u8, off: usize) -> u16 {
+    unsafe { core::ptr::read_volatile(common.add(off) as *const u16) }
+}
+pub(crate) unsafe fn cc_write16(common: *mut u8, off: usize, v: u16) {
+    unsafe { core::ptr::write_volatile(common.add(off) as *mut u16, v) }
+}
+pub(crate) unsafe fn cc_read32(common: *mut u8, off: usize) -> u32 {
+    unsafe { core::ptr::read_volatile(common.add(off) as *const u32) }
+}
+pub(crate) unsafe fn cc_write32(common: *mut u8, off: usize, v: u32) {
+    unsafe { core::ptr::write_volatile(common.add(off) as *mut u32, v) }
+}
+pub(crate) unsafe fn cc_write64(common: *mut u8, off: usize, v: u64) {
+    unsafe { core::ptr::write_volatile(common.add(off) as *mut u64, v) }
+}
+
+/// Run the v1.2 § 3.1.1 init dance: reset, ACKNOWLEDGE, DRIVER, read
+/// device features, write driver features (low + high halves),
+/// FEATURES_OK, verify retained. Returns the device's offered
+/// feature set so the caller can log it. Panics if the device clears
+/// FEATURES_OK after our write — driver features were unacceptable.
+///
+/// `driver_features` is the full 64-bit set the driver wants. The
+/// caller almost always includes VIRTIO_F_VERSION_1 (bit 32).
+pub(crate) fn init_transport(dev: &VirtioDevice, driver_features: u64) -> u64 {
+    // SAFETY: dev.common_cfg is a 4-KiB MMIO region mapped by
+    // virtio::find_device; CC_* offsets are < 0x40.
+    unsafe {
+        cc_write8(dev.common_cfg, CC_DEVICE_STATUS, 0);
+        // Spec recommends waiting until status reads 0 post-reset;
+        // QEMU acks immediately. Bound the loop so a misbehaving
+        // device can't hang us forever here.
+        for _ in 0..16 {
+            if cc_read8(dev.common_cfg, CC_DEVICE_STATUS) == 0 {
+                break;
+            }
+        }
+        cc_write8(dev.common_cfg, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
+        cc_write8(
+            dev.common_cfg,
+            CC_DEVICE_STATUS,
+            STATUS_ACKNOWLEDGE | STATUS_DRIVER,
+        );
+
+        cc_write32(dev.common_cfg, CC_DEVICE_FEATURE_SELECT, 0);
+        let dev_lo = cc_read32(dev.common_cfg, CC_DEVICE_FEATURE);
+        cc_write32(dev.common_cfg, CC_DEVICE_FEATURE_SELECT, 1);
+        let dev_hi = cc_read32(dev.common_cfg, CC_DEVICE_FEATURE);
+        let device_features = ((dev_hi as u64) << 32) | dev_lo as u64;
+
+        let drv_lo = (driver_features & 0xFFFF_FFFF) as u32;
+        let drv_hi = (driver_features >> 32) as u32;
+        cc_write32(dev.common_cfg, CC_DRIVER_FEATURE_SELECT, 0);
+        cc_write32(dev.common_cfg, CC_DRIVER_FEATURE, drv_lo);
+        cc_write32(dev.common_cfg, CC_DRIVER_FEATURE_SELECT, 1);
+        cc_write32(dev.common_cfg, CC_DRIVER_FEATURE, drv_hi);
+
+        cc_write8(
+            dev.common_cfg,
+            CC_DEVICE_STATUS,
+            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
+        );
+        let after = cc_read8(dev.common_cfg, CC_DEVICE_STATUS);
+        assert_eq!(
+            after & STATUS_FEATURES_OK,
+            STATUS_FEATURES_OK,
+            "virtio: device cleared FEATURES_OK — driver features unacceptable"
+        );
+
+        device_features
+    }
+}
+
+/// Activate queue `idx` with the rings of `queue`. Sets queue_select,
+/// validates the device's max queue size against ours, writes the
+/// three ring physical addresses, and enables the queue. Returns the
+/// notify pointer (*mut u16) the caller writes to to alert the device
+/// of new available descriptors.
+pub(crate) fn activate_queue(
+    dev: &VirtioDevice,
+    idx: u16,
+    queue: &Virtqueue,
+) -> *mut u16 {
+    // SAFETY: same as init_transport — common_cfg is the mapped MMIO
+    // region; queue_* fields are within COMMON_CFG; notify_base
+    // points at the mapped notify region.
+    unsafe {
+        cc_write16(dev.common_cfg, CC_QUEUE_SELECT, idx);
+        let max = cc_read16(dev.common_cfg, CC_QUEUE_SIZE);
+        assert!(
+            max >= queue.size,
+            "virtio: queue {idx} max size {max} < requested {}",
+            queue.size
+        );
+        cc_write16(dev.common_cfg, CC_QUEUE_SIZE, queue.size);
+        cc_write64(dev.common_cfg, CC_QUEUE_DESC, queue.desc_phys);
+        cc_write64(dev.common_cfg, CC_QUEUE_DRIVER, queue.avail_phys);
+        cc_write64(dev.common_cfg, CC_QUEUE_DEVICE, queue.used_phys);
+
+        let queue_notify_off = cc_read16(dev.common_cfg, CC_QUEUE_NOTIFY_OFF);
+        let notify_off =
+            (queue_notify_off as usize) * (dev.notify_off_multiplier as usize);
+        let notify_ptr = dev.notify_base.add(notify_off) as *mut u16;
+
+        cc_write16(dev.common_cfg, CC_QUEUE_ENABLE, 1);
+
+        notify_ptr
+    }
+}
+
+/// Set DEVICE_STATUS to ACK | DRIVER | FEATURES_OK | DRIVER_OK,
+/// bringing the device live for I/O.
+pub(crate) fn set_driver_ok(dev: &VirtioDevice) {
+    let v = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK;
+    // SAFETY: caller holds a valid VirtioDevice from find_device.
+    unsafe { cc_write8(dev.common_cfg, CC_DEVICE_STATUS, v) };
+}
+
+/// Notify the device that a queue has new available descriptors.
+/// `notify_ptr` is the pointer returned by `activate_queue` for that
+/// queue. Writes the queue index (any 16-bit value works without
+/// the NOTIFY_DATA feature; we use the index for diagnostics).
+pub(crate) fn notify(notify_ptr: *mut u16, queue_idx: u16) {
+    // SAFETY: notify_ptr is the mapped notify region pointer for a
+    // specific queue, returned by activate_queue.
+    unsafe { core::ptr::write_volatile(notify_ptr, queue_idx) };
+}
+
+// ---------------------------------------------------------------
 // 3C-2 — Split virtqueues (virtio v1.2 § 2.6).
 // ---------------------------------------------------------------
 //
