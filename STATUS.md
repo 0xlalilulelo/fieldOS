@@ -49,10 +49,32 @@ into the idle task's heap-allocated stack. ELF ~47 KB, smoke still
 - `46b005f` scheduler init, spawn idle task
 - `1264c20` ARSENAL_SCHED_OK after ping-pong demo
 
-**3C — virtio bring-up (next).** virtio-blk + virtio-net (the two M0
-needs for `>` prompt traffic). MMIO transport probe via PCI scan,
-queue setup, descriptor management. ARSENAL.md budgets the bulk of
-M0 step 3's remaining months for 3C plus 3D (smoltcp + rustls).
+**3C — virtio bring-up (complete, 2026-05-09).** PCI configuration
+scan via legacy CF8/CFC; virtio modern PCI transport probe with cap
+list walk through HHDM-mapped MMIO; split-virtqueue infrastructure
+(desc + avail + used in one 4-KiB frame for sizes ≤ 128); virtio-blk
+sector-0 read asserting the hybrid-ISO MBR signature 0xAA55;
+virtio-net probe-TX with 8-buffer RX pre-population and a 64-byte
+zero TX frame round-trip via QEMU slirp. Smoke grew two sentinels
+(`ARSENAL_BLK_OK`, `ARSENAL_NET_OK`); the QEMU command line gained
+`-device virtio-rng-pci`, `-drive ... -device virtio-blk-pci`, and
+`-netdev user ... -device virtio-net-pci`. ELF ~81 KB, smoke still
+~1 s locally. The detour was `paging::map_mmio` — Limine's HHDM
+covers RAM only, so device MMIO regions need explicit mapping
+through a `FRAMES`-backed `OffsetPageTable`.
+
+3C sub-commits:
+- `d4ea3d2` PCI config-space scanner
+- `1d90405` virtio modern PCI transport
+- `8764f62` virtqueue rings + descriptor mgmt
+- `bc6ccfc` virtio-blk + sector-0 read smoke
+- `174127b` virtio-net + probe TX smoke
+
+**3D — smoltcp + rustls (next).** Wire smoltcp's
+`virtio_net`-style backend onto our virtio-net, bring TCP up to
+loopback, then to QEMU slirp gateway. rustls follows for TLS once
+TCP is stable. ARSENAL.md budgets the back half of M0 step 3 for
+3D + 3E + 3F + 3G.
 
 ### Step 3 performance + security + usability gates (from ARSENAL.md)
 
