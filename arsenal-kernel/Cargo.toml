@@ -14,5 +14,10 @@ bench = false
 [dependencies]
 limine = "0.5"
 linked_list_allocator = "0.10"
+# smoltcp 0.12 in no_std + alloc mode. Default features pull in std + log;
+# we want neither. License: MIT OR Apache-2.0 — clear under CLAUDE.md §3.
+# 3D-1 builds the phy::Device adapter on virtio-net; 3D-2 brings up the
+# Interface; 3D-3 / 3D-4 wire TCP and TLS.
+smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp", "socket-dhcpv4", "alloc"] }
 spin = "0.10"
 x86_64 = { version = "0.15", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
