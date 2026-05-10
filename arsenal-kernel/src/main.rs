@@ -24,6 +24,7 @@ mod sched;
 mod serial;
 mod task;
 mod virtio;
+mod virtio_blk;
 
 // Limine base-revision-1+ requires explicit start/end marker pairs around
 // the .requests section so the bootloader can bound its scan; without
@@ -157,6 +158,13 @@ extern "C" fn _start() -> ! {
         assert_eq!(vq.num_free(), 13);
         assert!(vq.pop_used().is_none(), "virtq: pop_used should be empty");
     }
+
+    // virtio-blk smoke: locate the device, init, read sector 0,
+    // assert the hybrid-ISO MBR boot signature 0xAA55, print
+    // ARSENAL_BLK_OK. Runs on the boot stack before sched::init
+    // takes over so blocking-via-yield works against the
+    // single-CPU cooperative scheduler.
+    virtio_blk::smoke();
 
     // Ping-pong demo: spawn two cooperative tasks before handing
     // control to the scheduler. Each runs PING_PONG_ROUNDS rounds

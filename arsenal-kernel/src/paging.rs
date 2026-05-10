@@ -12,8 +12,13 @@
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::PhysAddr;
+use x86_64::VirtAddr;
 use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::{PageTable, PageTableFlags, PhysFrame, Size4KiB};
+use x86_64::structures::paging::mapper::MapToError;
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
+    PhysFrame, Size4KiB,
+};
 
 use crate::frames;
 use crate::serial;
@@ -80,6 +85,75 @@ unsafe fn deep_clone_table(
     }
 
     new_frame
+}
+
+/// Adapter so x86_64's OffsetPageTable can pull frames from our
+/// global allocator for missing intermediate page tables.
+struct FramesAdapter;
+unsafe impl FrameAllocator<Size4KiB> for FramesAdapter {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        frames::FRAMES.alloc_frame()
+    }
+}
+
+/// Map `length` bytes of physical memory starting at `phys` into the
+/// kernel's page tables at virtual address `phys + hhdm_offset`,
+/// using PRESENT | WRITABLE | NO_CACHE flags suitable for MMIO.
+/// Pages already mapped (e.g. by Limine's HHDM coverage of RAM) are
+/// silently accepted; missing intermediate page tables are allocated
+/// from FRAMES.
+///
+/// Limine's HHDM only covers RAM (USABLE + reclaimable + ACPI per
+/// the protocol); device MMIO regions like the PCI BAR space at
+/// 0xfe000000 are not mapped by default. Callers that need to
+/// touch MMIO must call this first.
+pub fn map_mmio(phys: u64, length: u64) {
+    let hhdm = hhdm_offset();
+    // Round virtual range to page boundaries and walk one frame at
+    // a time. This is overkill for huge mappings but the BAR
+    // regions we touch are 4 KiB to ~16 KiB.
+    let virt_start = (phys + hhdm) & !0xFFF;
+    let virt_end = (phys + hhdm + length + 0xFFF) & !0xFFF;
+    let phys_start = phys & !0xFFF;
+
+    // SAFETY: cr3_frame is the live PML4. Translating its physical
+    // address through HHDM gives a valid &mut PageTable; we hold the
+    // unique kernel context and no concurrent walker exists in M0.
+    let pml4 = unsafe {
+        let cr3 = Cr3::read().0.start_address().as_u64();
+        &mut *((cr3 + hhdm) as *mut PageTable)
+    };
+    let mut mapper = unsafe { OffsetPageTable::new(pml4, VirtAddr::new(hhdm)) };
+    let mut allocator = FramesAdapter;
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_CACHE;
+
+    let mut v = virt_start;
+    let mut p = phys_start;
+    while v < virt_end {
+        let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(v));
+        let frame: PhysFrame<Size4KiB> =
+            PhysFrame::containing_address(PhysAddr::new(p));
+        // SAFETY: we own the page tables; this device MMIO frame is
+        // distinct from any RAM allocation and aliasing it via this
+        // mapping is the entire purpose. NO_CACHE flag prevents
+        // speculative reads from cached aliases.
+        let result = unsafe { mapper.map_to(page, frame, flags, &mut allocator) };
+        match result {
+            Ok(flusher) => flusher.flush(),
+            Err(MapToError::PageAlreadyMapped(_)) => {
+                // Limine already had this region; nothing to do.
+            }
+            Err(MapToError::ParentEntryHugePage) => {
+                // The region is covered by a huge page upstream;
+                // already mapped at a coarser granularity.
+            }
+            Err(e) => panic!("map_mmio: unexpected map error {e:?} at virt {v:#018x}"),
+        }
+        v += PAGE_SIZE as u64;
+        p += PAGE_SIZE as u64;
+    }
 }
 
 pub fn init(hhdm_offset: u64) {

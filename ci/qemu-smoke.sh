@@ -33,7 +33,7 @@ TIMEOUT="${SMOKE_TIMEOUT:-15}"
 # CI; remove one only when the underlying assertion is folded into a
 # stronger downstream sentinel.
 FINAL_SENTINEL="ARSENAL_SCHED_OK"
-REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_SCHED_OK")
+REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_SCHED_OK")
 SERIAL_LOG=$(mktemp -t arsenal-smoke-serial.XXXXXX)
 QEMU_LOG=$(mktemp -t arsenal-smoke-qemu.XXXXXX)
 trap 'rm -f "$SERIAL_LOG" "$QEMU_LOG"' EXIT
@@ -55,6 +55,8 @@ qemu-system-x86_64 \
 	-machine q35 \
 	-accel tcg -cpu max \
 	-device virtio-rng-pci \
+	-drive file="$ISO",if=none,id=blk0,format=raw,readonly=on \
+	-device virtio-blk-pci,drive=blk0 \
 	-display none \
 	-no-reboot -no-shutdown \
 	-serial "file:$SERIAL_LOG" \

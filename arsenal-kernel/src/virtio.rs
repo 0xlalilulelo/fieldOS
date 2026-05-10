@@ -38,6 +38,136 @@ const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
 const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 const VIRTIO_PCI_CAP_PCI_CFG: u8 = 5;
 
+/// Resolved virtio-modern transport pointers for one device.
+/// Returned by `find_device`; consumed by drivers (3C-3 / 3C-4)
+/// when initializing.
+pub struct VirtioDevice {
+    pub bus: u8,
+    pub dev: u8,
+    pub func: u8,
+    // 3C-4's virtio-net will read device_id (to distinguish 0x1000
+    // legacy from 0x1041 modern at runtime) and device_cfg (for the
+    // MAC address). 3F wires isr for IRQ acknowledgement.
+    #[allow(dead_code)]
+    pub device_id: u16,
+    pub common_cfg: *mut u8,
+    pub notify_base: *mut u8,
+    pub notify_off_multiplier: u32,
+    #[allow(dead_code)]
+    pub isr: *mut u8,
+    #[allow(dead_code)]
+    pub device_cfg: *mut u8,
+}
+
+/// Find the first virtio device matching `device_id` and resolve
+/// its transport pointers. Returns None if no matching device is
+/// present. Returns the resolved common / notify / isr / device
+/// MMIO pointers translated through HHDM. The caller treats the
+/// returned struct as the handle for all subsequent register
+/// accesses on that device.
+pub fn find_device(device_id: u16) -> Option<VirtioDevice> {
+    for bus in 0u16..=255 {
+        for dev in 0u8..32 {
+            if let Some(d) = try_resolve(bus as u8, dev, 0, device_id) {
+                return Some(d);
+            }
+            // SAFETY: standard PCI dword read.
+            let header_dword =
+                unsafe { pci::config_read32(bus as u8, dev, 0, 0x0C) };
+            if (header_dword >> 16) & 0x80 != 0 {
+                for func in 1u8..8 {
+                    if let Some(d) = try_resolve(bus as u8, dev, func, device_id) {
+                        return Some(d);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn try_resolve(bus: u8, dev: u8, func: u8, want: u16) -> Option<VirtioDevice> {
+    // SAFETY: standard PCI dword reads at dword-aligned offsets.
+    let id = unsafe { pci::config_read32(bus, dev, func, 0x00) };
+    if (id & 0xFFFF) as u16 != VIRTIO_VENDOR {
+        return None;
+    }
+    if ((id >> 16) & 0xFFFF) as u16 != want {
+        return None;
+    }
+
+    let mut common_cfg: *mut u8 = core::ptr::null_mut();
+    let mut notify_base: *mut u8 = core::ptr::null_mut();
+    let mut notify_off_multiplier: u32 = 0;
+    let mut isr: *mut u8 = core::ptr::null_mut();
+    let mut device_cfg: *mut u8 = core::ptr::null_mut();
+
+    // Walk caps the same way print_virtio_cap does, but instead of
+    // logging, store the resolved virtual addresses by cfg_type.
+    // SAFETY: standard PCI dword reads.
+    let status_dword = unsafe { pci::config_read32(bus, dev, func, 0x04) };
+    if ((status_dword >> 16) & 0x10) == 0 {
+        return None;
+    }
+    let cap_ptr_dword = unsafe { pci::config_read32(bus, dev, func, 0x34) };
+    let mut cap_offset = (cap_ptr_dword & 0xFC) as u8;
+    while cap_offset != 0 {
+        let cap_header = unsafe { pci::config_read32(bus, dev, func, cap_offset) };
+        let cap_id = (cap_header & 0xFF) as u8;
+        let next = ((cap_header >> 8) & 0xFC) as u8;
+        let cap_len = ((cap_header >> 16) & 0xFF) as u8;
+        let cfg_type = ((cap_header >> 24) & 0xFF) as u8;
+
+        if cap_id == PCI_CAP_ID_VENDOR && cap_len >= 16 {
+            let bar_dword =
+                unsafe { pci::config_read32(bus, dev, func, cap_offset + 4) };
+            let bar = (bar_dword & 0xFF) as u8;
+            let off_in_bar =
+                unsafe { pci::config_read32(bus, dev, func, cap_offset + 8) };
+            let length =
+                unsafe { pci::config_read32(bus, dev, func, cap_offset + 12) };
+            let bar_phys = unsafe { bar_address(bus, dev, func, bar) };
+            let cap_phys = bar_phys + off_in_bar as u64;
+            // Limine's HHDM doesn't cover device MMIO; map each
+            // virtio cap's region into our page tables before any
+            // driver dereferences a returned pointer.
+            if length > 0 {
+                paging::map_mmio(cap_phys, length as u64);
+            }
+            let virt = (cap_phys + paging::hhdm_offset()) as *mut u8;
+            match cfg_type {
+                VIRTIO_PCI_CAP_COMMON_CFG => common_cfg = virt,
+                VIRTIO_PCI_CAP_NOTIFY_CFG => {
+                    notify_base = virt;
+                    notify_off_multiplier = unsafe {
+                        pci::config_read32(bus, dev, func, cap_offset + 16)
+                    };
+                }
+                VIRTIO_PCI_CAP_ISR_CFG => isr = virt,
+                VIRTIO_PCI_CAP_DEVICE_CFG => device_cfg = virt,
+                _ => {}
+            }
+        }
+        cap_offset = next;
+    }
+
+    if common_cfg.is_null() || notify_base.is_null() || device_cfg.is_null() {
+        return None;
+    }
+
+    Some(VirtioDevice {
+        bus,
+        dev,
+        func,
+        device_id: ((id >> 16) & 0xFFFF) as u16,
+        common_cfg,
+        notify_base,
+        notify_off_multiplier,
+        isr,
+        device_cfg,
+    })
+}
+
 /// Walk every PCI BDF, probe virtio devices, log each resolved
 /// capability. Idempotent — safe to call multiple times.
 pub fn probe() {
@@ -375,10 +505,68 @@ impl Virtqueue {
         Some(idx)
     }
 
-    /// Pop the next completed descriptor from the used ring,
-    /// returning its id + length and freeing the descriptor back
-    /// to the pool. Returns None if no new completions since the
-    /// last call.
+    /// Push a chained request (multiple descriptors linked via
+    /// VIRTQ_DESC_F_NEXT) onto the available ring. Each tuple is
+    /// (physical address, length, flags). The F_NEXT bit is added
+    /// automatically between consecutive parts; do not include it
+    /// in the caller's flags. Returns the head descriptor index, or
+    /// None if the queue can't fit `parts.len()` descriptors.
+    pub fn push_chain(&mut self, parts: &[(u64, u32, u16)]) -> Option<u16> {
+        if parts.is_empty() || (parts.len() as u16) > self.num_free {
+            return None;
+        }
+        // Cap chain length at 8 — far past anything our drivers use,
+        // keeps the temporary index array on the stack at fixed size.
+        assert!(parts.len() <= 8, "virtq: chain longer than 8");
+
+        // Pop n free descriptors off the head of the free chain,
+        // recording their indices in order.
+        let mut indices: [u16; 8] = [0; 8];
+        let mut cur = self.free_head;
+        for slot in indices.iter_mut().take(parts.len()) {
+            *slot = cur;
+            // SAFETY: cur < size — every value reachable via the
+            // free chain is a valid descriptor index by construction.
+            cur = unsafe { (*self.desc.as_ptr().add(cur as usize)).next };
+        }
+        self.free_head = cur;
+        self.num_free -= parts.len() as u16;
+
+        // Fill each descriptor; chain via F_NEXT to the next index.
+        for i in 0..parts.len() {
+            let (addr, len, flags) = parts[i];
+            let idx = indices[i];
+            let (next_idx, chain_flag) = if i + 1 < parts.len() {
+                (indices[i + 1], VIRTQ_DESC_F_NEXT)
+            } else {
+                (0, 0)
+            };
+            // SAFETY: idx < size.
+            unsafe {
+                let d = self.desc.as_ptr().add(idx as usize);
+                (*d).addr = addr;
+                (*d).len = len;
+                (*d).flags = (flags & !VIRTQ_DESC_F_NEXT) | chain_flag;
+                (*d).next = next_idx;
+            }
+        }
+
+        // SAFETY: avail header + ring fit in the allocated frame.
+        unsafe {
+            let avail_idx = (*self.avail.as_ptr()).idx;
+            let ring_slot = (avail_idx % self.size) as usize;
+            let ring_ptr = (self.avail.as_ptr() as *mut u8).add(4) as *mut u16;
+            *ring_ptr.add(ring_slot) = indices[0];
+            (*self.avail.as_ptr()).idx = avail_idx.wrapping_add(1);
+        }
+
+        Some(indices[0])
+    }
+
+    /// Pop the next completed (possibly-chained) request from the
+    /// used ring. Walks the descriptor chain starting at elem.id,
+    /// freeing every descriptor until the F_NEXT bit clears.
+    /// Returns None if no new completions since the last call.
     pub fn pop_used(&mut self) -> Option<VirtqUsedElem> {
         // SAFETY: used header is a 4-byte struct in our allocated
         // frame; reading idx is a simple aligned u16 load.
@@ -396,20 +584,29 @@ impl Virtqueue {
         };
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
-        // Return the descriptor to the free chain. A misbehaving
-        // device could write any id; we don't validate id < size
-        // because the ensuing add() would be out-of-bounds and
-        // panic, which is the right failure mode for a corrupted
-        // ring.
-        // SAFETY: elem.id < size if device is well-behaved.
-        unsafe {
-            let d = self.desc.as_ptr().add(elem.id as usize);
-            (*d).next = self.free_head;
+        // Walk and free the descriptor chain starting at elem.id.
+        // F_NEXT means "more to follow"; the final descriptor has
+        // flags & F_NEXT == 0, terminating the walk. A misbehaving
+        // device that writes a bogus id would index out-of-bounds
+        // on the next add() and panic, which is the right failure
+        // mode for a corrupted used ring.
+        let mut cur = elem.id as u16;
+        loop {
+            // SAFETY: cur < size if device + driver are consistent.
+            let (flags, old_next) = unsafe {
+                let d = self.desc.as_ptr().add(cur as usize);
+                let f = (*d).flags;
+                let n = (*d).next;
+                (*d).next = self.free_head;
+                (f, n)
+            };
+            self.free_head = cur;
+            self.num_free += 1;
+            if flags & VIRTQ_DESC_F_NEXT == 0 {
+                return Some(elem);
+            }
+            cur = old_next;
         }
-        self.free_head = elem.id as u16;
-        self.num_free += 1;
-
-        Some(elem)
     }
 }
 
