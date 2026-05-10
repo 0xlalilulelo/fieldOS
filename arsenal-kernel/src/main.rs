@@ -126,6 +126,38 @@ extern "C" fn _start() -> ! {
     // 3C-2 builds queues on top.
     virtio::probe();
 
+    // Smoke the virtqueue allocator: build a 16-descriptor queue,
+    // push three requests, pop_used returns None (no device on
+    // the other end), drop frees the backing frame. The asserted
+    // shape — num_free decrements, descriptor indices come out of
+    // the free chain in order — is what 3C-3 / 3C-4 will rely on.
+    {
+        let mut vq = virtio::Virtqueue::new(16);
+        let _ = writeln!(
+            serial::Writer,
+            "virtq: built size={} desc_phys={:#018x} num_free={}",
+            vq.size,
+            vq.desc_phys,
+            vq.num_free()
+        );
+        let i0 = vq.push_descriptor(0xDEAD_BEEF_DEAD_BEEF, 64, 0);
+        let i1 = vq.push_descriptor(0xCAFE_BABE_CAFE_BABE, 128, virtio::VIRTQ_DESC_F_WRITE);
+        let i2 = vq.push_descriptor(0x1234_5678_9ABC_DEF0, 256, 0);
+        let _ = writeln!(
+            serial::Writer,
+            "virtq: pushed {:?} {:?} {:?} num_free={}",
+            i0,
+            i1,
+            i2,
+            vq.num_free()
+        );
+        assert_eq!(i0, Some(0));
+        assert_eq!(i1, Some(1));
+        assert_eq!(i2, Some(2));
+        assert_eq!(vq.num_free(), 13);
+        assert!(vq.pop_used().is_none(), "virtq: pop_used should be empty");
+    }
+
     // Ping-pong demo: spawn two cooperative tasks before handing
     // control to the scheduler. Each runs PING_PONG_ROUNDS rounds
     // of (print + yield); the last to finish prints

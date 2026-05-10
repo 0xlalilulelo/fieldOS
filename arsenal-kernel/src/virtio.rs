@@ -20,7 +20,11 @@
 // common-cfg pointer.
 
 use core::fmt::Write;
+use core::ptr::NonNull;
 
+use x86_64::structures::paging::{PhysFrame, Size4KiB};
+
+use crate::frames;
 use crate::paging;
 use crate::pci;
 use crate::serial;
@@ -185,5 +189,234 @@ unsafe fn bar_address(bus: u8, dev: u8, func: u8, bar: u8) -> u64 {
     } else {
         // 32-bit memory BAR.
         (lo & 0xFFFF_FFF0) as u64
+    }
+}
+
+// ---------------------------------------------------------------
+// 3C-2 — Split virtqueues (virtio v1.2 § 2.6).
+// ---------------------------------------------------------------
+//
+// Three rings per queue, all backed by a single 4-KiB frame:
+//
+//   offset 0                     — descriptor table (16 * size bytes)
+//   offset desc_size             — available ring header + ring
+//   offset (rounded up to 4)     — used ring header + ring
+//
+// Modern alignment is per-ring (16 / 2 / 4 bytes for desc / avail /
+// used). The HANDOFF mentioned 64/2/4; the v1.2 spec is 16/2/4 and
+// QEMU enforces 16. We pack all three into one frame because a
+// 16-descriptor queue is ~424 bytes total and even 64-descriptor
+// queues fit; the HANDOFF's "one frame per ring" would waste two
+// thirds of the allocated frames per queue. If a future queue
+// needs more than ~128 descriptors, the layout grows to multi-
+// frame and this code revisits the per-ring split.
+//
+// Memory ordering: x86 is TSO so plain writes to avail.idx and
+// reads from used.idx are correctly ordered against the ring
+// stores. SMP / weakly-ordered targets (3F / Apple Silicon)
+// will need acquire/release on the index fields.
+
+pub const VIRTQ_DESC_F_NEXT: u16 = 1;
+pub const VIRTQ_DESC_F_WRITE: u16 = 2;
+#[allow(dead_code)] // indirect descriptors are a 3C-3+ optimization
+pub const VIRTQ_DESC_F_INDIRECT: u16 = 4;
+
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+pub struct VirtqDesc {
+    pub addr: u64,
+    pub len: u32,
+    pub flags: u16,
+    pub next: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+pub struct VirtqUsedElem {
+    pub id: u32,
+    pub len: u32,
+}
+
+#[repr(C)]
+struct VirtqAvailHeader {
+    flags: u16,
+    idx: u16,
+    // ring: [u16; size] follows immediately
+}
+
+#[repr(C)]
+struct VirtqUsedHeader {
+    flags: u16,
+    idx: u16,
+    // ring: [VirtqUsedElem; size] follows immediately
+}
+
+pub struct Virtqueue {
+    pub size: u16,
+    desc: NonNull<VirtqDesc>,
+    avail: NonNull<VirtqAvailHeader>,
+    used: NonNull<VirtqUsedHeader>,
+
+    pub desc_phys: u64,
+    // 3C-3 writes these into the device's COMMON_CFG queue_desc /
+    // queue_driver / queue_device registers when activating a queue.
+    #[allow(dead_code)]
+    pub avail_phys: u64,
+    #[allow(dead_code)]
+    pub used_phys: u64,
+
+    free_head: u16,
+    num_free: u16,
+    last_used_idx: u16,
+
+    backing_frame: PhysFrame<Size4KiB>,
+}
+
+impl Virtqueue {
+    /// Allocate a virtqueue of `size` descriptors. `size` must be a
+    /// power of two and small enough that desc + avail + used fit
+    /// in a single 4-KiB frame (size ≤ 128 in practice).
+    pub fn new(size: u16) -> Self {
+        assert!(
+            size > 0 && size.is_power_of_two(),
+            "virtq: size must be a positive power of two; got {size}"
+        );
+        let n = size as usize;
+        let desc_size = 16 * n;
+        let avail_size = 4 + 2 * n;
+        let used_offset = (desc_size + avail_size + 3) & !3;
+        let used_size = 4 + 8 * n;
+        let total = used_offset + used_size;
+        assert!(
+            total <= 4096,
+            "virtq: layout {total} bytes exceeds single 4-KiB frame for size {size}"
+        );
+
+        let frame = frames::FRAMES.alloc_frame().expect("virtq: OOM");
+        let phys = frame.start_address().as_u64();
+        let virt = phys + paging::hhdm_offset();
+
+        // SAFETY: virt is HHDM-mapped to a frame we just allocated
+        // and exclusively own. Zeroing initializes all three rings'
+        // header fields (flags=0, idx=0) and clears the descriptor
+        // table to a known state.
+        unsafe { core::ptr::write_bytes(virt as *mut u8, 0, 4096) };
+
+        let desc_ptr = virt as *mut VirtqDesc;
+        let avail_ptr = (virt + desc_size as u64) as *mut VirtqAvailHeader;
+        let used_ptr = (virt + used_offset as u64) as *mut VirtqUsedHeader;
+
+        // Build the free-descriptor chain. Each desc.next points to
+        // the following slot; the last desc terminates with next=0,
+        // which is also the head — the chain is never circular and
+        // num_free guards exhaustion.
+        // SAFETY: desc_ptr points to n freshly-zeroed descriptors
+        // we exclusively own; n descriptors fit within desc_size.
+        unsafe {
+            for i in 0..n {
+                let next = if i == n - 1 { 0 } else { (i + 1) as u16 };
+                (*desc_ptr.add(i)).next = next;
+            }
+        }
+
+        Self {
+            size,
+            // SAFETY: pointers derived from a 4-KiB frame just
+            // allocated and zeroed; non-null by construction.
+            desc: unsafe { NonNull::new_unchecked(desc_ptr) },
+            avail: unsafe { NonNull::new_unchecked(avail_ptr) },
+            used: unsafe { NonNull::new_unchecked(used_ptr) },
+            desc_phys: phys,
+            avail_phys: phys + desc_size as u64,
+            used_phys: phys + used_offset as u64,
+            free_head: 0,
+            num_free: size,
+            last_used_idx: 0,
+            backing_frame: frame,
+        }
+    }
+
+    pub fn num_free(&self) -> u16 {
+        self.num_free
+    }
+
+    /// Push a single-descriptor request onto the available ring.
+    /// Returns the descriptor index, or None if the queue is full.
+    /// Caller is responsible for notifying the device afterward
+    /// (3C-3 wires the notify register write).
+    pub fn push_descriptor(&mut self, addr: u64, len: u32, flags: u16) -> Option<u16> {
+        if self.num_free == 0 {
+            return None;
+        }
+        let idx = self.free_head;
+        // SAFETY: idx < size (free_head is always a valid descriptor
+        // index in the chain we set up at new()); desc covers size
+        // entries.
+        unsafe {
+            let d = self.desc.as_ptr().add(idx as usize);
+            self.free_head = (*d).next;
+            (*d).addr = addr;
+            (*d).len = len;
+            (*d).flags = flags & !VIRTQ_DESC_F_NEXT;
+            (*d).next = 0;
+        }
+        self.num_free -= 1;
+
+        // SAFETY: avail header + ring fit in the allocated frame.
+        // Ring slot index is masked into [0, size) by % size.
+        unsafe {
+            let avail_idx = (*self.avail.as_ptr()).idx;
+            let ring_slot = (avail_idx % self.size) as usize;
+            let ring_ptr = (self.avail.as_ptr() as *mut u8).add(4) as *mut u16;
+            *ring_ptr.add(ring_slot) = idx;
+            (*self.avail.as_ptr()).idx = avail_idx.wrapping_add(1);
+        }
+
+        Some(idx)
+    }
+
+    /// Pop the next completed descriptor from the used ring,
+    /// returning its id + length and freeing the descriptor back
+    /// to the pool. Returns None if no new completions since the
+    /// last call.
+    pub fn pop_used(&mut self) -> Option<VirtqUsedElem> {
+        // SAFETY: used header is a 4-byte struct in our allocated
+        // frame; reading idx is a simple aligned u16 load.
+        let used_idx = unsafe { (*self.used.as_ptr()).idx };
+        if used_idx == self.last_used_idx {
+            return None;
+        }
+        let ring_slot = (self.last_used_idx % self.size) as usize;
+        // SAFETY: used header + ring entries fit in the frame; each
+        // slot is an 8-byte VirtqUsedElem.
+        let elem = unsafe {
+            let ring_ptr =
+                (self.used.as_ptr() as *mut u8).add(4) as *mut VirtqUsedElem;
+            *ring_ptr.add(ring_slot)
+        };
+        self.last_used_idx = self.last_used_idx.wrapping_add(1);
+
+        // Return the descriptor to the free chain. A misbehaving
+        // device could write any id; we don't validate id < size
+        // because the ensuing add() would be out-of-bounds and
+        // panic, which is the right failure mode for a corrupted
+        // ring.
+        // SAFETY: elem.id < size if device is well-behaved.
+        unsafe {
+            let d = self.desc.as_ptr().add(elem.id as usize);
+            (*d).next = self.free_head;
+        }
+        self.free_head = elem.id as u16;
+        self.num_free += 1;
+
+        Some(elem)
+    }
+}
+
+impl Drop for Virtqueue {
+    fn drop(&mut self) {
+        // Return the backing frame to the global pool. PhysFrame is
+        // Copy; the value is copied here, so the field is unchanged.
+        frames::FRAMES.free_frame(self.backing_frame);
     }
 }
