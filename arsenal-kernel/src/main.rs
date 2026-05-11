@@ -18,6 +18,7 @@ mod frames;
 mod gdt;
 mod heap;
 mod idt;
+mod net;
 mod paging;
 mod pci;
 mod sched;
@@ -169,10 +170,15 @@ extern "C" fn _start() -> ! {
 
     // virtio-net smoke: locate the device, init, set up RX + TX
     // queues, send one zero-filled 64-byte frame, assert the TX
-    // descriptor returns used. RX correctness is 3D's domain when
-    // smoltcp drives the protocol stack; for 3C-4 we only verify
-    // the doorbell fires and the device acknowledges TX.
-    virtio_net::smoke();
+    // descriptor returns used. Returns the live driver so 3D-2's
+    // smoltcp Interface can take ownership.
+    let net_dev = virtio_net::smoke();
+
+    // 3D-2: hand the virtio-net driver to smoltcp's Interface, install
+    // a DHCPv4 socket, spawn a cooperative poll task. The lease (if
+    // any) lands asynchronously, printed by the poll task.
+    net::init(net_dev);
+    sched::spawn(net::poll_loop);
 
     // Ping-pong demo: spawn two cooperative tasks before handing
     // control to the scheduler. Each runs PING_PONG_ROUNDS rounds

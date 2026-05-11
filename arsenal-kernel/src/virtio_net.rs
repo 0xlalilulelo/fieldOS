@@ -114,6 +114,16 @@ pub struct VirtioNet {
     tx: TxState,
 }
 
+// SAFETY: VirtioNet contains raw pointers (notify regs, virtqueue
+// NonNulls, VirtioDevice MMIO bases) that are !Send by default. The
+// pointee MMIO regions and queue frames are pinned by paging::map_mmio
+// and the frame allocator respectively, so the addresses are stable.
+// The single-CPU cooperative scheduler plus 3D-2's enclosing Mutex
+// (net::NET) guarantees no concurrent access from another CPU thread
+// today. 3F's preemptive + SMP migration revisits this when more than
+// one CPU can attempt a poll.
+unsafe impl Send for VirtioNet {}
+
 impl VirtioNet {
     /// Initialize a virtio-net device for driving by smoltcp.
     /// Performs the v1.2 § 3.1.1 init dance, allocates and activates
@@ -334,15 +344,14 @@ impl Device for VirtioNet {
 
 // ---- 3C-4 smoke (kept; rewired to use VirtioNet driver) -------
 
-/// Original 3C-4 smoke target: send one zero-filled 64-byte frame
-/// and observe TX completion. Now uses the real driver API rather
-/// than poking virtqueues directly. ARSENAL_NET_OK after first TX
-/// completes.
-pub fn smoke() {
-    let Some(dev) = virtio::find_device(VIRTIO_NET_DEVICE_ID) else {
-        let _ = writeln!(serial::Writer, "net: no virtio-net device found");
-        return;
-    };
+/// 3C-4 smoke target: locate the device, init, send one zero-filled
+/// 64-byte frame, observe TX completion, drain incidental RX, print
+/// ARSENAL_NET_OK. Returns the live VirtioNet for 3D-2's smoltcp
+/// Interface to take ownership of. Panics if no virtio-net is found
+/// — the smoke gate requires it.
+pub fn smoke() -> VirtioNet {
+    let dev = virtio::find_device(VIRTIO_NET_DEVICE_ID)
+        .expect("net: no virtio-net device found");
 
     let _ = writeln!(
         serial::Writer,
@@ -369,19 +378,15 @@ pub fn smoke() {
     }
     let _ = writeln!(serial::Writer, "net: TX completed; spins={spins}");
 
-    // Drain any incidental RX (DHCP discovery from slirp may have
-    // arrived). Doesn't validate correctness — that's 3D-2/3.
+    // Drain any incidental RX queued before smoltcp takes over the
+    // Device. slirp doesn't push unsolicited frames here, but a stale
+    // completion from the probe TX (BROADCAST echo on some setups)
+    // could be sitting in the used ring.
     let mut rx_completions = 0u32;
-    loop {
-        let token_pair = net.receive(Instant::ZERO);
-        match token_pair {
-            Some((rx, _tx)) => {
-                use phy::RxToken;
-                rx.consume(|_buf| ());
-                rx_completions += 1;
-            }
-            None => break,
-        }
+    while let Some((rx, _tx)) = net.receive(Instant::ZERO) {
+        use phy::RxToken;
+        rx.consume(|_buf| ());
+        rx_completions += 1;
     }
     if rx_completions > 0 {
         let _ = writeln!(
@@ -391,4 +396,5 @@ pub fn smoke() {
     }
 
     let _ = writeln!(serial::Writer, "ARSENAL_NET_OK");
+    net
 }
