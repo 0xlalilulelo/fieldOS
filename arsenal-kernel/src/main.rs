@@ -21,6 +21,7 @@ mod idt;
 mod net;
 mod paging;
 mod pci;
+mod rand;
 mod sched;
 mod serial;
 mod task;

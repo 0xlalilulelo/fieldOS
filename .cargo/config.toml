@@ -7,6 +7,11 @@ rustflags = [
     "-C", "link-arg=-Tarsenal-kernel/linker.ld",
     "-C", "code-model=kernel",
     "-C", "relocation-model=static",
+    # getrandom on bare-metal: no system RNG exists. We register a
+    # custom backend in arsenal-kernel/src/rand.rs; this cfg tells
+    # getrandom to dispatch to our extern "Rust" fn rather than try
+    # to bind to libc / vDSO / Windows BCrypt.
+    "--cfg", "getrandom_backend=\"custom\"",
 ]
 
 [alias]
