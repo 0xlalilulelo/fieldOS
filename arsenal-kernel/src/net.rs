@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //
-// smoltcp Interface + DHCPv4 over our virtio-net Phy (M0 step 3D-2).
-// 3D-1 built the phy::Device adapter; this module constructs the
-// Interface on top, adds a DHCPv4 socket, and spawns a poll task that
-// drives the stack cooperatively. 3D-3 adds TCP smoke; 3D-4 wraps
-// rustls.
+// smoltcp Interface + DHCPv4 + TCP smoke over our virtio-net Phy
+// (M0 step 3D-2 / 3D-3). 3D-1 built the phy::Device adapter; this
+// module constructs the Interface on top, adds a DHCPv4 socket, and
+// spawns a poll task that drives the stack cooperatively. Once DHCP
+// hands us a lease, 3D-3's TCP probe opens a connection to slirp's
+// gateway and emits ARSENAL_TCP_OK on Established. 3D-4 wraps that
+// connection in rustls.
 //
 // Time: smoltcp wants a monotonic Instant. We read TSC and divide by
 // a coarse constant to get microseconds. The rate is wildly approximate
@@ -22,12 +24,15 @@
 
 use core::fmt::Write;
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::socket::dhcpv4;
+use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{
+    EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr,
+};
 
 use spin::Mutex;
 
@@ -37,12 +42,25 @@ use crate::virtio_net::VirtioNet;
 
 const MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x4a, 0x52, 0x53];
 
+/// 3D-3 TCP smoke target. Slirp NATs guest → 10.0.2.2:N to the host's
+/// 127.0.0.1:N, where ci/qemu-smoke.sh stands up a Python listener
+/// before launching QEMU. The host listener accepts and holds the
+/// connection open; the kernel observes Established and emits
+/// ARSENAL_TCP_OK. Port and address are mirrored in ci/qemu-smoke.sh
+/// (TCP_SMOKE_PORT).
+const TCP_SMOKE_HOST: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
+const TCP_SMOKE_PORT: u16 = 12345;
+const TCP_LOCAL_PORT: u16 = 49152;
+const TCP_BUF_BYTES: usize = 4096;
+
 struct NetStack {
     iface: Interface,
     device: VirtioNet,
     sockets: SocketSet<'static>,
     dhcp_handle: SocketHandle,
     configured: bool,
+    tcp_handle: Option<SocketHandle>,
+    tcp_ok: bool,
 }
 
 static NET: Mutex<Option<NetStack>> = Mutex::new(None);
@@ -87,7 +105,33 @@ pub fn init(mut device: VirtioNet) {
         sockets,
         dhcp_handle,
         configured: false,
+        tcp_handle: None,
+        tcp_ok: false,
     });
+}
+
+/// Allocate a TCP socket, add it to the SocketSet, and initiate a
+/// connect to the smoke target. Called once, after DHCP has applied
+/// an IP and default route. Stores the handle into stack.tcp_handle;
+/// poll_loop watches state() and emits ARSENAL_TCP_OK on Established.
+fn start_tcp_smoke(stack: &mut NetStack) {
+    let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_BUF_BYTES]);
+    let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_BUF_BYTES]);
+    let mut socket = tcp::Socket::new(rx_buf, tx_buf);
+
+    let remote = IpEndpoint::new(IpAddress::Ipv4(TCP_SMOKE_HOST), TCP_SMOKE_PORT);
+    let cx = stack.iface.context();
+    if let Err(e) = socket.connect(cx, remote, TCP_LOCAL_PORT) {
+        let _ = writeln!(serial::Writer, "net: TCP connect refused: {e:?}");
+        return;
+    }
+
+    let handle = stack.sockets.add(socket);
+    stack.tcp_handle = Some(handle);
+    let _ = writeln!(
+        serial::Writer,
+        "net: TCP connect -> {TCP_SMOKE_HOST}:{TCP_SMOKE_PORT}"
+    );
 }
 
 /// Outcome of one DHCP socket poll, carried as owned data so the
@@ -113,6 +157,29 @@ pub fn poll_loop() -> ! {
             stack
                 .iface
                 .poll(now, &mut stack.device, &mut stack.sockets);
+
+            // 3D-3: once a TCP probe is in flight, watch for the
+            // socket reaching Established and emit ARSENAL_TCP_OK
+            // exactly once. State transitions strictly follow the TCP
+            // FSM, so even if the remote closes immediately (FIN
+            // arriving in the same poll cycle as SYN-ACK), smoltcp
+            // routes through Established before CloseWait — we'll
+            // observe it on the poll that processed the SYN-ACK.
+            if let Some(handle) = stack.tcp_handle
+                && !stack.tcp_ok
+            {
+                let tcp_sock = stack.sockets.get::<tcp::Socket>(handle);
+                if tcp_sock.state() == tcp::State::Established {
+                    let _ = writeln!(
+                        serial::Writer,
+                        "net: TCP established local={:?} remote={:?}",
+                        tcp_sock.local_endpoint(),
+                        tcp_sock.remote_endpoint()
+                    );
+                    serial::write_str("ARSENAL_TCP_OK\n");
+                    stack.tcp_ok = true;
+                }
+            }
 
             let action = {
                 let dhcp = stack
@@ -145,6 +212,13 @@ pub fn poll_loop() -> ! {
                             ip, router
                         );
                         stack.configured = true;
+                        // 3D-3: once we have a default route, fire
+                        // the TCP probe. start_tcp_smoke is one-shot;
+                        // a re-lease (e.g. after Deconfigure) won't
+                        // re-probe.
+                        if stack.tcp_handle.is_none() {
+                            start_tcp_smoke(stack);
+                        }
                     }
                 }
                 Some(DhcpAction::Deconfigure) => {
