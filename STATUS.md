@@ -70,11 +70,46 @@ through a `FRAMES`-backed `OffsetPageTable`.
 - `bc6ccfc` virtio-blk + sector-0 read smoke
 - `174127b` virtio-net + probe TX smoke
 
-**3D — smoltcp + rustls (next).** Wire smoltcp's
-`virtio_net`-style backend onto our virtio-net, bring TCP up to
-loopback, then to QEMU slirp gateway. rustls follows for TLS once
-TCP is stable. ARSENAL.md budgets the back half of M0 step 3 for
-3D + 3E + 3F + 3G.
+**3D — smoltcp + rustls (complete, 2026-05-11).** smoltcp 0.12 on
+top of the virtio-net Phy adapter, with a DHCPv4 socket pulling a
+slirp lease (10.0.2.15/24, gateway 10.0.2.2); plain TCP probe to
+10.0.2.2:12345 reaching Established; rustls 0.23
+UnbufferedClientConnection (the no_std API) completing a TLS 1.3
+handshake against a self-signed Python `ssl` listener on
+10.0.2.2:12346. Crypto provider: rustls-rustcrypto 0.0.2-alpha
+(pure-Rust no_std, RustCrypto primitives). Custom getrandom
+backends for both 0.2 and 0.4 (transitively pulled) feeding into
+an RDRAND-first / TSC-fallback `fill_bytes`. Smoke now asserts
+eight sentinels (added `ARSENAL_TCP_OK`, `ARSENAL_TLS_OK`); the
+script generates a self-signed P-256 cert with `openssl req` per
+run and stands up two Python listeners (plain TCP + TLS 1.3)
+before launching QEMU. The smoke wait-loop refactored from
+"FINAL_SENTINEL fires" to "all required present" to absorb future
+3E–3G sentinels without per-step rewriting. ELF ~144 KB → ~1.46 MB
+(10x — RustCrypto's AES, ChaCha20-Poly1305, P-256, P-384, X25519,
+Ed25519, RSA, SHA-2 plus rustls's protocol state machines); ISO
+~19.3 MB; smoke still completes in ~1 s locally. The slip-prone
+moments were exactly where the HANDOFF predicted: getrandom
+backend wiring (two versions, two mechanisms) and discovering
+that rustls's no_std API isn't `Connection::read_tls`/`write_tls`
+but the `UnbufferedClientConnection` state machine.
+
+3D sub-commits:
+- `622a436` add smoltcp 0.12
+- `4499dc0` smoltcp phy::Device on virtio-net
+- `f8bfa02` smoltcp interface + DHCPv4
+- `8c8a599` TCP smoke against slirp + ARSENAL_TCP_OK
+- `db4625e` rustls handshake + ARSENAL_TLS_OK
+
+**3E — framebuffer console (next).** Limine's framebuffer request
+already maps a linear RGB framebuffer at boot; 3E wires a software
+glyph renderer over it (8×16 IBM Plex Mono, single color, no
+scroll yet) so the serial stream gains a screen-side mirror. The
+Stage compositor's amber/cyan/navy identity is M2; 3E is the
+infrastructure that lets M0's `>` prompt arrive on a real display
+when 3G lands. ARSENAL.md budgets 3E + 3F + 3G for the back half
+of M0 step 3 (3F is the LAPIC + preemptive timer; 3G is the
+`>` prompt + perf gate).
 
 ### Step 3 performance + security + usability gates (from ARSENAL.md)
 
