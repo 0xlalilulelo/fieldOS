@@ -22,6 +22,7 @@ mod frames;
 mod gdt;
 mod heap;
 mod idt;
+mod kbd;
 mod net;
 mod paging;
 mod pci;
@@ -116,6 +117,13 @@ extern "C" fn _start() -> ! {
     // interrupts armed yet — that's 3F-1 (software-enable + spurious
     // vector) and 3F-2 (timer LVT).
     apic::init();
+
+    // 3G-0: PS/2 keyboard. Polled-only; the shell task (3G-1) will
+    // call kbd::poll on each cooperative iteration. init drains any
+    // pending bytes left in the i8042 output buffer by firmware /
+    // Limine and logs. IRQ-driven input is deferred to M0 step 4
+    // when IOAPIC bring-up routes IRQ1 through the LAPIC.
+    kbd::init();
 
     // 3E-0: Limine framebuffer probe. Logs the shape only; 3E-1
     // builds clear / put_pixel primitives that dereference fb.addr().
