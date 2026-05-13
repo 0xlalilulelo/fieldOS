@@ -15,6 +15,7 @@ use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker,
 };
 
+mod apic;
 mod cpu;
 mod fb;
 mod frames;
@@ -107,6 +108,14 @@ extern "C" fn _start() -> ! {
 
     let cpu = cpu::current_cpu();
     let _ = writeln!(serial::Writer, "cpu: id={} (single-CPU stage)", cpu.id);
+
+    // 3F-0: mask the legacy 8259 PIC so it stops competing for
+    // vectors 0x20..0x2F, discover the LAPIC base via the
+    // IA32_APIC_BASE MSR, map its 4 KiB MMIO page through
+    // paging::map_mmio, and log the LAPIC ID + version. No
+    // interrupts armed yet — that's 3F-1 (software-enable + spurious
+    // vector) and 3F-2 (timer LVT).
+    apic::init();
 
     // 3E-0: Limine framebuffer probe. Logs the shape only; 3E-1
     // builds clear / put_pixel primitives that dereference fb.addr().
