@@ -38,6 +38,13 @@ pub fn write_str(s: &str) {
     for byte in s.bytes() {
         write_byte(byte);
     }
+    // Mirror to the framebuffer console. fb::print_str gates on
+    // FB_READY internally — calls before fb::init are silent
+    // no-ops, so this is safe at ARSENAL_BOOT_OK time. Serial
+    // lands first so the headless smoke sees sentinels at full
+    // UART speed; the mirror's per-glyph pixel writes only
+    // affect what shows under -display gtk/sdl.
+    crate::fb::print_str(s);
 }
 
 /// `core::fmt::Write` adapter so `write!` / `writeln!` work against COM1.

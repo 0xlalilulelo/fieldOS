@@ -2,9 +2,11 @@
 //
 // Linear framebuffer access. Limine maps the LFB into HHDM for us;
 // fb::init stashes the framebuffer's shape, fb::clear paints the
-// whole frame, fb::put_pixel writes one pixel. 3E-2 composes these
-// into render_glyph / render_string; 3E-3 wires fmt::Write and the
-// serial mirror.
+// whole frame, fb::put_pixel writes one pixel, fb::render_string
+// draws a row of 8x16 glyphs, fb::print_str advances the cursor
+// (with newline + scroll-by-blit) for the serial mirror.
+
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use limine::framebuffer::{Framebuffer, MemoryModel};
 use spin::Mutex;
@@ -28,6 +30,11 @@ struct FbInfo {
     width: usize,
     height: usize,
     pitch_pixels: usize,
+    // Mirror cursor — only print_str advances it. Independent of
+    // render_string's caller-supplied (x, y), which never touches
+    // the cursor.
+    cursor_x: usize,
+    cursor_y: usize,
 }
 
 // SAFETY: `base` is a kernel-owned HHDM pointer to the LFB region
@@ -36,6 +43,13 @@ struct FbInfo {
 unsafe impl Send for FbInfo {}
 
 static FB: Mutex<Option<FbInfo>> = Mutex::new(None);
+
+// Gate for print_str. Set Release after FB is populated; read
+// Acquire before any FB.lock() attempt. Lets serial::write_str
+// be the byte-level fan-out point regardless of whether fb::init
+// has run yet — early prints (ARSENAL_BOOT_OK, the heap/frames
+// banner) land on serial alone.
+static FB_READY: AtomicBool = AtomicBool::new(false);
 
 /// Stash a Limine framebuffer for use by clear / put_pixel and
 /// (later) the glyph renderer + serial mirror. Asserts the layout
@@ -67,7 +81,14 @@ pub fn init(fb: &Framebuffer<'_>) {
         width: fb.width() as usize,
         height: fb.height() as usize,
         pitch_pixels: pitch / 4,
+        cursor_x: 0,
+        cursor_y: 0,
     });
+    // Release pairs with the Acquire load in print_str so any
+    // reader that sees FB_READY=true also sees the populated
+    // Mutex contents. Single-CPU pre-3F makes this theoretical,
+    // but the discipline generalizes.
+    FB_READY.store(true, Ordering::Release);
 }
 
 /// Paint every pixel with `rgb` (packed `0x00RRGGBB`).
@@ -126,6 +147,87 @@ pub fn render_string(s: &str, x: usize, y: usize, fg: u32, bg: u32) {
         }
         render_glyph_inner(info, b, gx, y, fg, bg);
     }
+}
+
+/// Byte-stream entry point for the serial mirror. Returns
+/// immediately if fb::init hasn't run yet (the FB_READY gate)
+/// or if another fb operation already holds the lock (try_lock).
+/// The try_lock path matters during a panic: the panic_handler's
+/// writeln!(serial::Writer, ...) routes through serial::write_str
+/// which calls us; if a panic fires mid-render we drop the
+/// mirror copy so the serial line at least lands.
+pub fn print_str(s: &str) {
+    if !FB_READY.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(mut guard) = FB.try_lock() else {
+        return;
+    };
+    let Some(info) = guard.as_mut() else {
+        return;
+    };
+    print_str_inner(info, s);
+}
+
+fn print_str_inner(info: &mut FbInfo, s: &str) {
+    for b in s.bytes() {
+        match b {
+            b'\n' => {
+                info.cursor_x = 0;
+                info.cursor_y += font::GLYPH_H;
+                maybe_scroll(info);
+            }
+            b'\r' => {
+                info.cursor_x = 0;
+            }
+            _ => {
+                if info.cursor_x + font::GLYPH_W > info.width {
+                    info.cursor_x = 0;
+                    info.cursor_y += font::GLYPH_H;
+                    maybe_scroll(info);
+                }
+                let cx = info.cursor_x;
+                let cy = info.cursor_y;
+                render_glyph_inner(info, b, cx, cy, AMBER, NAVY);
+                info.cursor_x += font::GLYPH_W;
+            }
+        }
+    }
+}
+
+/// If the cursor has advanced past the last full row, blit rows
+/// up by one glyph height and clear the freed bottom band to NAVY.
+/// At 1280x800 the blit is ~4 MiB per scroll; M0 doesn't budget
+/// against that cost. 3G's perf gate may want a circular-row
+/// alternative if scroll-heavy logs dominate the boot budget.
+fn maybe_scroll(info: &mut FbInfo) {
+    if info.cursor_y + font::GLYPH_H <= info.height {
+        return;
+    }
+    let scroll = font::GLYPH_H;
+    let keep_rows = info.height - scroll;
+    let pitch = info.pitch_pixels;
+    // SAFETY: src starts `scroll * pitch` pixels into the LFB and
+    // dst starts at base; len = keep_rows * pitch pixels covers
+    // the surviving region exactly. src > dst, so the ranges may
+    // overlap forward — ptr::copy handles that; copy_nonoverlapping
+    // would be UB. All addresses stay inside the LFB.
+    unsafe {
+        let src = info.base.add(scroll * pitch);
+        let dst = info.base;
+        core::ptr::copy(src, dst, keep_rows * pitch);
+    }
+    for y in keep_rows..info.height {
+        // SAFETY: y < info.height; inner row pointer + x stays
+        // inside the LFB. Volatile per the discipline in clear().
+        unsafe {
+            let row = info.base.add(y * pitch);
+            for x in 0..info.width {
+                row.add(x).write_volatile(NAVY);
+            }
+        }
+    }
+    info.cursor_y = keep_rows;
 }
 
 /// Lock-free inner: caller owns the FbInfo borrow. Renders one
