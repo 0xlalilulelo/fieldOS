@@ -17,6 +17,17 @@
 #   SMOKE_TIMEOUT    seconds to wait for sentinels (default: 15)
 #   TCP_SMOKE_PORT   host TCP port to listen on for 3D-3 (default: 12345)
 #   TLS_SMOKE_PORT   host TLS port to listen on for 3D-4 (default: 12346)
+#   BOOT_BUDGET_MS   M0 step 3 perf gate from ARSENAL.md: "boot to
+#                    prompt in < 2 s under QEMU". Measured as the
+#                    wall-clock delta between ARSENAL_BOOT_OK (kernel
+#                    first serial line, after Limine hands off) and
+#                    ARSENAL_PROMPT_OK (shell task online).
+#                    Default 3000 ms gives hosted runner variance
+#                    headroom over ARSENAL.md's 2000 ms target; set
+#                    BOOT_BUDGET_MS=2000 for the local conformance
+#                    check. No retry on overage — flake response is
+#                    raise the budget or fix the variance source,
+#                    not silently re-run.
 #
 # Exit codes:
 #   0  ok         all required sentinels found within timeout
@@ -24,6 +35,7 @@
 #   2  timeout    one or more required sentinels missing within timeout
 #   3  startup    QEMU exited unexpectedly before all sentinels
 #   4  guest_err  QEMU reported guest CPU faults
+#   5  perf       boot-to-prompt exceeded BOOT_BUDGET_MS
 
 set -euo pipefail
 
@@ -31,6 +43,17 @@ ISO="${1:-arsenal.iso}"
 TIMEOUT="${SMOKE_TIMEOUT:-15}"
 TCP_SMOKE_PORT="${TCP_SMOKE_PORT:-12345}"
 TLS_SMOKE_PORT="${TLS_SMOKE_PORT:-12346}"
+BOOT_BUDGET_MS="${BOOT_BUDGET_MS:-3000}"
+
+# Millisecond-resolution wall clock. Python is already a smoke
+# dependency (listener harness), so we use it rather than wrestle
+# with `date`'s sub-second portability gap between Linux (%N) and
+# macOS (no %N). Called only when a tracked sentinel is first
+# observed — at most $#REQUIRED_SENTINELS times per run — so the
+# python startup cost stays out of the polling hot path.
+now_ms() {
+	python3 -c 'import time; print(int(time.time()*1000))'
+}
 # Required sentinels must all appear (in any order) within $TIMEOUT
 # for the smoke to pass. Add a sentinel here when a milestone wants
 # its "this subsystem survived" assertion in CI; remove one only when
@@ -157,22 +180,77 @@ qemu-system-x86_64 \
 	-D "$QEMU_LOG" &
 QPID=$!
 
-elapsed=0
-while (( elapsed < TIMEOUT )); do
-	all_present=true
-	for s in "${REQUIRED_SENTINELS[@]}"; do
-		if ! grep -q "$s" "$SERIAL_LOG" 2>/dev/null; then
-			all_present=false
-			break
+# Polling loop for the perf gate.
+#
+# Resolution caveat: we measure "time between observing BOOT_OK in
+# the log and observing PROMPT_OK in the log" at ~50 ms granularity
+# (the sleep interval). When kernel boot is fast enough that both
+# sentinels land in the same poll, the recorded delta is 0 ms — a
+# truthful observation that boot-to-prompt fits within one polling
+# interval, not a measurement error. The gate trips when boot grows
+# to multiple polling intervals (50 ms × N), so it catches
+# regressions where boot-to-prompt exceeds ~one polling cycle but
+# not microsecond drift. Finer resolution would require streaming
+# QEMU's serial through a timestamper (mkfifo + python tee); a real
+# but post-M0 surface, flagged for the M0 step 3 retrospective.
+#
+# Each sentinel's first-seen wall clock is captured exactly once via
+# a parallel "found" flag array (bash 3.2-compatible — macOS's
+# system bash does not have associative arrays). Sentinels that
+# participate in the perf gate (ARSENAL_BOOT_OK and
+# ARSENAL_PROMPT_OK) get their own dedicated capture variables.
+SENTINEL_FOUND=()
+for _ in "${REQUIRED_SENTINELS[@]}"; do
+	SENTINEL_FOUND+=("0")
+done
+FOUND_COUNT=0
+TOTAL_SENTINELS=${#REQUIRED_SENTINELS[@]}
+BOOT_OK_MS=""
+PROMPT_OK_MS=""
+START_MS=$(now_ms)
+TIMEOUT_MS=$((TIMEOUT * 1000))
+
+while true; do
+	# Snapshot the wall clock once per iteration. Sentinels that
+	# first appear in the same poll all share this stamp — the
+	# measurement resolution is the poll interval (~50 ms), not the
+	# accumulating python-startup cost of calling `now_ms` per
+	# sentinel inside the inner loop.
+	iter_ms=$(now_ms)
+	for i in "${!REQUIRED_SENTINELS[@]}"; do
+		if [[ "${SENTINEL_FOUND[$i]}" == "0" ]]; then
+			s="${REQUIRED_SENTINELS[$i]}"
+			if grep -q "$s" "$SERIAL_LOG" 2>/dev/null; then
+				SENTINEL_FOUND[$i]="1"
+				FOUND_COUNT=$((FOUND_COUNT + 1))
+				case "$s" in
+					ARSENAL_BOOT_OK) BOOT_OK_MS=$iter_ms ;;
+					ARSENAL_PROMPT_OK) PROMPT_OK_MS=$iter_ms ;;
+				esac
+			fi
 		fi
 	done
-	if $all_present; then
+	if (( FOUND_COUNT == TOTAL_SENTINELS )); then
 		kill -TERM "$QPID" 2>/dev/null || true
 		wait "$QPID" 2>/dev/null || true
-		echo "==> PASS (${#REQUIRED_SENTINELS[@]} sentinels in ${elapsed}s)"
+
+		end_ms=$(now_ms)
+		total_ms=$((end_ms - START_MS))
+		boot_to_prompt_ms=$((PROMPT_OK_MS - BOOT_OK_MS))
+
+		echo "==> PASS (${#REQUIRED_SENTINELS[@]} sentinels in ${total_ms} ms)"
+		echo "    boot→prompt: ${boot_to_prompt_ms} ms (budget ${BOOT_BUDGET_MS} ms)"
 		echo
 		echo "--- serial output ---"
 		cat "$SERIAL_LOG"
+
+		if (( boot_to_prompt_ms > BOOT_BUDGET_MS )); then
+			echo >&2
+			echo "qemu-smoke.sh: boot-to-prompt ${boot_to_prompt_ms} ms exceeds BOOT_BUDGET_MS=${BOOT_BUDGET_MS}" >&2
+			echo "  ARSENAL.md M0 step 3 perf gate target is 2000 ms; default budget is 3000 ms for hosted-runner headroom." >&2
+			echo "  Set BOOT_BUDGET_MS=<n> to override, or investigate the variance source." >&2
+			exit 5
+		fi
 		exit 0
 	fi
 	if ! kill -0 "$QPID" 2>/dev/null; then
@@ -181,8 +259,10 @@ while (( elapsed < TIMEOUT )); do
 		cat "$SERIAL_LOG" >&2 || true
 		exit 3
 	fi
-	sleep 1
-	elapsed=$((elapsed + 1))
+	if (( (iter_ms - START_MS) >= TIMEOUT_MS )); then
+		break
+	fi
+	sleep 0.05
 done
 
 kill -TERM "$QPID" 2>/dev/null || true
