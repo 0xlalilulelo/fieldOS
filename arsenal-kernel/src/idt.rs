@@ -125,6 +125,13 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     // different installation mechanism (the IDT is one-shot today).
     idt[apic::SPURIOUS_VECTOR].set_handler_fn(apic::spurious_handler);
 
+    // 3F-2: LAPIC periodic timer at 100 Hz. The handler increments a
+    // tick counter and writes EOI; no context switch from inside the
+    // IRQ (soft preemption). IRQ delivery is still gated by IF=0 at
+    // this point in boot; 3F-3 will sti alongside idle's hlt
+    // restoration, at which point this handler actually fires.
+    idt[apic::TIMER_VECTOR].set_handler_fn(apic::timer_handler);
+
     idt
 });
 
