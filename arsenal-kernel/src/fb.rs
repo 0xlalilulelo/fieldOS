@@ -9,6 +9,12 @@
 use limine::framebuffer::{Framebuffer, MemoryModel};
 use spin::Mutex;
 
+// The 8x16 Spleen font lives next door as fb_font.rs; the #[path]
+// keeps it a private submodule of fb without forcing fb itself
+// into a directory layout.
+#[path = "fb_font.rs"]
+mod font;
+
 // CLAUDE.md §4 — chrome base, primary signal, secondary signal.
 // Encoded as 0x00RRGGBB; on little-endian + RGB byte order
 // (red_mask_shift=16, green=8, blue=0) a u32 write lands as
@@ -100,5 +106,52 @@ pub fn put_pixel(x: usize, y: usize, rgb: u32) {
         info.base
             .add(y * info.pitch_pixels + x)
             .write_volatile(rgb);
+    }
+}
+
+/// Render a left-to-right string starting at (x, y), advancing
+/// one glyph width per byte. Iterates over `s.bytes()` rather than
+/// `s.chars()` because the font is byte-indexed; ASCII passes
+/// through cleanly, and non-ASCII UTF-8 bytes index into the
+/// upper-half slots (mostly blank under Spleen's 0xFF coverage).
+/// Clips when the next glyph's left edge would land past the
+/// right margin.
+pub fn render_string(s: &str, x: usize, y: usize, fg: u32, bg: u32) {
+    let guard = FB.lock();
+    let info = guard.as_ref().expect("fb::render_string before fb::init");
+    for (i, b) in s.bytes().enumerate() {
+        let gx = x + i * font::GLYPH_W;
+        if gx >= info.width {
+            break;
+        }
+        render_glyph_inner(info, b, gx, y, fg, bg);
+    }
+}
+
+/// Lock-free inner: caller owns the FbInfo borrow. Renders one
+/// glyph; clips per-pixel against the framebuffer extents.
+fn render_glyph_inner(info: &FbInfo, c: u8, x: usize, y: usize, fg: u32, bg: u32) {
+    let base_idx = (c as usize) * font::GLYPH_H;
+    for row in 0..font::GLYPH_H {
+        let bits = font::FONT[base_idx + row];
+        let py = y + row;
+        if py >= info.height {
+            break;
+        }
+        // SAFETY: per-pixel bounds-checked below; the row pointer
+        // stays inside the LFB. Volatile write per clear()'s
+        // discipline.
+        let row_ptr = unsafe { info.base.add(py * info.pitch_pixels) };
+        for col in 0..font::GLYPH_W {
+            let px = x + col;
+            if px >= info.width {
+                break;
+            }
+            let lit = (bits >> (7 - col)) & 1 == 1;
+            let color = if lit { fg } else { bg };
+            // SAFETY: px < info.width and py < info.height; the
+            // pointer arithmetic stays within the LFB.
+            unsafe { row_ptr.add(px).write_volatile(color) };
+        }
     }
 }

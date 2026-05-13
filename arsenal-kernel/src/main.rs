@@ -141,6 +141,13 @@ extern "C" fn _start() -> ! {
             fb::put_pixel(8 + dx, 8 + dy, fb::AMBER);
         }
     }
+    // 3E-2: render "ARSENAL" via the 8x16 glyph table at (8, 32),
+    // amber on navy. Smoke target is implicit — same shape as
+    // 3E-1 (fb::render_string's preconditions hold and writes
+    // don't fault) plus the glyph indexing arithmetic. The
+    // baseline character set is Spleen 8x16 v2.2.0; see
+    // fb_font.rs for the source.
+    fb::render_string("ARSENAL", 8, 32, fb::AMBER, fb::NAVY);
 
     // Smoke the Task allocator: build one, log its shape, drop it.
     // 3B-3 wires the asm that actually runs through saved_rsp. For
