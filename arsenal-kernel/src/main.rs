@@ -11,7 +11,9 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::BaseRevision;
 use limine::memory_map::EntryType;
-use limine::request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker};
+use limine::request::{
+    FramebufferRequest, HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker,
+};
 
 mod cpu;
 mod frames;
@@ -49,6 +51,10 @@ static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
@@ -100,6 +106,27 @@ extern "C" fn _start() -> ! {
 
     let cpu = cpu::current_cpu();
     let _ = writeln!(serial::Writer, "cpu: id={} (single-CPU stage)", cpu.id);
+
+    // 3E-0: Limine framebuffer probe. Logs the shape only; 3E-1
+    // builds clear / put_pixel primitives that dereference fb.addr().
+    // QEMU q35 std-vga is 1024x768x32 by default; the LFB arrives
+    // HHDM-mapped, which paging::init's deep-clone preserved.
+    let fb_resp = FRAMEBUFFER_REQUEST
+        .get_response()
+        .expect("limine: framebuffer response missing");
+    let fb = fb_resp
+        .framebuffers()
+        .next()
+        .expect("limine: framebuffer response had no framebuffers");
+    let _ = writeln!(
+        serial::Writer,
+        "fb: addr={:#018x} {}x{} bpp={} pitch={}",
+        fb.addr() as usize,
+        fb.width(),
+        fb.height(),
+        fb.bpp(),
+        fb.pitch(),
+    );
 
     // Smoke the Task allocator: build one, log its shape, drop it.
     // 3B-3 wires the asm that actually runs through saved_rsp. For
