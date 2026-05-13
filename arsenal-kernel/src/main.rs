@@ -16,6 +16,7 @@ use limine::request::{
 };
 
 mod cpu;
+mod fb;
 mod frames;
 mod gdt;
 mod heap;
@@ -127,6 +128,19 @@ extern "C" fn _start() -> ! {
         fb.bpp(),
         fb.pitch(),
     );
+
+    // 3E-1: stash the framebuffer, clear-to-navy, draw a 16x16
+    // amber square at (8, 8). The square is invisible under
+    // `-display none` (smoke runs headless), but `-display gtk`
+    // or `-display sdl` shows it. The smoke target is implicit:
+    // fb::init's asserts hold and clear / put_pixel don't fault.
+    fb::init(&fb);
+    fb::clear(fb::NAVY);
+    for dy in 0..16usize {
+        for dx in 0..16usize {
+            fb::put_pixel(8 + dx, 8 + dy, fb::AMBER);
+        }
+    }
 
     // Smoke the Task allocator: build one, log its shape, drop it.
     // 3B-3 wires the asm that actually runs through saved_rsp. For
