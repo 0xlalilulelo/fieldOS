@@ -16,7 +16,7 @@
 // the LAPIC and installs the spurious vector.
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use x86_64::registers::model_specific::{ApicBase, ApicBaseFlags};
 use x86_64::structures::idt::InterruptStackFrame;
@@ -103,6 +103,11 @@ const PIC2_DATA: u16 = 0xA1;
 /// bring-up, not a "call when convenient" helper.
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 
+/// LAPIC version register snapshot from `init`. 3G-2's `hw` command
+/// displays this; cached so the cooperative `hw` path does not need
+/// to re-issue an MMIO read.
+static LAPIC_VERSION: AtomicU32 = AtomicU32::new(0);
+
 /// Latched on the first spurious interrupt so the log records the
 /// occurrence exactly once. A spurious "storm" (continuous delivery
 /// during a mis-configured bring-up) would otherwise drown serial
@@ -141,6 +146,12 @@ pub fn ticks() -> usize {
 /// `sched::idle_loop` after each yield, which is the only
 /// cooperative context that routinely sees IF=1 + post-hlt wakeups
 /// on single-core M0.
+/// LAPIC version register snapshot cached at `init` time. Returns 0
+/// if `init` has not yet run.
+pub fn version() -> u32 {
+    LAPIC_VERSION.load(Ordering::Relaxed)
+}
+
 pub fn observe_timer_ok() {
     if ticks() >= TIMER_OK_THRESHOLD
         && !TIMER_OK_LATCHED.swap(true, Ordering::Relaxed)
@@ -361,6 +372,7 @@ pub fn init() {
     // Intel SDM Vol. 3A §10.4.6 and §10.4.8 with no read side effects.
     let id = unsafe { lapic_read(LAPIC_REG_ID) };
     let version = unsafe { lapic_read(LAPIC_REG_VERSION) };
+    LAPIC_VERSION.store(version, Ordering::Relaxed);
 
     // Software-enable the LAPIC. SVR bit 8 set, vector bits hold our
     // spurious vector. From this point on, the LAPIC will deliver

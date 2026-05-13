@@ -33,6 +33,10 @@
 //     glyphs on fb. Polish lands alongside the cursor work in a
 //     later 3G micro-commit or as M0 step 3 exit cleanup.
 
+use core::fmt::Write;
+
+use crate::apic;
+use crate::frames;
 use crate::kbd;
 use crate::sched;
 use crate::serial;
@@ -113,12 +117,117 @@ fn echo(byte: u8) {
     }
 }
 
-/// Command dispatcher. 3G-2 fills in the `help` / `hw` / `panic`
-/// table; for 3G-1 the structural call site exists so the
-/// shell-task loop is the same shape across both sub-blocks.
-/// The empty-buffer case (user hit Enter on a bare prompt) falls
-/// through here too and produces no output — matching most
-/// interactive shells.
-fn dispatch(_buf: &[u8]) {
-    // intentionally empty at 3G-1
+/// Command dispatcher. Parses the first whitespace-delimited token
+/// from `buf` and routes to the matching `cmd_*` handler. Empty
+/// buffer (bare Enter) is a no-op, matching most interactive shells.
+fn dispatch(buf: &[u8]) {
+    if buf.is_empty() {
+        return;
+    }
+    let token_end = buf
+        .iter()
+        .position(|&b| b == b' ' || b == b'\t')
+        .unwrap_or(buf.len());
+    let token = &buf[..token_end];
+    match token {
+        b"help" => cmd_help(),
+        b"hw" => cmd_hw(),
+        b"panic" => cmd_panic(),
+        _ => cmd_unknown(token),
+    }
+}
+
+/// `help` — one-line description per known command. Add a line here
+/// when a new command lands; the help text is the canonical
+/// reference, not a separate doc.
+fn cmd_help() {
+    serial::write_str(
+        "help  — list available commands\n\
+         hw    — show hardware summary (CPU, memory, LAPIC, virtio)\n\
+         panic — deliberately panic the kernel (interactive testing)\n",
+    );
+}
+
+/// `hw` — the M0 step 3 usability gate's "shows hardware summary"
+/// command. Each line is a single subsystem; new lines accrue as
+/// the relevant subsystem lands. Output is plain ASCII and renders
+/// cleanly in both serial and the framebuffer mirror.
+fn cmd_hw() {
+    serial::write_str("hw:\n");
+
+    // CPUID brand string from extended leaves 0x80000002..0x80000004.
+    // Each leaf returns 16 ASCII bytes across EAX/EBX/ECX/EDX.
+    let mut brand = [0u8; 48];
+    for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004]
+        .iter()
+        .enumerate()
+    {
+        // core::arch::x86_64::__cpuid is the safe wrapper; the
+        // unsafe variant is __cpuid_count. Extended leaves
+        // 0x80000002..0x80000004 return the processor brand string
+        // per Intel SDM Vol. 2A §3.2 and AMD APM Vol. 3 §3.13.
+        let r = core::arch::x86_64::__cpuid(*leaf);
+        brand[i * 16..i * 16 + 4].copy_from_slice(&r.eax.to_le_bytes());
+        brand[i * 16 + 4..i * 16 + 8].copy_from_slice(&r.ebx.to_le_bytes());
+        brand[i * 16 + 8..i * 16 + 12].copy_from_slice(&r.ecx.to_le_bytes());
+        brand[i * 16 + 12..i * 16 + 16].copy_from_slice(&r.edx.to_le_bytes());
+    }
+    // Brand string is NUL-terminated and may have leading spaces
+    // (Intel pads right-aligned strings to 48 chars). Trim both.
+    let nul = brand.iter().position(|&b| b == 0).unwrap_or(brand.len());
+    let lead = brand[..nul]
+        .iter()
+        .position(|&b| b != b' ')
+        .unwrap_or(nul);
+    let cpu_brand = core::str::from_utf8(&brand[lead..nul]).unwrap_or("(non-ascii brand)");
+    let _ = writeln!(serial::Writer, "  cpu: {cpu_brand}");
+    let _ = writeln!(serial::Writer, "  cores: 1 (single-CPU stage)");
+
+    // Memory from 3A's frame allocator. 4 KiB per frame.
+    let free = frames::FRAMES.free_count();
+    let total = frames::FRAMES.total_added();
+    let _ = writeln!(
+        serial::Writer,
+        "  ram: {} KiB free / {} KiB total ({} / {} 4-KiB frames)",
+        free * 4,
+        total * 4,
+        free,
+        total,
+    );
+
+    // LAPIC summary from 3F. Version comes from the cached snapshot
+    // apic::init stashed; vectors are compile-time constants.
+    let _ = writeln!(
+        serial::Writer,
+        "  lapic: version={:#010x} timer-vector={:#x} spurious-vector={:#x}",
+        apic::version(),
+        apic::TIMER_VECTOR,
+        apic::SPURIOUS_VECTOR,
+    );
+
+    // virtio device presence. 3C's smoke ran block + net successfully
+    // (ARSENAL_BLK_OK / ARSENAL_NET_OK fired during boot) so by the
+    // time `hw` runs they are known good. A richer summary with BDF
+    // + device IDs waits for M1 where the PCI subsystem grows
+    // beyond M0's scan + virtio-modern probe pair.
+    serial::write_str("  virtio: blk=present net=present\n");
+}
+
+/// `panic` — exercise the panic handler from an interactive context.
+/// Useful for verifying ARSENAL_PANIC routes through serial + fb
+/// under `-display gtk`; never run from the smoke (the kernel halts
+/// after the panic message lands).
+fn cmd_panic() -> ! {
+    panic!("user-initiated panic via shell `panic` command");
+}
+
+/// Unknown-command fallback. Echoes the unrecognized token back so
+/// users can see exactly what got parsed (helpful when shifted
+/// keys produce unexpected characters).
+fn cmd_unknown(token: &[u8]) {
+    let printable = core::str::from_utf8(token).unwrap_or("(non-utf8)");
+    let _ = writeln!(
+        serial::Writer,
+        "unknown command: {printable}; try 'help'",
+    );
 }
