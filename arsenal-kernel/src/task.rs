@@ -11,7 +11,7 @@
 
 use alloc::boxed::Box;
 
-pub const STACK_SIZE: usize = 16 * 1024;
+pub const STACK_SIZE: usize = 32 * 1024;
 
 /// 16-byte aligned so the saved-RSP arithmetic in Task::new lands on
 /// 16-byte boundaries that satisfy the SysV ABI when entry is invoked
