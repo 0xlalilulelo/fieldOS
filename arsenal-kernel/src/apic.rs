@@ -16,9 +16,10 @@
 // the LAPIC and installs the spurious vector.
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use x86_64::registers::model_specific::{ApicBase, ApicBaseFlags};
+use x86_64::structures::idt::InterruptStackFrame;
 
 use crate::paging;
 use crate::serial;
@@ -26,6 +27,20 @@ use crate::serial;
 // LAPIC register offsets (Intel SDM Vol. 3A §10.4.1 Table 10-1).
 const LAPIC_REG_ID: u32 = 0x20;
 const LAPIC_REG_VERSION: u32 = 0x30;
+const LAPIC_REG_SVR: u32 = 0xF0;
+
+/// SVR bit 8 — APIC software-enable. Set to allow the LAPIC to
+/// deliver interrupts; clear to suppress all delivery (the hardware
+/// equivalent of unloading the LAPIC, modulo the global IA32_APIC_BASE
+/// LAPIC_ENABLE bit which only firmware should ever toggle).
+const LAPIC_SVR_ENABLE: u32 = 1 << 8;
+
+/// Spurious interrupt vector. Per Intel SDM Vol. 3A §10.9 this fires
+/// when an IRQ was generated but is no longer pending by the time the
+/// LAPIC tries to deliver it; it requires no EOI. We pick 0xFF by
+/// convention (the highest vector — easy to reserve, well outside any
+/// real IRQ vector range we plan to use in M0).
+pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 // Legacy 8259A data ports — OCW1 (interrupt mask register).
 const PIC1_DATA: u16 = 0x21;
@@ -35,6 +50,12 @@ const PIC2_DATA: u16 = 0xA1;
 /// before init return 0 and `lapic_reg` panics — this is a one-shot
 /// bring-up, not a "call when convenient" helper.
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
+
+/// Latched on the first spurious interrupt so the log records the
+/// occurrence exactly once. A spurious "storm" (continuous delivery
+/// during a mis-configured bring-up) would otherwise drown serial
+/// output before the smoke could even observe a failure mode.
+static SPURIOUS_SEEN: AtomicBool = AtomicBool::new(false);
 
 /// HHDM-virtual pointer to LAPIC register at offset `reg`. Panics if
 /// `init` has not run.
@@ -57,6 +78,36 @@ unsafe fn lapic_read(reg: u32) -> u32 {
     // aligned and 32-bit-wide; a 32-bit volatile read is the spec-
     // defined access.
     unsafe { core::ptr::read_volatile(lapic_reg(reg)) }
+}
+
+/// Write a 32-bit LAPIC register.
+///
+/// # Safety
+/// Same preconditions as `lapic_read`, plus: `val` must be a
+/// spec-legal bit pattern for `reg` (e.g. an SVR write with reserved
+/// bits respected, an LVT write with a non-NMI delivery mode unless
+/// the caller actually wants NMI semantics). xAPIC writes have
+/// hardware side effects.
+unsafe fn lapic_write(reg: u32, val: u32) {
+    // SAFETY: caller upholds the same mapping precondition as for
+    // read; volatile write at the natural register width is the
+    // spec-defined access. The hardware effect is whatever `reg`
+    // documents — that responsibility lives with the caller.
+    unsafe { core::ptr::write_volatile(lapic_reg(reg), val) }
+}
+
+/// Spurious interrupt handler for vector `SPURIOUS_VECTOR`. Logs
+/// the first occurrence and silently absorbs subsequent ones. Per
+/// Intel SDM Vol. 3A §10.9, spurious delivery does *not* set the
+/// LAPIC's ISR bit and therefore does not require an EOI write.
+pub extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {
+    if !SPURIOUS_SEEN.swap(true, Ordering::Relaxed) {
+        let _ = writeln!(
+            serial::Writer,
+            "apic: spurious interrupt (vector {:#x}) — logged once",
+            SPURIOUS_VECTOR,
+        );
+    }
 }
 
 /// Mask every line on both 8259A PICs by writing 0xFF to each IMR.
@@ -106,10 +157,27 @@ pub fn init() {
     let id = unsafe { lapic_read(LAPIC_REG_ID) };
     let version = unsafe { lapic_read(LAPIC_REG_VERSION) };
 
+    // Software-enable the LAPIC. SVR bit 8 set, vector bits hold our
+    // spurious vector. From this point on, the LAPIC will deliver
+    // interrupts whose LVT entries are configured — no LVT is armed
+    // yet, so nothing fires until 3F-2.
+    //
+    // SAFETY: LAPIC MMIO is mapped; the SVR bit pattern below is
+    // spec-legal (Intel SDM Vol. 3A §10.9): bits 0..7 = spurious
+    // vector, bit 8 = APIC software-enable, bits 9..31 reserved /
+    // model-specific, written as zero per "preserve reserved fields"
+    // convention (the SVR powers up with bits 9..31 clear, so we are
+    // simply restating that state).
+    unsafe {
+        lapic_write(LAPIC_REG_SVR, LAPIC_SVR_ENABLE | SPURIOUS_VECTOR as u32);
+    }
+
     let _ = writeln!(
         serial::Writer,
-        "apic: 8259 masked; LAPIC phys={phys:#018x} id={} version={version:#010x}",
+        "apic: 8259 masked; LAPIC phys={phys:#018x} id={} version={version:#010x} \
+         svr-enabled; spurious vector={:#x}",
         id >> 24,
+        SPURIOUS_VECTOR,
     );
 }
 

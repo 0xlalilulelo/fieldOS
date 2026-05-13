@@ -13,6 +13,7 @@ use x86_64::structures::idt::{
     InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode,
 };
 
+use crate::apic;
 use crate::gdt;
 use crate::serial;
 
@@ -115,6 +116,14 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_handler_fn(machine_check_handler)
             .set_stack_index(gdt::MACHINE_CHECK_IST);
     }
+
+    // 3F-1: LAPIC spurious vector. The handler does nothing but log
+    // the first occurrence; spurious delivery requires no EOI per
+    // Intel SDM Vol. 3A §10.9. Wiring the entry here (inside the
+    // Lazy initializer) means later device IRQs added past M0 step 3
+    // — which arrive after IDT.load() has already run — will need a
+    // different installation mechanism (the IDT is one-shot today).
+    idt[apic::SPURIOUS_VECTOR].set_handler_fn(apic::spurious_handler);
 
     idt
 });
