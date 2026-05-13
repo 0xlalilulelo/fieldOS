@@ -38,6 +38,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::boxed::Box;
 
+use crate::apic;
 use crate::cpu;
 use crate::serial;
 use crate::task;
@@ -247,15 +248,45 @@ pub fn init() -> ! {
     unreachable!("sched::init: switch into idle returned");
 }
 
-/// Idle task entry. Yields forever. 3B-4 had a hlt at the bottom
-/// of this loop which was correct only when the runqueue was empty;
-/// once 3B-5 adds non-idle tasks, hlting on a cooperative-no-IRQ
-/// CPU would halt the only core forever and starve the workers.
-/// 3F's preemptive timer brings hlt back as a proper power-save.
+/// Idle task entry. Yields, observes the timer, then hlts until
+/// the next periodic IRQ wakes the core. 3B-4 stripped the hlt
+/// because a cooperative CPU with no IRQs would halt forever and
+/// starve the runqueue; 3F-3 restores it on top of the 100 Hz
+/// LAPIC periodic timer armed by apic::init.
+///
+/// The `sti` runs once at entry. Cooperative `switch_to` does not
+/// save or restore rflags, so IF=1 propagates from this site to
+/// every task scheduled after the first idle switch-in — exactly
+/// the soft-preemption posture documented at HANDOFF dcf2377.
+/// x86-interrupt handlers run through Interrupt Gates (the x86_64
+/// crate's default), which clear IF on entry and restore it on
+/// `iretq`; there is no nested-IRQ window inside the timer or
+/// spurious handler.
 fn idle_loop() -> ! {
     serial::write_str("sched: idle running\n");
+
+    // SAFETY: idt::init has already loaded the IDT with the timer
+    // (0xEF) and spurious (0xFF) handlers; apic::init has masked
+    // the 8259, software-enabled the LAPIC, and armed the periodic
+    // timer. Enabling interrupts here is the first moment IF goes
+    // to 1 in this kernel; from this instruction forward, any
+    // instruction boundary in cooperative code may be interrupted
+    // by the timer IRQ (whose handler is trivial — increment +
+    // EOI — and runs with IF cleared by the Interrupt Gate).
+    unsafe { core::arch::asm!("sti", options(nomem, nostack, preserves_flags)) };
+
     loop {
         yield_now();
+        apic::observe_timer_ok();
+        // SAFETY: hlt with IF=1 blocks until the next external
+        // interrupt — here, the 100 Hz periodic timer. The
+        // instruction has no memory or stack effects; on wake,
+        // execution resumes at the next instruction (the loop
+        // back-edge). If the runqueue had Ready peers when we
+        // entered yield_now, we never reach hlt this iteration:
+        // yield_now switched away and control returns here only
+        // when idle is next scheduled in.
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
 

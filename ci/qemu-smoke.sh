@@ -36,7 +36,7 @@ TLS_SMOKE_PORT="${TLS_SMOKE_PORT:-12346}"
 # its "this subsystem survived" assertion in CI; remove one only when
 # the underlying assertion is folded into a stronger downstream
 # sentinel. Order does not matter — we wait for the full set.
-REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK")
+REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK")
 SERIAL_LOG=$(mktemp -t arsenal-smoke-serial.XXXXXX)
 QEMU_LOG=$(mktemp -t arsenal-smoke-qemu.XXXXXX)
 CERT_DIR=$(mktemp -d -t arsenal-smoke-cert.XXXXXX)

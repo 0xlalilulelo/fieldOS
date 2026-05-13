@@ -114,11 +114,39 @@ static SPURIOUS_SEEN: AtomicBool = AtomicBool::new(false);
 /// ARSENAL_TIMER_OK sentinel observes this crossing a threshold.
 static TICKS: AtomicUsize = AtomicUsize::new(0);
 
+/// Latches the first time `observe_timer_ok` sees TICKS cross the
+/// threshold, so the sentinel prints exactly once. Lives next to
+/// SPURIOUS_SEEN and TICKS because all three are timer-observability
+/// state that conceptually belongs to the LAPIC.
+static TIMER_OK_LATCHED: AtomicBool = AtomicBool::new(false);
+
+/// Number of timer ticks the cooperative observer must see before
+/// asserting that the periodic LAPIC IRQ is actually delivering.
+/// 10 ticks at 100 Hz = 100 ms of evidence — far enough above one
+/// to dodge any first-tick boundary flakiness, far enough below
+/// sched::init's wall time that the smoke observes it well within
+/// the 15 s budget.
+const TIMER_OK_THRESHOLD: usize = 10;
+
 /// Snapshot of the tick counter. Cooperative tasks call this from
 /// non-IRQ context to observe progress.
-#[allow(dead_code)] // wired by 3F-3's ARSENAL_TIMER_OK probe
 pub fn ticks() -> usize {
     TICKS.load(Ordering::Relaxed)
+}
+
+/// Cooperative-context probe: if the periodic timer has delivered
+/// at least `TIMER_OK_THRESHOLD` ticks and we haven't printed yet,
+/// emit ARSENAL_TIMER_OK. Idempotent — subsequent calls are a
+/// single relaxed load past the latch check. Called from
+/// `sched::idle_loop` after each yield, which is the only
+/// cooperative context that routinely sees IF=1 + post-hlt wakeups
+/// on single-core M0.
+pub fn observe_timer_ok() {
+    if ticks() >= TIMER_OK_THRESHOLD
+        && !TIMER_OK_LATCHED.swap(true, Ordering::Relaxed)
+    {
+        serial::write_str("ARSENAL_TIMER_OK\n");
+    }
 }
 
 /// HHDM-virtual pointer to LAPIC register at offset `reg`. Panics if
