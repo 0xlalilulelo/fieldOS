@@ -1,343 +1,483 @@
-Kickoff for the next session — M0 step 3F, LAPIC + preemption.
+Kickoff for the next session — M0 step 3G, the `>` prompt + M0 step 3 perf gate.
 
-M0 step 3E (framebuffer console) closed cleanly across four
-commits ending at 8aad04d on 2026-05-13, plus the STATUS flip at
-e115095 and the 3E devlog at 9049f56: Limine FramebufferRequest
-probe, fb::clear + fb::put_pixel over the linear framebuffer,
-8x16 glyph rendering against vendored Spleen 8x16 v2.2.0 (BSD-
-2-Clause under vendor/spleen/), and a byte-level fan-out from
-serial::write_str to a cursor-tracking fb::print_str with newline
-+ line-wrap + scroll-by-blit. The 3D devlog catch-up landed at
-4c5385b before 3E-0 started, and a chore(ci) bump of
-actions/checkout to v5 at ef36a68 followed the push. CI is green
-on both subsequent runs (8 sentinels in 1 s each). Smoke still
-asserts the same eight sentinels (ARSENAL_BOOT_OK, ARSENAL_HEAP_OK,
-ARSENAL_FRAMES_OK, ARSENAL_BLK_OK, ARSENAL_NET_OK, ARSENAL_SCHED_OK,
-ARSENAL_TCP_OK, ARSENAL_TLS_OK) — 3E intentionally rode on the
-existing set rather than adding ARSENAL_FB_OK; the smoke target
-is implicit ("the kernel continues past fb init / render / mirror
-without faulting or deadlocking").
+M0 step 3F (LAPIC + soft preemption) closed cleanly across five
+commits ending at 0323497 on 2026-05-13, plus the 3F-4 STATUS +
+devlog at d940b59 the same evening: 8259 masked, LAPIC MMIO
+mapped (7dd1dfd), software enable + spurious vector 0xFF wired
+(896183e), latent task-stack fix from 16 KiB to 32 KiB
+(41e7f8d), PIT-calibrated 100 Hz periodic timer at vector 0xEF
+(6c4b169), and idle's `sti` + `hlt` + ARSENAL_TIMER_OK probe
+(0323497). HEAD is d940b59; main is six commits ahead of
+origin/main. Working tree clean. Smoke is green at nine
+sentinels in ~1 s locally; the calibration line reports
+`apic: calibrated 624375 LAPIC ticks per 10 ms; armed periodic
+100 Hz vector=0xef initial_count=624375` against QEMU TCG -cpu
+max.
 
-3F is the sub-block where the cooperative-correctness shortcuts
-from 3B and 3C have to start surviving interrupts. The bug-prone
-surface is real for the first time since 3D: IRQ context safety
-against the existing spin::Mutex<VecDeque<Box<Task>>> runqueue is
-the load-bearing decision, and the "soft preemption" vs "hard
-preemption" trade-off pair below is the most important call.
+3G is the last sub-block of M0 step 3. After 3G lands, step 3
+closes and the next major surface is step 4 (SMP — IPI bring-up,
+AP startup, per-CPU LAPIC state, hard preemption discipline).
+Three load-bearing things 3G has to ship: an interactive `>`
+prompt over the serial + framebuffer stack, the M0 step 3
+*usability gate* (prompt is keyboard-navigable; shows hardware
+summary), and the M0 step 3 *performance gate* (boot to prompt
+in < 2 s under QEMU, asserted in CI). The bug-prone surface is
+the perf gate, not the prompt — keyboard input on QEMU q35 has
+a single well-documented controller (i8042) and the cooperative
+scheduler is a fine substrate for a polled input task, but
+deterministic wall-clock measurement across hosted runners is
+genuinely novel CI surface.
 
 read CLAUDE.md (peer concerns, Rust-only, BSD-2-Clause base,
 build loop sacred, no_std + nightly + abi_x86_interrupt — the
-last is what 3F's new extern "x86-interrupt" handlers ride on) →
-STATUS.md (3E complete, 3F is the active sub-block of step 3) →
-docs/plan/ARSENAL.md § "Three Concrete Starting Milestones" → M0
-(perf gate: boot to prompt < 2 s under QEMU; 3F adds a one-shot
-PIT calibration that costs maybe 10 ms and a periodic timer
-interrupt at 100 Hz that costs near-zero) →
-docs/devlogs/2026-05-arsenal-framebuffer.md (specifically the
-"What 3F looks like" section — APIC vector collision against the
-existing IDT and the runqueue Mutex from inside IRQ context are
-the two flagged surfaces) → arsenal-kernel/src/idt.rs (the IDT
-is a Lazy<InterruptDescriptorTable> with eight CPU exception
-handlers installed today; 3F adds vectors at >= 32 for LAPIC
-timer + LAPIC spurious) → arsenal-kernel/src/sched.rs (yield_now
-locks a spin::Mutex<VecDeque<Box<Task>>>; idle's comment at
-sched.rs:250-254 explicitly anticipates "3F's preemptive timer
-brings hlt back as a proper power-save") → arsenal-kernel/src/
-paging.rs (the map_mmio helper from 3C is what maps the LAPIC
-MMIO page at 0xfee00000 into the kernel-owned page tables) →
-arsenal-kernel/src/serial.rs (the fan-out call to fb::print_str
-uses try_lock; the IRQ handler's print path through here is the
-exact reentrancy case that try_lock was designed for) →
-Cargo.toml (3F adds no new deps — LAPIC is x86_64 instructions
-+ MMIO, and the x86_64 crate already exposes the InterruptStack-
-Frame and the MSR helpers we need) → git log --oneline -10 →
-run the sanity check below → propose 3F-N commit shape (or argue
-for a different decomposition) → wait for me to pick → "go 3f-N"
-for code, "draft 3f-N" for paper deliverables.
+usability gate from §3 of CLAUDE.md / M0 step 3 of ARSENAL.md
+is what 3G has to satisfy) → STATUS.md (3F complete, 3G is the
+active sub-block of step 3) → docs/plan/ARSENAL.md § "Three
+Concrete Starting Milestones" → M0 (performance gate: boot to
+prompt < 2 s under QEMU; security gate: zero unsafe Rust outside
+designated FFI boundaries — already satisfied; usability gate:
+prompt is keyboard-navigable and shows hardware summary) →
+docs/devlogs/2026-05-arsenal-preemption.md (specifically the
+"What 3G looks like" section — PS/2 vs virtio-keyboard, line
+editing, command dispatch, and the perf-gate CI surface are the
+four pieces enumerated there) → arsenal-kernel/src/sched.rs
+(idle's `sti` + `hlt` is at sched.rs:255-289; new tasks spawn
+via sched::spawn which already exists at sched.rs:157-160 and
+is currently `#[allow(dead_code)]` until 3G's shell task uses
+it — drop the allow when the shell spawns) →
+arsenal-kernel/src/main.rs (the boot order at _start —
+sched::init runs last; the shell task must be sched::spawn'd
+*before* sched::init switches into idle, so spawn() goes in
+main.rs between net's smoke and sched::init) →
+arsenal-kernel/src/serial.rs (UART RX is at 0x3F8 base + line
+status register bit 0; UART input is not the M0 prompt path
+but it's a useful fallback if PS/2 misbehaves) →
+arsenal-kernel/src/fb.rs (the cursor state machine is at
+fb.rs:cursor_x / cursor_y; visible cursor rendering is new — a
+static underscore at the insertion point is the recommendation
+below) → arsenal-kernel/src/idt.rs (3G adds *no* new IDT
+entries — polled keyboard, no IRQ; if the IRQ-driven path wins
+the trade-off, 3G adds vector 0x21 alongside 0xEF / 0xFF) →
+ci/qemu-smoke.sh (REQUIRED_SENTINELS array at line 39 grows by
+one to "ARSENAL_PROMPT_OK"; the perf-gate addition is the
+genuinely new CI surface — wall-clock measurement between two
+sentinels, threshold from envvar) → Cargo.toml (3G adds no new
+deps — i8042 is x86 port I/O, the shell is core Rust + alloc) →
+git log --oneline -10 → run the sanity check below → propose
+3G-N commit shape (or argue for a different decomposition) →
+wait for me to pick → "go 3g-N" for code, "draft 3g-N" for
+paper deliverables.
 
 Where the project is
 
-  - main is in sync with origin/main at HEAD ef36a68
-    (chore(ci): bump actions/checkout to v5). Working tree is
-    clean except this file. CI armed; smoke takes ~1 s locally
-    and ~2-3 min on ubuntu-24.04 runners (most of it is toolchain
-    setup + cargo's release build of rustls + RustCrypto).
-  - LOC: arsenal-kernel/src/ is 17 files now. Net Rust LOC in
-    arsenal-kernel/src/ is ~4,200 post-3E (up from ~3,665 at end
-    of 3D); fb.rs is ~215 lines, fb_font.rs is ~280 (mostly the
-    4 KiB bitmap table). The kernel image is 1,474,744 bytes ELF
-    / 19.3 MB ISO post-3E. 3F adds a few hundred lines of LAPIC
-    bring-up + timer handler; no new vendored data.
+  - main is at HEAD d940b59 (docs(status,devlogs): M0 step 3F
+    complete, 3G next). Working tree is clean except this file.
+    main is six commits ahead of origin/main (3F-0 + 3F-1 +
+    41e7f8d task-stack fix + 3F-2 + 3F-3 + 3F-4 paper). CI
+    armed; smoke ~1 s locally, ~2-3 min on ubuntu-24.04 runners
+    (mostly toolchain setup + cargo's release build of rustls +
+    RustCrypto). The 3F-2 task-stack bump from 16 KiB to 32 KiB
+    means new tasks 3G adds (the shell) cost +32 KiB heap each;
+    HEAP_CAP at 16 MiB has ample headroom.
+  - LOC: arsenal-kernel/src/ is 19 files post-3F (apic.rs added
+    at 3F-0). Net Rust LOC ~4,768 post-3F-3. ELF 1,479,400 bytes
+    / ISO 19.3 MB. 3G adds maybe 350-450 lines net across the
+    five sub-commits: ~120 in a new kbd.rs (PS/2 driver +
+    scancode→ASCII translation), ~80 in a new shell.rs (line
+    editor + dispatch loop), ~120 in shell.rs for the seed
+    commands (`help`, `hw`, `panic`), ~30 in main.rs (mod
+    declarations + spawn site + prompt print site), ~30 shell
+    changes in ci/qemu-smoke.sh for the perf gate.
   - Toolchain: nightly-2026-04-01 pinned in rust-toolchain.toml.
-    3F uses no new nightly features beyond abi_x86_interrupt
-    (already enabled).
+    3G uses no new nightly features.
   - Crates currently linked: limine 0.5, linked_list_allocator
     0.10, spin 0.10, x86_64 0.15, smoltcp 0.12, rustls 0.23,
     rustls-rustcrypto 0.0.2-alpha, getrandom 0.4 + 0.2. The
-    x86_64 crate has the MSR / port-I/O / IDT helpers we need
-    for LAPIC — no Cargo.toml changes for 3F.
-  - Sentinels: smoke requires the eight listed above. 3F adds
-    one — ARSENAL_TIMER_OK — after the timer-tick counter
-    crosses a threshold (recommend N=10, which is 100 ms at
-    100 Hz, easy to assert during boot before sched::init runs
-    out of work).
-  - HANDOFF.md (this file) is committed at the session start
-    and rewritten between sessions; the prior contents are in
-    git history (commit 5e53f54 — 3D's session opening, and
-    cc36003 / e115095 are the STATUS pivots).
+    x86_64 crate has the I/O port helpers (`x86_64::instructions::
+    port::Port`) we need for the i8042; the CPUID intrinsics for
+    `hw`'s output are in `core::arch::x86_64::__cpuid`. No
+    Cargo.toml changes for 3G.
+  - Sentinels: smoke requires nine. 3G adds one —
+    ARSENAL_PROMPT_OK — emitted from the shell task after the
+    prompt has printed and the task is online (recommend
+    "emit immediately after the first `> ` writes, before the
+    first poll loop iteration" — see trade-off below). Total
+    on 3G exit: ten sentinels, plus the perf gate as a tenth
+    *implicit* assertion ("time-to-ARSENAL_PROMPT_OK is within
+    the budget").
+  - HANDOFF.md (this file) was committed at dcf2377 with the 3F
+    contents and is being rewritten now for 3G. Prior contents
+    are in git history.
 
-3F — LAPIC + preemption
+3G — `>` prompt + perf gate
 
 The plan below is the kickoff proposal, not gospel. The user
 picks the shape; deviations get justified before code lands.
 
 Sub-candidate decomposition
 
-  (3F-0) **PIC mask + LAPIC base discovery.** Mask the legacy
-         8259 PIC by writing 0xFF to ports 0x21 and 0xA1 so the
-         15 legacy IRQ lines stop competing for vectors 0x20-
-         0x2F. Read the IA32_APIC_BASE MSR (0x1B); on QEMU q35
-         this reports the canonical 0xfee00000 base with the
-         enable bit and the BSP bit set. Map the 4 KiB LAPIC
-         MMIO region via paging::map_mmio (the helper from 3C
-         that already handles device BARs outside HHDM). Read
-         the LAPIC ID register (offset 0x20) and version
-         register (offset 0x30); log them. No interrupts armed
-         yet. ~50 LOC; one commit: `feat(kernel): mask 8259 +
-         map LAPIC MMIO`. Use **go 3f-0**.
+  (3G-0) **PS/2 keyboard driver (polled).** Adds
+         `arsenal-kernel/src/kbd.rs`. The i8042 controller lives
+         at I/O ports 0x60 (data) and 0x64 (status / command).
+         `kbd::init` is essentially "trust QEMU's default
+         configuration" — q35 boots with the controller enabled,
+         keyboard on port 1, scancode set 1 translation active
+         from the controller. Verify with a status-register
+         read (0x64 bit 2 should be clear — output buffer
+         empty — after any boot-time scancodes drain) and log.
+         `kbd::poll` reads the status register; if bit 0 (OBF)
+         is set, reads 0x60, translates the scancode through a
+         static table to ASCII (with internal modifier state
+         for left/right shift; ctrl arrives in 3G-2 if needed
+         by `panic` / `hw` modifiers). Returns Option<u8>.
+         Scancode set 1 single-byte ranges are 0x01-0x58 for
+         press, 0x81-0xD8 for release (high bit set); extended
+         (E0/E1) sequences for arrow keys / numpad get
+         absorbed-and-ignored at M0 (consume the prefix byte,
+         consume the next byte, return None). ~120 LOC; one
+         commit: `feat(kernel): PS/2 keyboard polling`. Use
+         **go 3g-0**.
 
-  (3F-1) **LAPIC software enable + spurious vector.** Set bit 8
-         of the spurious-interrupt-vector register (SVR, offset
-         0xF0) — that's the "APIC enable" bit. Choose 0xFF as
-         the spurious vector and install an extern "x86-
-         interrupt" handler that does nothing but log on first
-         entry (deduplicate via an AtomicBool so the log doesn't
-         spam if spurious storms happen). Install the spurious
-         handler in the IDT alongside the existing CPU exception
-         entries. ~30 LOC; one commit: `feat(kernel): LAPIC
-         software enable + spurious vector`. Use **go 3f-1**.
+  (3G-1) **Shell task + line editor.** Adds
+         `arsenal-kernel/src/shell.rs`. `shell::run` is the task
+         entry point: it prints the prompt `> ` once at startup,
+         emits ARSENAL_PROMPT_OK, then loops calling
+         `kbd::poll`, accumulating bytes into a bounded
+         `[u8; 256]` line buffer with backspace handling, echoing
+         each byte to serial (which fans out to fb via 3E's
+         mirror). Newline triggers `dispatch(&buf)` (a no-op
+         stub in 3G-1; commands land in 3G-2), buffer clears,
+         next prompt prints. The task is sched::spawn'd from
+         _start *before* sched::init runs (sched::init takes
+         the boot stack and switches into idle; spawn-then-init
+         is the established 3B-5 pattern). Visible cursor: a
+         static underscore at the insertion point, redrawn on
+         each character (clear the underscore by drawing a
+         space, write the new character, draw a new underscore
+         one cell right). ~80 LOC; one commit: `feat(kernel):
+         shell task + line editor`. Use **go 3g-1**.
 
-  (3F-2) **LAPIC timer + PIT calibration.** Calibrate the LAPIC
-         timer frequency against the PIT (channel 2, gate enable
-         via port 0x61 bit 0, count down from 0xFFFF for ~10 ms,
-         read elapsed LAPIC ticks). Set divide config (offset
-         0x3E0) to /16; that's the common choice and gives a
-         comfortable range against typical bus frequencies (~3-4
-         million LAPIC ticks per 10 ms calibration window).
-         Configure the LVT timer entry (offset 0x320) with
-         vector 0xEF in periodic mode. Set the initial count
-         register (offset 0x380) to one tick's worth — at
-         100 Hz that's `calibrated_ticks_per_10_ms * 1`. Install
-         the timer handler: increment an `AtomicUsize TICKS`,
-         write EOI (offset 0xB0, value 0). Log calibration
-         results. ~80 LOC; one commit: `feat(kernel): LAPIC
-         periodic timer + PIT-calibrated 100 Hz tick`. Use
-         **go 3f-2**.
+  (3G-2) **Command dispatcher: `help`, `hw`, `panic`.**
+         `dispatch(&buf)` matches the first whitespace-delimited
+         token. `help` prints a one-line description per known
+         command. `hw` prints the hardware summary required by
+         M0's usability gate: CPU brand string (CPUID leaves
+         0x80000002..0x80000004, each returns 16 bytes of brand
+         string), CPU core count (always 1 at M0), RAM total +
+         free (from `frames::stats()` already in 3A), LAPIC
+         version + spurious + timer vectors (from apic.rs
+         getters added here), virtio devices (block + net device
+         IDs from virtio_blk / virtio_net, getters added). `panic`
+         calls `panic!("user-initiated panic")` which exercises
+         the panic handler from 3B-2 in interactive mode. Unknown
+         tokens print `unknown command: <token>; try 'help'`.
+         ~120 LOC plus 3-5 LOC of getters in apic / virtio_blk /
+         virtio_net. One commit: `feat(kernel): shell commands —
+         help, hw, panic`. Use **go 3g-2**.
 
-  (3F-3) **Idle gets hlt back; ARSENAL_TIMER_OK.** Restore the
-         `hlt` in idle (sched.rs removed it in 3B-4 because
-         cooperative-no-IRQ + hlt = stuck CPU). Now that the
-         timer wakes hlt, idle becomes real power-save. After
-         sched::init runs and ping/pong fires, a probe somewhere
-         in the cooperative round-robin checks `TICKS.load() >=
-         10` (100 ms worth of ticks) and prints
-         ARSENAL_TIMER_OK. The sentinel proves the IRQ entered
-         the handler — N tick observations are stronger evidence
-         than a single one because spurious / NMI / external
-         IRQs can't cluster on the timer vector. Smoke gains
-         the sentinel; required-sentinel list grows to nine.
-         ~25 LOC; one commit: `feat(kernel): idle hlt + ARSENAL_
-         TIMER_OK`. Use **go 3f-3**.
+  (3G-3) **Perf gate in CI.** ci/qemu-smoke.sh grows wall-clock
+         measurement between two sentinels: ARSENAL_BOOT_OK
+         (kernel's first serial line, after Limine hands off)
+         and ARSENAL_PROMPT_OK (shell task online). The
+         difference is "kernel boot time" — distinguished from
+         QEMU launch + harness overhead by anchoring against a
+         kernel-emitted sentinel rather than wall time from
+         script start. Threshold from envvar `BOOT_BUDGET_MS`,
+         default 3000 (3 s — gives headroom over ARSENAL.md's
+         2 s target for ubuntu-24.04 runner variance; local
+         runs should report ~500-700 ms and hit the 2 s target
+         comfortably). Tight-miss handling: if time-to-prompt
+         is in (BOOT_BUDGET_MS, 1.5 × BOOT_BUDGET_MS], retry
+         once and pass if either run is under budget; if both
+         exceed or any run exceeds 1.5×, fail. Output the
+         measurement on PASS so the trend is visible across
+         runs. ~30 LOC shell. One commit: `ci(smoke): perf gate
+         — boot to prompt < 3 s`. Use **go 3g-3**.
 
-  (3F-4) **STATUS.md refresh + 3F devlog.** STATUS flips 3F from
-         "next" to "complete," 3G (`>` prompt + perf gate)
-         becomes the next-session sub-block — and the last of M0
-         step 3. Devlog at `docs/devlogs/2026-05-arsenal-apic.md`
-         (or `-preemption.md` — pick at write time) records the
-         PIT calibration trade-off, the soft-preemption vs hard-
-         preemption call from below, and anything that surprised
-         in xAPIC bring-up. Two commits: `docs(status): M0 step
-         3F complete` and `docs(devlogs): Arsenal LAPIC +
-         preemption`. Use **go 3f-4** for STATUS, **draft 3f-4-
-         devlog** for the devlog.
+  (3G-4) **STATUS.md refresh + 3G devlog + M0 step 3 close.**
+         STATUS flips 3G from "next" to "complete," promotes
+         M0 step 4 (SMP) to the active block, and writes the
+         M0 step 3 retrospective sub-section (3F-2 task-stack
+         posture change, 3E scroll-by-blit no-longer-untested
+         since `hw` output finally crosses 800 px, the
+         sub-block-per-devlog cadence as a model, calendar-
+         days-vs-FTE-weeks calibration). Devlog at
+         `docs/devlogs/2026-05-arsenal-prompt.md` records the
+         PS/2-over-virtio-keyboard call, the polled-over-IRQ
+         call (IOAPIC deferral to step 4), the perf-gate CI
+         shape (anchoring to a kernel sentinel, the tight-miss
+         retry), and the "this is what the M0 step 3 exit
+         looked like" summary. Two commits: `docs(status):
+         M0 step 3 complete, step 4 (SMP) next` and
+         `docs(devlogs): Arsenal prompt + M0 step 3 exit`. Use
+         **go 3g-4** for STATUS, **draft 3g-4-devlog** for the
+         devlog.
 
-Realistic session-count estimate: 3F-0 is half a session — the
-MSR read + map_mmio + log call is template-shaped against 3C's
-infrastructure. 3F-1 is half a session for the same reason. 3F-2
-is one focused session; PIT calibration is where genuine bugs
-hide (gate-enable bit ordering, off-by-one on the count
-direction, missed transition from one-shot to periodic mode).
-3F-3 is half a session if the soft-preemption shape below holds;
-substantially more if hard preemption is chosen. Per CLAUDE.md
-"~15 hours per week, multiply by ~2.3," call it 2 calendar weeks
-for soft-preemption 3F, 3-4 weeks for hard-preemption.
+Realistic session-count estimate: 3G-0 is one focused session
+— the i8042 spec is well-trodden and the scancode-set-1 table
+is mechanical, but the first attempt at a polling loop
+typically misses some status-register subtlety. 3G-1 is half a
+session (the line editor is well-bounded; the cursor rendering
+adds maybe 15 LOC). 3G-2 is one session (the three commands
+plus their getters; CPUID brand-string formatting is the only
+fiddly bit). 3G-3 is one session — wall-clock measurement is
+30 LOC of shell but the right shape requires deliberate
+thought about what variance you're trying to absorb. 3G-4 is
+one session including the devlog. Per CLAUDE.md "~15 hours per
+week, multiply by ~2.3," call it 1-2 calendar weeks for 3G if
+the cadence holds, or 2-3 weeks if 3G-3's gate flakes on hosted
+runners and needs iteration.
 
 Trade-off pairs to surface explicitly
 
-  **Soft preemption vs hard preemption.** The most important
-  call in 3F.
-  (i) **Soft preemption.** Timer IRQ handler does nothing but
-  increment TICKS and write EOI. The cooperative yield_now path
-  is unchanged; idle becomes wake-on-IRQ via hlt. "Preemption"
-  is observable as "the IRQ fired and incremented TICKS while
-  idle was hlted." No context switch happens *from inside the
-  IRQ handler*; cooperative tasks still yield manually.
-  (ii) **Hard preemption.** Timer IRQ handler saves the
-  interrupted context, calls into sched, swaps to the next
-  runnable task, restores. Requires that the IRQ stack frame
-  shape be compatible with the cooperative switch_to frame (or
-  a translation layer), critical-sections that disable IRQs
-  around runqueue Mutex operations, and a per-CPU "preempt
-  disabled" counter to keep nested-IRQ-safe code paths
-  preemption-free. ~3-5× the LOC of soft, and a much larger
-  bug surface.
-  Recommend (i) for 3F. The exit criterion — "idle hlts, the
-  IRQ wakes it, ARSENAL_TIMER_OK after 10 ticks" — is fully
-  satisfied by soft preemption. Hard preemption is a real
-  feature surface but it's separately load-bearing for SMP
-  (M0 step 4+); folding both into 3F bundles two design
-  surfaces. Soft preemption now, hard preemption when SMP
-  forces it. Document the deferral in the 3F-3 commit message.
+  **PS/2 vs virtio-keyboard.** The keyboard input transport.
+  (i) **PS/2 (i8042).** Universally available on every QEMU
+  machine type since q35's introduction; same controller on
+  every commodity x86 motherboard since 1984. Port I/O at
+  0x60 / 0x64. No probe — the controller is just *there*.
+  Polled or IRQ-driven (IRQ1 → vector 0x21 once IOAPIC routes
+  it).
+  (ii) **virtio-keyboard.** Reuses the modern-PCI transport
+  from 3C, same shape as virtio-blk / virtio-net. Cleaner
+  abstractly, but not all hypervisors expose virtio-input
+  device classes by default (QEMU does; some cloud environments
+  don't), and the device-class probe adds surface 3C doesn't
+  cover.
+  Recommend (i). M0's hardware story is "boot on what's
+  available everywhere." PS/2 is exactly that. virtio-keyboard
+  arrives if there's ever a reason to retire i8042 — there
+  probably isn't, at least not pre-M1.
 
-  **xAPIC vs x2APIC.**
-  (i) xAPIC — MMIO at 0xfee00000, 32-bit register accesses, well-
-  documented in intel-sdm Vol. 3A §10.4. The universal baseline.
-  (ii) x2APIC — MSR-based, 64-bit registers, requires CPUID 0x01
-  ECX bit 21 + enable via IA32_APIC_BASE MSR bit 10. Faster (no
-  MMIO round-trip), required for >255 CPUs (irrelevant pre-SMP).
-  Recommend (i). M0 single-core has no x2APIC need; the MMIO
-  cost is negligible at 100 Hz; the simpler code reads better.
-  x2APIC revisits at M0 step 4 when SMP arrives and ICR
-  performance starts to matter.
+  **Polled vs IRQ-driven input.**
+  (i) **Polled.** Shell task calls `kbd::poll` on each
+  iteration; if no scancode pending, yields. With idle's hlt
+  at 100 Hz and the cooperative round-robin from 3B,
+  shell gets scheduled at least every ~10 ms, giving an
+  effective 100 Hz polling rate — well above human typing
+  speed (a fast typist is ~10 Hz at the keystroke level).
+  Zero new IRQ infrastructure.
+  (ii) **IRQ-driven.** Wire i8042 IRQ1 → an IDT vector. The
+  8259 is masked from 3F-0; the LAPIC has no LVT entry for
+  IRQ1 today, so this requires either unmasking just IRQ1 on
+  the 8259 (which would re-introduce the 8259 as a delivery
+  path the kernel has explicitly stopped using) or bringing
+  up the IOAPIC for IRQ1 routing through the LAPIC. IOAPIC
+  bring-up is M0 step 4 territory (ACPI MADT parsing, IOAPIC
+  MMIO, redirection table programming).
+  Recommend (i). Polling sidesteps the IRQ-routing question
+  entirely. The latency cost is bounded at ~10 ms, which is
+  imperceptible. If a future workload needs sub-10-ms input
+  responsiveness, 3G's polled shape is a 30-line change to
+  IRQ-driven once IOAPIC arrives at step 4.
 
-  **Periodic vs TSC-deadline timer mode.**
-  (i) Periodic — LVT timer mode bit set, initial count register
-  reloads on every expiration. Classic, simple, has well-known
-  errata. Linux defaults toward TSC-deadline where available
-  but periodic still ships everywhere.
-  (ii) TSC-deadline — LVT timer mode bits set differently;
-  expiration when TSC crosses a deadline MSR. Requires invariant
-  TSC + CPUID 0x01 ECX bit 24. More accurate, lower wake-jitter,
-  but more design surface.
-  Recommend (i) for 3F. Periodic at 100 Hz is what M0 wants;
-  TSC-deadline arrives when 3G's perf gate or a future scheduler
-  rework actually needs the precision.
+  **Scancode set 1 vs set 2 vs USB HID.**
+  (i) **Set 1 with i8042 translation.** The QEMU q35 i8042
+  default. Single-byte press codes 0x01-0x58, single-byte
+  release codes with high bit set, extended sequences with
+  0xE0 / 0xE1 prefixes. Mechanical translation table.
+  (ii) **Set 2 with controller translation disabled.** More
+  modern, finer-grained, but requires explicitly disabling
+  controller translation and the translation table is larger.
+  (iii) **USB HID via xHCI.** M1 territory.
+  Recommend (i). The translation table for printable ASCII
+  (0x1E-0x39 covers a-z + most punctuation) is straightforward;
+  extended sequences (arrows, numpad) get consumed-and-ignored
+  at M0 with a 5-line state machine. Set 2 buys nothing M0
+  needs.
 
-  **Calibration source.**
-  (i) PIT — channel 2 in one-shot mode, count down from 0xFFFF
-  at 1.193182 MHz, gate via port 0x61 bit 0. ~70 LOC, portable,
-  the universal fallback. Linux's `calibrate_APIC_clock()` shape.
-  (ii) HPET — clean, monotonic, but adds HPET surface (ACPI
-  parsing, MMIO mapping, register layout).
-  (iii) CPUID leaf 0x16 — gives bus frequency directly on Intel
-  Sandy Bridge+; trivial when it works; not universal (AMD
-  Zen 1-2 don't populate it consistently, QEMU's `cpu max` does).
-  Recommend (i). PIT calibration is universal, costs maybe ~10 ms
-  once at boot, and 3F doesn't justify HPET infrastructure.
-  CPUID 0x16 as a fast-path fallback ("if leaf 0x16 reports a
-  non-zero value, use it; otherwise PIT-calibrate") is a 10-line
-  addition that could land in 3F or wait for 3G; I'd leave it
-  for 3G unless the user wants belt-and-suspenders.
+  **Shell task vs idle does it vs ping/pong does it.**
+  (i) **Dedicated shell task.** sched::spawn(shell::run).
+  Owns its own line buffer, cursor state, dispatch logic. Idle
+  stays minimal (yield + observe + hlt).
+  (ii) **Idle does the shell work.** Folds shell into idle_loop.
+  Saves one Task allocation but couples shell behavior to idle's
+  power-save semantics — idle's `hlt` would block keyboard
+  polling between ticks.
+  (iii) **Repurpose ping/pong.** ping/pong's six-iterations-
+  then-yield-forever loop is currently dead-after-completion;
+  could be repurposed for the shell.
+  Recommend (i). Cleanest separation, matches the 3B-5 pattern,
+  and ping/pong is preserved as the scheduler's smoke witness
+  (yes, the scheduler still works) without semantic overload.
 
-  **Tick rate.**
-  (i) 100 Hz — Linux desktop default. 10 ms granularity, low
-  IRQ overhead.
-  (ii) 1000 Hz — Linux server default. 1 ms granularity, higher
-  overhead.
-  (iii) Lower (10 Hz / 1 Hz) — adequate for hlt-wake, not
-  enough for a scheduling tick.
-  Recommend (i). 100 Hz exercises preemption clearly during
-  boot (10 ticks in 100 ms is well under sched::init's wall
-  time) and matches what real workloads will expect at M1+.
+  **Cursor: blink / static / none.**
+  (i) **Static underscore at insertion point.** Drawn once on
+  each character write. Simple, visible, no animation surface.
+  (ii) **Blinking cursor.** Requires periodic redraw, which
+  means hooking the timer probe or running a dedicated
+  cursor-blink task. Cosmetic value only.
+  (iii) **No cursor.** The mouse-driven world's default, but
+  for a TUI-style prompt the insertion point should be visible.
+  Recommend (i). The static underscore is what TempleOS,
+  early Linux consoles, and `cat` interactively show. Zero
+  animation infrastructure.
 
-  **TIMER_OK print site.**
-  (i) From IRQ handler — directly inside the timer ISR after EOI.
-  Routes through serial::write_str → fb::print_str → try_lock,
-  which is exactly what 3E-3's try_lock was designed for. Safe
-  in principle, but printing from IRQ context is a habit worth
-  avoiding generally — it interacts badly with future printk-
-  rate-limiting and per-CPU log buffers.
-  (ii) From cooperative context — IRQ handler increments TICKS;
-  a probe in main / sched / a dedicated probe task checks
-  `TICKS.load() >= 10` and prints from non-IRQ context.
-  Recommend (ii). Cleaner separation, and the assertion "TICKS
-  crossed a threshold" is exactly as strong as "the IRQ fired
-  10 times" because nothing else writes to TICKS.
+  **Echo: serial + fb / serial only / fb only.**
+  (i) **Both.** The shell's `echo_char` writes to serial,
+  which fans out to fb via 3E's mirror. Smoke can verify
+  the prompt is responsive via the serial log; humans see it
+  on the framebuffer.
+  (ii) **Serial only.** Smoke-friendly, but the framebuffer
+  doesn't show typed input — bad usability.
+  (iii) **fb only.** Inverse of (ii) — no smoke verification.
+  Recommend (i). The 3E mirror exists exactly for this case;
+  using it costs nothing.
+
+  **ARSENAL_PROMPT_OK fires when.**
+  (i) **Immediately after the first `> ` writes**, before the
+  first kbd::poll call. The sentinel asserts "the shell task
+  is online and the prompt is on screen." Smoke-observable
+  without simulating input.
+  (ii) **After the first input character is consumed.** The
+  sentinel asserts a stronger property ("the input loop is
+  alive") but requires the smoke to simulate input, which
+  QEMU's `-display none + -serial file` doesn't support
+  cleanly — would need either `-chardev pipe` for stdin
+  injection or a QMP-driven scripted-input harness, both
+  significantly more surface than M0 wants.
+  Recommend (i). The prompt printing is the user-observable
+  "I see a prompt" moment, matches ARSENAL.md's "boot to
+  prompt < 2 s" phrasing exactly, and is testable in the
+  existing headless smoke. Interactive input testing
+  (typing `hw` and seeing the summary) is manual under
+  `-display gtk`; record outcomes in the devlog.
+
+  **Perf gate measurement anchor.**
+  (i) **Wall clock from QEMU launch.** Captures QEMU startup,
+  Limine, kernel boot, shell spawn — everything end-to-end.
+  Most pessimistic; includes harness variance.
+  (ii) **Wall clock between two kernel sentinels** —
+  ARSENAL_BOOT_OK (the first kernel-emitted sentinel) and
+  ARSENAL_PROMPT_OK. Measures only the kernel's contribution.
+  (iii) **Wall clock between Limine handoff and prompt.**
+  Subset of (ii) without ARSENAL_BOOT_OK's print cost.
+  Recommend (ii). Isolates kernel performance from harness
+  variance (TLS cert generation, Python listener startup,
+  QEMU process spawn — all of which add 200-500 ms on hosted
+  runners). Both timestamps are in `$SERIAL_LOG` if we add
+  a per-line wall-clock prefix to the file or use `date +%s%N`
+  captures bracketing the grep window. The script shape:
+  capture `start_ns` when ARSENAL_BOOT_OK first appears in
+  the log, `end_ns` when ARSENAL_PROMPT_OK appears, assert
+  `(end_ns - start_ns) / 1_000_000 < BOOT_BUDGET_MS`.
+
+  **Perf gate threshold.**
+  (i) **Hard 2000 ms** matching ARSENAL.md verbatim. Risks
+  flaking on hosted runners.
+  (ii) **3000 ms with `BOOT_BUDGET_MS` envvar** for local
+  override (locals set 2000 to confirm the M0 spec is being
+  met). Tight-miss retry between 1× and 1.5× the budget.
+  (iii) **Per-environment thresholds** (local: 2000, hosted:
+  4000) via uname or `$CI` detection.
+  Recommend (ii). Single threshold with envvar override
+  keeps the script simple and the M0 spec verifiable; the
+  default of 3000 ms gives the hosted runner enough slack
+  while keeping the gate meaningful. Local manual run with
+  `BOOT_BUDGET_MS=2000 ci/qemu-smoke.sh` is the ARSENAL.md
+  conformance check.
 
   **Sub-candidate granularity.**
-  (a) Four-commit shape above (PIC+map / SVR / timer+calibrate /
-  idle+sentinel) plus 3F-4 STATUS+devlog. Bisect-rich, exactly
-  what 3A/3B/3C/3D/3E used.
-  (b) Combine 3F-0+3F-1 (PIC mask through SVR enable is the
-  "make LAPIC ready" block).
-  (c) Combine 3F-2+3F-3 (timer + sentinel land together).
-  Recommend (a). The "PIC mask + LAPIC base" and "SVR + spurious
-  handler" pieces are independently testable; folding them
-  loses a bisect point against "did we mask the PIC correctly?"
-  vs "did we get the SVR write wrong?" 3F-2 is the longest
-  sub-commit but it's coherent — calibration and timer setup
-  are inseparable.
+  (a) **Five-commit shape** above (kbd / shell+editor /
+  commands / perf gate / STATUS+devlog). Bisect-rich.
+  (b) Combine 3G-0+3G-1 (kbd + shell pulled together since
+  shell consumes kbd's output and they're useless apart).
+  (c) Combine 3G-2+3G-3 (commands + perf gate as "everything
+  needed for the M0 step 3 exit gate").
+  Recommend (a). 3G-1's shell skeleton with a stub dispatch
+  is independently smoke-verifiable (ARSENAL_PROMPT_OK fires;
+  manual under -display gtk shows typed input echoing). 3G-2
+  adds the dispatch; 3G-3 adds the perf assertion. Folding
+  loses bisect points at each transition.
 
 Sanity check before kicking off
 
     git tag --list | grep field-os-v0.1   # field-os-v0.1
-    git log --oneline -10                 # ef36a68, 9049f56,
-                                          # e115095, 8aad04d,
-                                          # fc5803f, 6d9a2a3,
-                                          # b604f87, 4c5385b,
-                                          # cc36003, db4625e
+    git log --oneline -10                 # d940b59, 0323497,
+                                          # 6c4b169, 41e7f8d,
+                                          # 896183e, 7dd1dfd,
+                                          # dcf2377, ef36a68,
+                                          # 9049f56, e115095
     git status --short                    # ?? HANDOFF.md (only,
                                           # while drafting this)
                                           # or clean once committed
     cargo build -p arsenal-kernel --target x86_64-unknown-none --release
-                                          # clean, ~1.475 MB ELF
+                                          # clean, ~1.479 MB ELF
     cargo clippy -p arsenal-kernel --target x86_64-unknown-none --release -- -D warnings
                                           # clean
     cargo xtask iso                       # arsenal.iso ~19.3 MB
-    ci/qemu-smoke.sh                      # ==> PASS (8 sentinels in ~1s)
+    ci/qemu-smoke.sh                      # ==> PASS (9 sentinels in ~1s)
 
-Expected: HEAD as above; smoke PASSes in ~1 s with eight
-sentinels. If smoke fails after the LAPIC bring-up lands, the
-likely culprits are: vector collision (the spurious vector at
-0xFF or timer vector at 0xEF aliasing onto something the IDT
-already routes — verify with a printout of which IDT entries
-are populated), miscalibrated tick value (zero initial count
-= one-shot expiration immediately = unbounded IRQ storm), or
-EOI omission (next IRQ blocked because the LAPIC's ISR bit
-stays asserted). All three classes are detectable from serial
-output — IRQ storm shows as endless TIMER_OK or
-"unrecoverable triple fault"; missed EOI shows as exactly one
-tick then silence.
+Expected: HEAD as above; smoke PASSes in ~1 s with nine
+sentinels including ARSENAL_TIMER_OK; calibration line in serial
+reports "apic: calibrated 624375 LAPIC ticks per 10 ms".
 
-Out of scope for 3F specifically
+If smoke fails after 3G-0 / 3G-1 land, the likely culprits are:
+(a) i8042 status-register polling backwards — confusing IBF
+(0x64 bit 1 — input buffer full from controller's perspective,
+which we want clear before writing) with OBF (0x64 bit 0 — output
+buffer full, which we want set before reading); (b) scancode
+table off-by-one against the set-1 reference; (c) the shell
+task's stack overflowing on the first `dispatch` call before
+3G-2 lands the actual commands (stub dispatch should be a
+literal no-op — print nothing, just return); (d) the shell
+spawning *after* sched::init has switched into idle (idle's
+runqueue would never see the shell — spawn-before-init is the
+established pattern from main.rs); (e) ARSENAL_PROMPT_OK firing
+from inside cpu::current_cpu().runqueue.lock() (deadlock on
+re-entry — emit the sentinel after the lock is dropped, before
+the poll loop).
 
-  - SMP. M0 step 4 brings up additional cores via INIT-SIPI-SIPI.
-    3F's LAPIC bring-up is BSP-only.
-  - IPIs (inter-processor interrupts). Need ICR, AP startup,
-    per-CPU LAPIC state — all M0 step 4+.
-  - x2APIC. xAPIC is what 3F ships.
-  - TSC-deadline timer mode. Periodic only.
-  - Hard preemption (IRQ handler context-switches the
-    interrupted task). Soft preemption only — see trade-off
-    pair above.
-  - HPET. Not needed; PIT calibration suffices.
-  - ACPI MADT parsing. Useful for SMP and for confirming the
-    LAPIC base, but the MSR read covers M0's single-core case.
-    MADT arrives with M0 step 4 or M1's LinuxKPI dependencies.
-  - Interrupt-disable critical sections around runqueue Mutex.
-    Soft preemption sidesteps this by never locking the
-    runqueue from IRQ context; hard preemption would need it.
-  - Per-CPU "preempt disabled" counter. Same — only needed
-    under hard preemption.
-  - Latency benchmarks / jitter measurement. 3G's perf gate
-    covers boot time; per-IRQ jitter measurement is post-M0.
+If 3G-3's perf gate fails locally but passes on hosted runners
+(or vice versa), the working hypothesis is that the wall-clock
+anchor measurement is including harness variance the bound
+shouldn't be sensitive to. Walk the script's `start_ns` /
+`end_ns` capture points and confirm they bracket the kernel's
+contribution only, not the surrounding script.
+
+Out of scope for 3G specifically
+
+  - IOAPIC bring-up. M0 step 4 — required when IRQ-driven
+    keyboard or other device IRQs arrive past the BSP-only
+    LAPIC story.
+  - IRQ-driven keyboard input. Polled at M0; revisits at
+    step 4 once IOAPIC routes IRQ1 → an LAPIC vector.
+  - USB keyboard / xHCI. M1 — requires the xHCI driver from
+    ARSENAL.md M1's surface.
+  - Scancode set 2 / extended (E0/E1) scancode sequences.
+    Set 1 with E0/E1 consume-and-ignore is plenty for M0's
+    printable-ASCII input.
+  - Cursor blink animation. Static underscore is enough.
+  - Tab completion. The dispatcher matches whole tokens; tab
+    completion is post-M0.
+  - Command history. Same — post-M0.
+  - TUI / curses-style screen control. No alternate buffer,
+    no clear-screen escape, no positioned text. The prompt
+    is a simple line-oriented REPL.
+  - Color escapes in the prompt. The amber-on-navy from 3E is
+    the global palette; per-byte color codes wait for a
+    richer UI.
+  - Multi-line input or line continuation. One line per Enter.
+  - Read line history persistence. Same — post-M0.
+  - The big "hardware summary" output. `hw` at M0 reports CPU
+    brand string + RAM total/free + LAPIC version + virtio
+    devices. Richer summaries (per-PCI-device descriptor,
+    ACPI tables, NUMA topology) arrive when those subsystems
+    land.
+  - PCI device enumeration past what 3C already does. `hw`
+    queries `virtio_blk` and `virtio_net` directly; broader
+    PCI walk is post-M0.
+  - SMP-aware `hw` output. Single-CPU at M0; the core count
+    line is a hardcoded `1` until step 4 makes it real.
+  - Configuration files / boot args / kernel cmdline. The
+    shell takes interactive input only; persistent
+    configuration is post-M0.
 
 Permanently out of scope (do not propose)
 
   - Any unsafe block without a // SAFETY: comment naming the
     invariant the caller must uphold. CLAUDE.md hard rule.
-  - Reverting any 3A / 3B / 3C / 3D / 3E commit. All landed
-    and validated by smoke + CI.
+  - Reverting any 3A / 3B / 3C / 3D / 3E / 3F commit. All
+    landed and validated by smoke + CI.
   - Force-pushing to origin. Branch is in sync; preserve
     history.
   - Dropping the BSD-2-Clause license header from any new
@@ -350,52 +490,62 @@ Permanently out of scope (do not propose)
 
 Three notes worth flagging before you go
 
-  1. **The 3E scroll-by-blit path is still untested in CI.**
-     Boot output is currently ~30 serial lines × 16 px ≈ 480 px,
-     comfortably inside the 800 px QEMU std-vga frame. 3F adds
-     maybe 5-10 more log lines (LAPIC ID, version, calibration
-     result, sentinel) which still keeps total well under 50
-     lines. If the scroll path matters before 3G or M1, force
-     it with a one-shot 60-line print somewhere — but per
-     CLAUDE.md "nothing speculative," I'd leave that for when
-     a real workload exercises it. Flagged for the M0 step 3
-     exit retrospective.
+  1. **The smoke can't simulate keyboard input.** QEMU's
+     `-display none + -serial file` configuration in
+     ci/qemu-smoke.sh has no path for injected stdin bytes
+     reaching the i8042 (`-chardev pipe` for stdin would,
+     but that's a different chardev wiring and adds smoke
+     surface). The implication: 3G's smoke verifies the
+     prompt *prints* and the shell task is *online*
+     (ARSENAL_PROMPT_OK), and the perf gate measures
+     time-to-prompt. Interactive validation — typing `hw`,
+     seeing the summary, typing `panic`, seeing the panic
+     handler — is manual under `-display gtk` / `-display
+     sdl` and gets recorded in the 3G devlog. This isn't a
+     limitation worth eliminating; the smoke verifies the
+     deterministic property (prompt online) and humans
+     verify the interactive property (input responsive),
+     which is the right split.
 
-  2. **The IDT is a Lazy<InterruptDescriptorTable>.** 3F adds
-     LAPIC vectors after the Lazy has been forced — IDT.load()
-     in idt::init() runs on first boot, and adding entries
-     after that is a no-op against the already-loaded table.
-     Two shapes work: (a) add the LAPIC entries inside the
-     Lazy initializer before .load() runs (timer + spurious
-     handlers as `extern "x86-interrupt" fn`s declared in
-     idt.rs); (b) drop the Lazy in favor of a regular static
-     Mutex<InterruptDescriptorTable> that 3F adds entries to.
-     Recommend (a). It matches the existing pattern, keeps
-     the IDT immutable post-init, and the new vectors are
-     known at compile time. Document in the 3F-1 commit
-     message that the IDT is now a one-shot static — late
-     vector additions (e.g., device IRQs in M1) will need a
-     different mechanism.
+  2. **3E's scroll-by-blit path will finally run.** Boot
+     output post-3F is ~35 serial lines × 16 px ≈ 560 px,
+     still inside the 800 px frame. 3G's prompt adds at
+     least one more line; the `hw` command (when run
+     interactively) prints ~8-12 lines, which would push
+     total output past 800 px and trigger the scroll-by-blit
+     in fb.rs for the first time. Worth a manual test under
+     `-display gtk` after 3G-2 lands. The path is code-review
+     correct from 3E but has never executed; if it has a bug,
+     this is when it surfaces.
 
-  3. **3F is the first sub-block where reality might argue with
-     the spec.** 3A through 3E ran at HANDOFF reading speed —
-     spec-driven, well-trodden ground. 3F's bug-prone surface
-     is real: PIT calibration has gate-enable ordering and
-     count-direction subtleties that bite first attempts; LAPIC
-     spurious vectors fire surprisingly often during bring-up
-     transitions; the soft/hard preemption call has cascading
-     consequences if revisited mid-implementation. The pace
-     may genuinely slow vs 3E. If a session ends mid-3F-2 with
-     calibration not yet stable, that's normal — the 3D arc's
-     three-sessions-on-rustls is the model. Don't push to
-     "finish 3F-2 today" if calibration's first attempt didn't
-     produce a sensible LAPIC frequency.
+  3. **The perf gate is the most genuinely novel CI surface
+     in M0 step 3.** Sentinels are easy: a string appears in
+     a log, the grep matches, the test passes. Wall-clock
+     budgets are not: hosted runners have variance that
+     interactive sessions don't, the clock source (nanoseconds
+     via `date +%s%N` on Linux, microseconds via `gdate +%s%N`
+     on macOS with coreutils, or millisecond-precision
+     `python3 -c 'import time; print(int(time.time()*1000))'`
+     as a portable fallback) needs care, and the tight-miss
+     retry shape is the kind of thing that hides bugs for
+     months because retries cover up real regressions. The
+     3G-3 commit message should document the methodology
+     explicitly so future-you can audit it. If 3G-3 ends up
+     flaky and the retry isn't enough, the right move is to
+     raise the budget (which is documented as an envvar) and
+     file a TODO against either kernel boot-time profiling
+     or harness deflaking, not to delete the gate.
 
 Wait for the pick. Do not pick silently. The natural first
-split is 3F-0 + 3F-1 in one focused session ("LAPIC ready,
-nothing armed yet"), 3F-2 in a session ("calibration + first
-ticks observed"), 3F-3 in a session ("idle hlts, sentinel
-lands"). Happy to do 3F-0 alone if you want to confirm the
-IA32_APIC_BASE MSR shape before committing to the rest, or to
-do soft/hard preemption as a separate up-front design pass
-before any code lands. Your call.
+split is 3G-0 in one focused session ("PS/2 is alive,
+scancode bytes appear in the log"), 3G-1 in a session ("the
+prompt prints and ARSENAL_PROMPT_OK lands"), 3G-2 in a
+session ("`hw` works manually"), 3G-3 in a session ("the
+budget is asserted in CI"), 3G-4 in a session ("STATUS +
+devlog, M0 step 3 closes"). Happy to combine 3G-0 + 3G-1 if
+you want the smoke-observable "prompt prints" milestone in
+one push, or to do 3G-3 (the perf gate) up front as a
+standalone change against the existing 9-sentinel smoke
+before any prompt work lands — that would let the gate
+infrastructure mature before it has to cover the actual
+boot-to-prompt path. Your call.
