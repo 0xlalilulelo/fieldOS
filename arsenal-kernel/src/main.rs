@@ -29,6 +29,7 @@ mod pci;
 mod rand;
 mod sched;
 mod serial;
+mod shell;
 mod task;
 mod virtio;
 mod virtio_blk;
@@ -254,6 +255,13 @@ extern "C" fn _start() -> ! {
     // runqueue keeps rotating until smoke kills QEMU.
     sched::spawn(ping_entry);
     sched::spawn(pong_entry);
+
+    // 3G-1: shell task. Prints `> `, emits ARSENAL_PROMPT_OK, then
+    // loops on kbd::poll feeding a 256-byte line buffer with VT100
+    // backspace handling and a stub dispatch (3G-2 lands the
+    // commands). Spawned last so the prompt prints after every
+    // other subsystem's boot output has cleared serial.
+    sched::spawn(shell::run);
 
     // Cross the threshold from main's Limine boot stack into the
     // scheduler-managed idle task. Never returns; main's stack

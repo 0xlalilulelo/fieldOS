@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-
-// 3G-1 will spawn the shell task that calls `poll`; until then,
-// only `init` is reachable from main and clippy's dead-code lint
-// would flag the scancode tables, modifier state, and `poll`
-// itself. Drop this attribute when shell::run lands.
-#![allow(dead_code)]
-
+//
 // PS/2 keyboard driver — M0 step 3G-0. Polled-only. The shell task
 // (3G-1) calls `poll` on each cooperative iteration; if a scancode
 // is pending, it is consumed, translated to ASCII, and returned.
