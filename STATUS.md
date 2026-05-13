@@ -101,15 +101,43 @@ but the `UnbufferedClientConnection` state machine.
 - `8c8a599` TCP smoke against slirp + ARSENAL_TCP_OK
 - `db4625e` rustls handshake + ARSENAL_TLS_OK
 
-**3E — framebuffer console (next).** Limine's framebuffer request
-already maps a linear RGB framebuffer at boot; 3E wires a software
-glyph renderer over it (8×16 IBM Plex Mono, single color, no
-scroll yet) so the serial stream gains a screen-side mirror. The
-Stage compositor's amber/cyan/navy identity is M2; 3E is the
-infrastructure that lets M0's `>` prompt arrive on a real display
-when 3G lands. ARSENAL.md budgets 3E + 3F + 3G for the back half
-of M0 step 3 (3F is the LAPIC + preemptive timer; 3G is the
-`>` prompt + perf gate).
+**3E — framebuffer console (complete, 2026-05-13).** Limine
+`FramebufferRequest` probe (1280×800×32, pitch 5120, HHDM-mapped
+LFB on QEMU q35 std-vga); `fb::clear` + `fb::put_pixel` with
+volatile 32-bit RGB writes (NAVY `#0A1A2A` background, AMBER
+`#FFB200` foreground per CLAUDE.md §4); 8×16 glyph renderer over
+Spleen 8x16 v2.2.0 (vendored under `vendor/spleen/`, BSD-2-Clause
+— exact license match against the Arsenal base; rejected an
+abandonware VGA BIOS font on provenance and the v0.1 TempleOS-
+lineage 8×8 on ADR-0004 grounds); byte-level fan-out from
+`serial::write_str` to a cursor-tracking `fb::print_str` with
+newline + line-wrap + scroll-by-blit through `core::ptr::copy`.
+The mirror gates on a Release/Acquire `FB_READY` AtomicBool and
+uses `FB.try_lock()` so a panic mid-render still reaches serial
+via the bypass path. No new sentinel — 3E's smoke target is
+implicit (kernel continues past fb init / render / mirror without
+faulting). ELF ~1.46 MB → ~1.475 MB (+~13 KB across four
+sub-steps); smoke still completes in ~1 s with eight sentinels.
+Current kernel boot is ~30 lines × 16 px ≈ 480 px tall, inside
+one 800 px screen — the scroll-by-blit path is code-review-
+correct but dead-untested by the headless CI smoke; 3F's
+preemption banner or 3G's prompt will exercise it.
+
+3E sub-commits:
+- `b604f87` probe Limine framebuffer
+- `6d9a2a3` framebuffer clear + put_pixel
+- `fc5803f` 8x16 framebuffer console (Spleen 8x16 vendored)
+- `8aad04d` mirror serial to framebuffer console
+
+**3F — LAPIC + preemption (next).** Bring up the local APIC, mask
+the legacy PIC, install a periodic timer interrupt vector through
+the existing IDT, drive a preemptive scheduler tick over the
+cooperative skeleton from 3B. The bug-prone moment is APIC vector
+collision with the int3 / page-fault handlers already installed
+in 3A. After 3F, idle's `hlt` becomes real power-save (a timer
+IRQ wakes it) and the ping-pong demo stops needing manual
+`yield_now`. 3G adds the `>` prompt + perf gate over a preemptive
+base.
 
 ### Step 3 performance + security + usability gates (from ARSENAL.md)
 
