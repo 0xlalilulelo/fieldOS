@@ -129,15 +129,56 @@ preemption banner or 3G's prompt will exercise it.
 - `fc5803f` 8x16 framebuffer console (Spleen 8x16 vendored)
 - `8aad04d` mirror serial to framebuffer console
 
-**3F — LAPIC + preemption (next).** Bring up the local APIC, mask
-the legacy PIC, install a periodic timer interrupt vector through
-the existing IDT, drive a preemptive scheduler tick over the
-cooperative skeleton from 3B. The bug-prone moment is APIC vector
-collision with the int3 / page-fault handlers already installed
-in 3A. After 3F, idle's `hlt` becomes real power-save (a timer
-IRQ wakes it) and the ping-pong demo stops needing manual
-`yield_now`. 3G adds the `>` prompt + perf gate over a preemptive
-base.
+**3F — LAPIC + soft preemption (complete, 2026-05-13).** Mask
+both 8259A PICs (write 0xFF to ports 0x21 / 0xA1) so legacy IRQ
+lines stop competing for vectors. Read `IA32_APIC_BASE`, assert
+LAPIC_ENABLE + BSP + ¬X2APIC_ENABLE, map the LAPIC MMIO page
+through `paging::map_mmio` (Limine's HHDM covers RAM only —
+same dance as 3C). Software-enable via SVR bit 8 with spurious
+vector 0xFF; periodic timer vector 0xEF wired through the
+existing `idt::IDT` Lazy initializer. Calibrate the LAPIC timer
+against PIT channel 2 (mode 0 / interrupt on terminal count,
+polled via port 0x61 bit 5) for a 10 ms window; QEMU TCG -cpu
+max reports ~624 k LAPIC ticks per 10 ms through /16, scaled to
+the 100 Hz arming target. Soft preemption only — the timer
+handler increments `TICKS` and writes EOI; no IRQ-driven
+context switch (hard preemption is deferred to M0 step 4 when
+SMP forces the design). `sched::idle_loop` regains `sti` + `hlt`;
+cooperative `switch_to` doesn't save or restore rflags, so IF=1
+propagates from idle's first switch-in to every subsequent task.
+Smoke now asserts nine sentinels (added `ARSENAL_TIMER_OK`,
+emitted from a cooperative-context probe in `idle_loop` once
+`apic::ticks()` crosses 10). ELF ~1.475 MB → ~1.479 MB, smoke
+still ~1 s locally with calibration line "apic: calibrated
+624375 LAPIC ticks per 10 ms; armed periodic 100 Hz vector=0xef
+initial_count=624375". From 3F-3 forward, the kernel can be
+interrupted at any instruction boundary in cooperative code.
+
+3F sub-commits:
+- `7dd1dfd` mask 8259 + map LAPIC MMIO
+- `896183e` LAPIC software enable + spurious vector
+- `41e7f8d` bump kernel task stack 16 KiB → 32 KiB (latent fix
+  surfaced by 3F-2's binary-layout shifts; the rustls / smoltcp
+  poll-loop callchain overflowed the 16 KiB task stack and
+  corrupted adjacent heap allocations, surfacing minutes later
+  as a `LayoutError` unwrap in `linked_list_allocator`'s
+  dealloc path — flag for M0 step 3 retrospective)
+- `6c4b169` LAPIC periodic timer + PIT-calibrated 100 Hz tick
+- `0323497` idle hlt + sti + ARSENAL_TIMER_OK
+
+**3G — `>` prompt + M0 step 3 perf gate (next).** Land an
+interactive `>` prompt over the serial + framebuffer stack
+(PS/2 or virtio-keyboard driver, line-editing buffer, command
+dispatch shell, hardware-summary command for the usability gate),
+then assert the < 2 s boot-to-prompt budget in CI. 3G closes M0
+step 3; step 4 (SMP — IPI bring-up, AP startup, per-CPU LAPIC
+state, hard preemption discipline) is the next major surface
+after that. The bug-prone moments are PS/2 vs virtio-keyboard
+choice (PS/2 is universally available under q35 but the i8042
+state machine has corners; virtio-keyboard is cleaner but needs
+the virtio modern-PCI transport from 3C reused for a different
+device class) and the perf-gate CI surface (smoke needs to time
+boot deterministically across hosted runners, not just locally).
 
 ### Step 3 performance + security + usability gates (from ARSENAL.md)
 
