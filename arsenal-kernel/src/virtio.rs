@@ -126,7 +126,7 @@ fn try_resolve(bus: u8, dev: u8, func: u8, want: u16) -> Option<VirtioDevice> {
                 unsafe { pci::config_read32(bus, dev, func, cap_offset + 8) };
             let length =
                 unsafe { pci::config_read32(bus, dev, func, cap_offset + 12) };
-            let bar_phys = unsafe { bar_address(bus, dev, func, bar) };
+            let bar_phys = unsafe { pci::bar_address(bus, dev, func, bar) };
             let cap_phys = bar_phys + off_in_bar as u64;
             // Limine's HHDM doesn't cover device MMIO; map each
             // virtio cap's region into our page tables before any
@@ -277,7 +277,7 @@ fn print_virtio_cap(bus: u8, dev: u8, func: u8, cap_off: u8, cfg_type: u8) {
     // address that resolves to the start of HHDM — readable but
     // meaningless. We don't dereference here; 3C-3 / 3C-4 do, and
     // they validate the common-cfg signature first.
-    let bar_phys = unsafe { bar_address(bus, dev, func, bar) };
+    let bar_phys = unsafe { pci::bar_address(bus, dev, func, bar) };
     let mmio_phys = bar_phys + off_in_bar as u64;
     let mmio_virt = mmio_phys + paging::hhdm_offset();
 
@@ -294,33 +294,6 @@ fn print_virtio_cap(bus: u8, dev: u8, func: u8, cap_off: u8, cfg_type: u8) {
     }
 }
 
-/// Resolve BAR `bar` of (bus, dev, func) to a physical address.
-/// Handles both 32-bit and 64-bit memory BARs. Returns 0 for I/O
-/// BARs (which virtio modern doesn't use).
-///
-/// # Safety
-/// `bar` should be 0..6; for 64-bit BARs the caller should not pass
-/// an index of 5 (the upper-half BAR would read off the end of the
-/// BAR window, returning 0xFFFF_FFFF, yielding a nonsense address).
-unsafe fn bar_address(bus: u8, dev: u8, func: u8, bar: u8) -> u64 {
-    // SAFETY: caller's contract; offset 0x10 + bar*4 is dword-aligned
-    // for bar in 0..=5 and lies within the legacy config space.
-    let lo = unsafe { pci::config_read32(bus, dev, func, 0x10 + bar * 4) };
-    if lo & 0x01 != 0 {
-        // I/O BAR — virtio modern doesn't use these. Return 0.
-        return 0;
-    }
-    if (lo & 0x06) == 0x04 {
-        // 64-bit memory BAR. Low 32 bits in this BAR (mask off type
-        // bits in [3:0]); high 32 bits in the next BAR slot.
-        // SAFETY: same constraints, bar+1 in range when bar < 5.
-        let hi = unsafe { pci::config_read32(bus, dev, func, 0x10 + (bar + 1) * 4) };
-        ((hi as u64) << 32) | ((lo & 0xFFFF_FFF0) as u64)
-    } else {
-        // 32-bit memory BAR.
-        (lo & 0xFFFF_FFF0) as u64
-    }
-}
 
 // ---------------------------------------------------------------
 // Transport-level helpers used by every virtio driver.

@@ -266,6 +266,36 @@ fn print_function(bus: u8, dev: u8, func: u8) -> bool {
     is_virtio
 }
 
+/// Resolve BAR `bar` of (bus, dev, func) to a physical address.
+/// Handles both 32-bit and 64-bit memory BARs. Returns 0 for I/O
+/// BARs (which M1 drivers don't use) and for absent BARs.
+///
+/// # Safety
+/// `bar` must be in 0..=5; for 64-bit BARs the caller should not
+/// pass an index of 5 (the upper-half BAR would read off the end
+/// of the BAR window). The (bus, dev, func) must reference a
+/// present PCI function.
+pub unsafe fn bar_address(bus: u8, dev: u8, func: u8, bar: u8) -> u64 {
+    debug_assert!(bar < 6, "pci: bar must be 0..6");
+    // SAFETY: caller's contract; offset 0x10 + bar*4 is
+    // dword-aligned for bar in 0..=5 and lies within legacy
+    // config space.
+    let lo = unsafe { config_read32(bus, dev, func, 0x10 + bar * 4) };
+    if lo & 0x01 != 0 {
+        // I/O BAR — M1 drivers use MMIO exclusively. Return 0.
+        return 0;
+    }
+    if (lo & 0x06) == 0x04 {
+        // 64-bit memory BAR. Low 32 bits here (mask off type bits
+        // in [3:0]); high 32 bits in the next BAR slot.
+        // SAFETY: same constraints; bar+1 in range when bar < 5.
+        let hi = unsafe { config_read32(bus, dev, func, 0x10 + (bar + 1) * 4) };
+        ((hi as u64) << 32) | ((lo & 0xFFFF_FFF0) as u64)
+    } else {
+        (lo & 0xFFFF_FFF0) as u64
+    }
+}
+
 /// Walk a function's capability list and return its MSI-X
 /// capability if present. Returns None for devices without MSI-X
 /// (the legacy MSI capability at ID 0x05 is *not* matched — M1

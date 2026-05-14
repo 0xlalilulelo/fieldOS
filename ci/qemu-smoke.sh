@@ -171,6 +171,8 @@ qemu-system-x86_64 \
 	-device virtio-rng-pci \
 	-drive file="$ISO",if=none,id=blk0,format=raw,readonly=on \
 	-device virtio-blk-pci,drive=blk0 \
+	-drive file="$ISO",if=none,id=nvme0,format=raw,readonly=on \
+	-device nvme,serial=arsenal0,drive=nvme0 \
 	-netdev user,id=net0 \
 	-device virtio-net-pci,netdev=net0 \
 	-display none \

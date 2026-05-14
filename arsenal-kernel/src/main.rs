@@ -28,6 +28,7 @@ mod ioapic;
 mod irq;
 mod kbd;
 mod net;
+mod nvme;
 mod paging;
 mod pci;
 mod rand;
@@ -294,6 +295,14 @@ extern "C" fn _start() -> ! {
         assert_eq!(vq.num_free(), 13);
         assert!(vq.pop_used().is_none(), "virtq: pop_used should be empty");
     }
+
+    // M1 step 1-1: discover the NVMe controller, map BAR0, log
+    // CAP / VS / spec assertions. 1-2 will build the admin queue
+    // + Identify on top; 1-3 the I/O queue + first sector read.
+    // At step 1-1 we just probe and log — no controller reset,
+    // no queues, no IRQs. Drops the handle since 1-2 hasn't
+    // wired the next consumer yet.
+    let _nvme = nvme::init();
 
     // virtio-blk smoke: locate the device, init, read sector 0,
     // assert the hybrid-ISO MBR boot signature 0xAA55, print
