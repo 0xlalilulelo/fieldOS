@@ -1,544 +1,493 @@
-Kickoff for the next milestone — Arsenal M1, "real iron."
+Kickoff for M1 step 1 — NVMe native Rust.
 
-M0 closed at `arsenal-M0-complete` (commit 9793487, 2026-05-14)
-across six steps and ~16 calendar days post-pivot. ARSENAL.md
-M0 gates met: 96 ms boot→prompt vs 2000 ms target, zero unsafe
-outside designated FFI boundaries, prompt keyboard-navigable
-with `hw` summary. Working tree clean, branch in sync with
-origin/main.
+M0 closed at arsenal-M0-complete (9793487, 2026-05-14). M1's
+milestone-level HANDOFF landed at 9df4682; the eight-step plan
+puts NVMe as step 1 — smallest useful M1 driver, native Rust,
+~5K LOC target per ARSENAL.md, zero dependency on the
+LinuxKPI shim, the first PCIe driver to exercise MSI-X. The
+M0 PCI scanner from 3C was enumerate-and-print only; M1
+step 1 grows it into "find the NVMe controller, parse its
+capability list, map its BARs, talk to it."
 
-M1 per ARSENAL.md (months 9-24 of the original calendar plan)
-is "real iron" — first boot on a Framework 13 AMD laptop, with
-enough driver support (storage, USB, GPU framebuffer, wireless)
-to be useful. Six concrete deliverables from § "Three Concrete
-Starting Milestones":
-
-  1. LinuxKPI shim layer in Rust, modeled on FreeBSD
-     drm-kmod patterns. **ARSENAL.md flags this as the single
-     largest engineering task — budget accordingly.**
-  2. amdgpu driver under LinuxKPI, KMS only (no Vulkan).
-  3. NVMe driver (native Rust, ~5K LOC per ARSENAL.md).
-  4. xHCI USB driver (native Rust or LinuxKPI port —
-     evaluate at start).
-  5. iwlwifi + mac80211 via LinuxKPI.
-  6. First boot on real Framework 13 AMD hardware.
-
-Plus a Slint app running in a software-rendered framebuffer
-(seventh deliverable, listed separately in ARSENAL.md).
-
-ARSENAL.md M1 gates:
-  - **Performance:** cold boot to login on Framework 13 AMD
-    < 8 s.
-  - **Security:** Linux drivers run with minimum required
-    kernel capabilities; no shared kernel state beyond
-    explicit shim interfaces.
-  - **Usability:** Wi-Fi association via TUI works on first
-    try.
-
-This HANDOFF is *milestone-level* — it proposes a step
-decomposition for all of M1, surfaces the trade-offs whose
-resolution will shape the next 12+ months of work, and
-recommends a starting point. Subsequent HANDOFFs (one per
-step kickoff, following the M0 pattern) will be step-level
-and overwrite this file.
+The natural outcome at step exit: the QEMU smoke gains an
+`-device nvme` and reads sector 0 of the emulated NVMe via
+our driver. ARSENAL_NVME_OK joins the sentinel set. Per the
+milestone HANDOFF's recommendation, virtio-blk stays in the
+QEMU command line — it satisfies the boot path until step 6
+(real hardware) makes it unnecessary. The smoke's
+ARSENAL_BLK_OK keeps firing; ARSENAL_NVME_OK is additive.
 
 read CLAUDE.md (peer concerns, Rust-only, BSD-2-Clause base,
-build loop sacred, "use Limine"; the LinuxKPI / GPLv2 driver
-boundary is the first M1 surface that exercises CLAUDE.md
-§3's combined-work license discipline) → STATUS.md (M0
-complete, M1 active with no sub-block yet; the five posture
-changes carrying forward from M0 are load-bearing for any
-M1 driver) → docs/plan/ARSENAL.md § "M1 — Real iron" → the
-ADR-0004 pivot history at docs/adrs/0004-arsenal-pivot.md
-(Rust-only commitment that constrains the LinuxKPI shim
-shape; inherited driver C stays GPLv2 in the LinuxKPI shim
-boundary, our shim is Rust + BSD-2) → arsenal-kernel/src/
-(at M0 exit: 22 .rs files, ~5,900 LOC, ELF 1.52 MB; M1
-step 1 adds ~1 file per driver subsystem, expect ELF to
-2.5-4 MB range by M1 mid-point) → docs/devlogs/
-2026-05-arsenal-smp.md § "What M1 looks like" (the M0
-exit devlog enumerates the M1 surface with one sentence
-per item; this HANDOFF expands each into a step) →
-git log --oneline -20 → run the sanity check below →
-propose step decomposition (or argue for a different
-shape) → wait for me to pick the first step → "go step 1"
-for code (or whatever the first step shorthand becomes),
-"draft step 1 HANDOFF" for the step-level kickoff document.
+build loop sacred, "no unsafe without // SAFETY: comment
+naming the invariant"; NVMe is the first M1 step and our
+unsafe blocks will multiply — MMIO reads, PRP physical-
+address conversions, DMA buffer transmutes) → STATUS.md
+(M0 complete, M1 active; the five posture changes from M0
+are load-bearing — especially "MMIO pages need explicit
+`paging::map_mmio` before access" which step 1 will repeat
+for the NVMe BAR) → docs/plan/ARSENAL.md § "M1 — Real iron"
+(third bullet: "NVMe driver (native Rust, ~5 K LOC)") →
+M1 milestone HANDOFF at git show 9df4682 § "First step —
+recommendation: M1 step 1 (NVMe)" + § "First driver target"
+trade-off (the milestone-level resolutions step 1 inherits) →
+NVMe spec 1.4 base (https://nvmexpress.org/specifications/);
+the M1-step-1 implementation targets 1.4 deliberately —
+broadly supported by every NVMe device in commodity hardware
+and what QEMU emulates by default → arsenal-kernel/src/pci.rs
+(M0 enumerate-and-print path; step 1 grows it to walk the
+PCIe capability list, find MSI-X, expose MSI-X table base +
+count to callers; pattern mirrors 3C's virtio modern PCI
+capability walk) → arsenal-kernel/src/virtio_blk.rs (the
+3C-3 model — single device, single queue, smoke reads sector
+0, asserts 0xAA55; M1-1's NVMe smoke follows the same shape
+at higher abstraction) → arsenal-kernel/src/idt.rs (M0's IDT
+is Lazy; step 1 adds a `register_vector` helper for dynamic
+vector allocation — NVMe wants one MSI-X vector per queue,
+not statically known at compile time) → arsenal-kernel/src/
+apic.rs (LAPIC EOI path; MSI-X delivers directly to LAPIC,
+bypassing IOAPIC — apic::send_eoi from 4-5 is reusable) →
+arsenal-kernel/src/frames.rs (DMA buffers need page-aligned
+physical memory; frame allocator hands out 4-KiB frames at
+known physical addresses) → arsenal-kernel/src/paging.rs
+(map_mmio for the NVMe BAR; hhdm_offset for the data buffer
+virt-to-phys conversion since heap-allocated buffers live in
+HHDM-mapped RAM) → arsenal-kernel/src/main.rs (boot order;
+nvme::smoke fits between virtio_net::smoke and net::init,
+matching virtio_blk's position) → ci/qemu-smoke.sh (add
+`-device nvme,serial=arsenal0,drive=nvme0`, a small raw
+backing file for nvme0, ARSENAL_NVME_OK sentinel) →
+Cargo.toml (no new dependencies at step 1; NVMe structs
+are register-shaped and ~200 LOC of bindings; we hand-write)
+→ git log --oneline -10 → run the sanity check below →
+propose 1-N commit shape (or argue for a different
+decomposition) → wait for me to pick → "go m1-1-N" for
+code, "draft m1-1-N" for paper deliverables.
 
 Where the project is
 
-  - HEAD: 9793487 (docs(devlogs): Arsenal SMP + M0 milestone
-    exit). Tagged arsenal-M0-complete. Working tree clean.
-    In sync with origin/main. The Field OS arc's
-    M0-complete / M1-complete / M2-complete tags coexist on
-    earlier commits (the C arc, preserved at field-os-v0.1).
+  - HEAD: 9df4682 (docs(handoff): kick off M1 (real iron)).
+    Working tree is clean except this file. main is one
+    commit ahead of origin/main; this HANDOFF makes it two.
+    Push when 1-0 is about to kick off so the milestone +
+    step HANDOFFs both land together on origin.
 
-  - Kernel: 22 .rs files (acpi, apic, cpu, fb, fb_font,
-    frames, gdt, heap, idt, ioapic, irq, kbd, main, net,
-    paging, pci, rand, sched, serial, shell, smp, task,
-    virtio, virtio_blk, virtio_net) at ~5,900 LOC plus the
-    Spleen font + small smoke harness. ELF release 1.52 MB,
-    ISO 19.3 MB.
+  - Kernel: 22 .rs files at M0 exit. Step 1 adds two new
+    files (nvme.rs, plus a small extension to pci.rs that
+    grows enough to deserve its own section but probably
+    stays in pci.rs). Expected LOC growth: ~600-800 LOC in
+    nvme.rs at step exit (well under the ~5K LOC ARSENAL.md
+    estimate — M1 step 1 targets *minimal correct NVMe*,
+    not feature-complete; more features accrue in later
+    steps if needed for amdgpu/iwlwifi storage paths or
+    M1 step 6's real-hardware install medium). pci.rs
+    grows ~150 LOC for the MSI-X capability walker.
+    idt.rs grows ~50 LOC for vector registration.
 
-  - Smoke: 13 required sentinels, ~1.2-1.5 s on QEMU TCG
-    with -smp 4. Boot→prompt 94 ms (budget 3000 ms). The
-    sentinel list at M0 exit:
-    ARSENAL_BOOT_OK / HEAP_OK / FRAMES_OK / BLK_OK /
-    NET_OK / SCHED_OK / TCP_OK / TLS_OK / TIMER_OK /
-    ACPI_OK / IOAPIC_OK / SMP_OK / PROMPT_OK.
+  - ELF: 1.52 MB at M0 exit. Step 1 likely adds ~30-50 KB
+    (mostly nvme.rs's lookup tables and the new IRQ
+    handler).
 
-  - Toolchain: nightly-2026-04-01 pinned in
-    rust-toolchain.toml. M1's first new toolchain dependency
-    is likely Slint at step 7; the rest of M1 is driver work
-    that doesn't push the toolchain frontier.
+  - Smoke at M0 exit: 13 sentinels, ~1.2-1.5 s on QEMU
+    TCG with -smp 4. Boot→prompt 94-108 ms. Step 1 adds
+    one sentinel (ARSENAL_NVME_OK), brings total to 14.
 
-  - Vendored crates at M0 exit: limine 0.5,
-    linked_list_allocator 0.10, spin 0.10, x86_64 0.15,
-    smoltcp 0.12, rustls 0.23, rustls-rustcrypto 0.0.2-alpha,
-    getrandom 0.4 + 0.2, bitflags 2. All BSD / MIT / Apache-2.0
-    / ISC — clear under CLAUDE.md §3. M1 grows this list:
-    pci-types (BSD/MIT, structured PCIe config parsing) and a
-    Slint runtime crate at step 7 are the likely first
-    additions; per-driver shim source files for inherited
-    Linux code retain GPLv2 in their original form per
-    CLAUDE.md §3 / the FreeBSD drm-kmod pattern.
+  - Toolchain: nightly-2026-04-01. No changes for step 1.
 
-  - QEMU smoke command line at M0 exit:
+  - QEMU command line at step 1 exit (proposed):
     `-cdrom $ISO -m 256M -smp 4 -machine q35 -accel tcg
     -cpu max -device virtio-rng-pci
     -drive file=$ISO,if=none,id=blk0,format=raw,readonly=on
     -device virtio-blk-pci,drive=blk0
+    -drive file=$NVME_BACKING,if=none,id=nvme0,format=raw
+    -device nvme,serial=arsenal0,drive=nvme0
     -netdev user,id=net0
     -device virtio-net-pci,netdev=net0
     -display none -no-reboot -no-shutdown
     -serial file:$SERIAL_LOG -d guest_errors -D $QEMU_LOG`.
-    M1 step 1 (NVMe) replaces `-device virtio-blk-pci` with
-    `-device nvme,serial=arsenal0,drive=blk0`.
+    The `$NVME_BACKING` file is a small (1 MiB) raw image
+    the smoke creates via `dd if=/dev/zero ... bs=1M count=1`
+    with the MBR signature written at byte 510 — same
+    pattern 3C used to validate virtio-blk's sector 0 read.
 
-  - Real hardware: not yet purchased. ARSENAL.md commits to
-    Framework 13 AMD as the v1.0 configuration target. The
-    purchase timing is one of the milestone-level trade-offs
-    below; recommend purchase mid-M1 (after step 1 NVMe is
-    stable in QEMU) so the first real-hardware boot has a
-    storage path that works.
-
-M1 — proposed step decomposition
+M1 step 1 — proposed sub-block decomposition
 
 The plan below is the kickoff proposal, not gospel. The user
-picks; deviations get justified before code lands. M1's eight
-steps roughly correspond to the seven ARSENAL.md deliverables
-plus a milestone-close step at the end. The first three steps
-are QEMU-only (no real-hardware dependency); steps 4-7 need
-the Framework 13 AMD; step 8 is the milestone exit.
+picks; deviations get justified before code lands. Step 1
+decomposes into six sub-blocks (the M0 step 3 cadence —
+~one per week at part-time pace, six weeks total fits inside
+the milestone HANDOFF's 4-6 week budget with one slack week
+for real-hardware-style surprises QEMU surfaces).
 
-  **Step 1 — NVMe native Rust (~5K LOC).** First M1 driver.
-  Native Rust per ARSENAL.md; no LinuxKPI dependency. The
-  smallest useful M1 driver and the first to exercise the
-  PCIe configuration / MSI-X / DMA paths every other driver
-  also needs. Outcome: kernel can boot from a real NVMe disk
-  in QEMU. Smoke gains ARSENAL_NVME_OK and the QEMU command
-  line swaps virtio-blk for `-device nvme`. Calendar budget:
-  4-6 weeks at part-time pace. Use **go m1-1** for kickoff.
+  **(M1-1-0) PCIe MSI-X capability enumeration.** Extend
+  `arsenal-kernel/src/pci.rs` to walk the PCIe capability
+  list and recognize MSI-X (capability ID 0x11). For each
+  device with MSI-X, decode the Message Control field (table
+  size, function mask, enable), record the table BAR + offset,
+  and expose a `pci::msix_info(bdf) -> Option<MsixInfo>`
+  getter. The capability walk pattern is already established
+  by 3C's virtio modern PCI transport (vendor-specific
+  capability ID 0x09); MSI-X is a different ID but the same
+  walk shape. Also adds `idt::register_vector(handler) -> u8`
+  — a small dynamic allocator over a fixed range of vectors
+  (recommend 0x40..0xEF, leaving the M0 ones 0x21/0xEF/0xFF
+  unchanged). Step exit observation: pci scan logs every
+  device's MSI-X presence + table size. No new sentinel.
+  ~150 LOC pci.rs + ~50 LOC idt.rs + ~10 LOC main.rs. One
+  commit: `feat(kernel): PCIe MSI-X capability + dynamic
+  IDT vector allocation`. Use **go m1-1-0**.
 
-  **Step 2 — LinuxKPI shim foundation + tiny inherited
-  driver.** Build the smallest viable shim surface that
-  satisfies one inherited driver — recommend a simple Linux
-  driver as the first target (a virtio-balloon driver, or a
-  small Intel NIC driver from net/ethernet/intel/e1000 —
-  decide at the step kickoff). The shim covers printk-style
-  logging, kmalloc / kfree against our heap, GFP_KERNEL
-  flags as no-ops, struct device + driver registration,
-  pci_register_driver / pci_unregister_driver, IRQ
-  registration via our IDT / IOAPIC, basic locking
-  (spinlock_t / mutex_t mapping to spin::Mutex). DMA bounce
-  buffers wait for amdgpu / iwlwifi. The driver source files
-  retain GPLv2; the shim is BSD-2; the combined work ships
-  with explicit license boundaries (the FreeBSD drm-kmod
-  precedent). Calendar budget: 12-20 weeks — this is
-  ARSENAL.md's "single largest engineering task" and the
-  estimate is loose. Use **go m1-2**.
+  **(M1-1-1) NVMe device discovery + BAR mapping + register
+  primitives.** Adds `arsenal-kernel/src/nvme.rs`. Scans for
+  the NVMe controller (class code 0x01:0x08:0x02 — mass
+  storage / NVMe / NVMe I/O); BAR0 (64-bit MMIO) is mapped
+  via `paging::map_mmio` to 0x4000 bytes (covers the
+  controller registers + first 31 sets of queue doorbells —
+  doorbell stride DSTRD from CAP.DSTRD widens this if needed
+  at 1-2). Defines the spec-required register offsets (CAP
+  0x00 64-bit, VS 0x08 32-bit, CC 0x14 32-bit, CSTS 0x1C
+  32-bit, AQA 0x24 32-bit, ASQ 0x28 64-bit, ACQ 0x30 64-bit,
+  doorbell base 0x1000) and read/write helpers. Reads
+  + logs CAP (MQES = max queue entries supported, DSTRD =
+  doorbell stride, CSS = command set support, MPSMIN /
+  MPSMAX = page size support range) and VS (NVMe spec
+  version — expect 1.4 from QEMU's default). Asserts
+  MPSMIN ≤ 12 (so 4-KiB host pages are supported) and CSS
+  bit 0 set (NVM command set supported). No queues built
+  yet. ~200 LOC. One commit: `feat(kernel): NVMe device
+  discovery + BAR mapping`. Use **go m1-1-1**.
 
-  **Step 3 — xHCI USB driver.** Per ARSENAL.md "evaluate at
-  start" — the native-Rust-vs-LinuxKPI choice is the
-  load-bearing trade-off below. Native Rust is the cleaner
-  shape; the Linux xhci-hcd port via the shim from step 2
-  is the broader-shim-validation shape. Recommend native
-  Rust at step kickoff; revisit if scope blows up. Outcome:
-  USB keyboard works post-Limine, USB mass storage works
-  for installer / live USB. Calendar budget: 6-10 weeks
-  native, 4-8 weeks LinuxKPI port (less code, more shim
-  surface). Use **go m1-3**.
+  **(M1-1-2) Controller reset + admin queue + Identify.**
+  Disables the controller (CC.EN = 0; spin on CSTS.RDY → 0),
+  allocates two physically-contiguous 4-KiB pages from the
+  frame allocator for the admin submission queue (64 entries
+  × 64 bytes) and admin completion queue (64 entries × 16
+  bytes), writes ASQ + ACQ + AQA (queue sizes, both 63 in
+  the zero-based queue-depth fields), configures CC
+  (IOSQES = 6 → 64-byte SQ entries, IOCQES = 4 → 16-byte CQ
+  entries, MPS = 0 → 4-KiB pages, CSS = 0 → NVM command set,
+  AMS = 0 → round-robin arbitration), enables (CC.EN = 1;
+  spin on CSTS.RDY → 1). Then submits Identify Controller
+  (CNS = 1) and Identify Namespace (CNS = 0, NSID = 1) via
+  the admin queue using polled completion (the I/O queue
+  IRQ wiring is at 1-4; admin queue completion polling
+  is fine at this stage — admin commands are rare and
+  blocking). Logs the disk serial, model, FR (firmware
+  revision), NN (namespace count), and the namespace 1's
+  NSZE (size in logical blocks) + LBADS (LBA data size,
+  typically 9 for 512-byte sectors). ~300 LOC. One commit:
+  `feat(kernel): NVMe controller reset + admin queue +
+  Identify`. Use **go m1-1-2**.
 
-  **Step 4 — amdgpu KMS via LinuxKPI shim.** The headlining
-  driver. Brings up Framework 13 AMD's integrated GPU
-  (Phoenix / Hawk Point / Strix Point depending on SKU)
-  enough to produce a framebuffer at native resolution.
-  KMS only — no Vulkan, no DRI, no 3D acceleration. amdgpu
-  also needs DMA bounce buffers, scatter-gather lists,
-  i2c bus access, ACPI methods (AML interpretation) for
-  ATIF / WMI handshake — the shim grows significantly at
-  this step. Firmware blobs (sienna_cichlid_sdma.bin etc.)
-  require provenance documentation. Calendar budget: 12-16
-  weeks. **This is the step most likely to surface
-  fundamental shim design issues that ripple back to step 2.**
-  Use **go m1-4**.
+  **(M1-1-3) I/O queue creation + first sector read (polled).**
+  Creates one I/O completion queue (CID = 1, size 64, IRQ
+  vector field zero — interrupts come at 1-4; this stage
+  uses polled completion) via the admin Create-I/O-CQ
+  command (opcode 0x05), then one I/O submission queue
+  (QID = 1, CQID = 1, size 64) via Create-I/O-SQ (opcode
+  0x01). Submits a Read command (opcode 0x02) on the I/O
+  queue with NSID = 1, SLBA = 0, NLB = 0 (one block, NLB
+  is zero-based), PRP1 = physical address of a 4-KiB
+  frame-allocated buffer. Polls the I/O completion queue
+  for the doorbell-updated phase tag flip, reads the
+  buffer, asserts the MBR signature 0xAA55 at byte offset
+  510 (same as 3C's virtio-blk smoke). Emits
+  ARSENAL_NVME_OK. ~250 LOC. One commit:
+  `feat(kernel): NVMe I/O queue + sector 0 read (polled)`.
+  Use **go m1-1-3**. **This is the sub-block that closes
+  the ARSENAL.md step-1 outcome ("first M1 driver works").**
+  1-4 / 1-5 are quality-of-implementation follow-ups.
 
-  **Step 5 — iwlwifi + mac80211 via LinuxKPI.** Wireless.
-  mac80211 is Linux's 802.11 stack (~50K LOC); iwlwifi is
-  Intel's wifi driver (~30K LOC). Plus the firmware blob.
-  Note: Framework 13 AMD ships with either an AMD-branded
-  Mediatek MT7921 (mt76 driver) or an Intel AX210 (iwlwifi)
-  depending on configuration; the step-level HANDOFF picks
-  one based on the actual purchased SKU. WPA2/3 supplicant
-  (wpa_supplicant) is itself ~100K LOC in C; for M1 we
-  port the minimum subset needed for "associate to a
-  preconfigured network" (the ARSENAL.md M1 usability
-  gate). Calendar budget: 12-20 weeks. Use **go m1-5**.
+  **(M1-1-4) MSI-X interrupt wiring for the I/O queue.**
+  Converts the I/O queue's polled completion to MSI-X
+  interrupt-driven. Allocates one IDT vector via
+  `idt::register_vector` (from 1-0), writes the
+  corresponding MSI-X table entry (address = LAPIC fixed-
+  delivery address 0xFEE00000 with the BSP's APIC ID in
+  bits 12-19, data = vector + delivery mode 0 + level 0
+  + edge), unmasks the entry (clear bit 0 of vector
+  control), re-creates the I/O CQ with the vector field
+  set (the 1-3 path used vector=0 which is "no IRQ"; a
+  new Create-I/O-CQ command with the right vector is the
+  spec-clean reconfigure). Handler does the same work
+  the polled path did plus an apic::send_eoi at the end.
+  ~150 LOC. One commit: `feat(kernel): NVMe MSI-X
+  interrupts`. Use **go m1-1-4**.
 
-  **Step 6 — First boot on real Framework 13 AMD.** USB
-  installer, UEFI boot, Limine, kernel, all four drivers
-  from steps 1-5 running on real silicon. Expect a 2-4
-  week stabilization period for real-hardware quirks not
-  seen in QEMU. The ARSENAL.md performance gate (cold
-  boot to login < 8 s) is asserted here. Calendar budget:
-  4-8 weeks. **This step ends most ambiguity about the
-  hardware purchase timing — see logistics below.** Use
-  **go m1-6**.
+  **(M1-1-5) STATUS refresh + step 1 devlog + step 2
+  HANDOFF kickoff.** STATUS flips step 1 from "next" to
+  "complete," promotes step 2 (LinuxKPI shim foundation)
+  to "active," and writes the step 1 retrospective
+  sub-section (what NVMe quirks QEMU surfaced, what the
+  M0 → M1 pattern shifts looked like in practice, how
+  close the LOC came to ARSENAL.md's ~5K estimate).
+  Devlog at `docs/devlogs/2026-NN-arsenal-nvme.md` (NN =
+  whatever month the step actually exits) records the
+  controller-reset sequence's delicate moments (the
+  CSTS.RDY polling timing, the AQA / ASQ / ACQ write
+  ordering subtleties), the polled-vs-MSI-X trade-off
+  resolution (polled first at 1-3, MSI-X at 1-4 — the
+  HANDOFF's recommendation), the PCIe MSI-X capability
+  walk addition to pci.rs as a foundation step 3+ will
+  also consume, and the "this is what M1 step 1 looked
+  like" summary. Two commits: `docs(status): M1 step 1
+  complete, step 2 (LinuxKPI shim foundation) next` and
+  `docs(devlogs): Arsenal NVMe`. Use **go m1-1-5** for
+  STATUS, **draft m1-1-5-devlog** for the devlog.
 
-  **Step 7 — Slint app on software-rendered framebuffer.**
-  First "modern UI" on top of M0's fb console. Slint is
-  the Rust UI framework ARSENAL.md commits to (MIT/Apache
-  dual-licensed; commercial license for proprietary apps
-  also available — our use is open-source so MIT path).
-  Software-rendered means no GPU acceleration — paint
-  pixels to our fb directly. Likely a single "settings
-  app" or "system info" widget at M1; richer apps wait
-  for M2's Stage compositor. Calendar budget: 4-8 weeks.
-  Use **go m1-7**.
+Realistic session-count estimate. M1's cadence is week-
+scale, not day-scale (M1 milestone HANDOFF note #3). 1-0
+is half-a-week to a week (the MSI-X capability walk is
+mechanical against the spec but the dynamic IDT vector
+allocator is one of those "easy to get right and
+catastrophic to get wrong" pieces — get it reviewed before
+shipping). 1-1 is one focused session if the BAR mapping
+goes cleanly; two if NVMe's CAP register reads zero (a
+common bring-up bug — the BAR is 64-bit so the cap-read
+needs `lapic_read`-shaped 64-bit MMIO access, not 32-bit
+× 2 with the wrong byte order). 1-2 is the spec-rich
+session — most of the M1 step 1 code lands here. 1-3 is
+the cathartic session — first real NVMe I/O. 1-4 is one
+session (MSI-X is straightforward once 1-0's foundations
+are in). 1-5 is the milestone-style paper session. Calendar
+budget per the milestone HANDOFF: 4-6 weeks at part-time.
 
-  **Step 8 — M1 milestone exit.** STATUS retrospective,
-  devlog at docs/devlogs/2026-NN-arsenal-real-iron.md (or
-  per-step devlogs aggregated; pattern decided at step
-  kickoff), arsenal-M1-complete tag. The M1 retrospective
-  documents the LinuxKPI shim's final shape (how big it
-  grew, which Linux APIs were stubbed vs full vs not-
-  needed), what surprises showed up on real hardware, and
-  what posture changes carry to M2 (Stage compositor will
-  consume the M1 amdgpu KMS output through DRM dumb
-  buffers, or via the framebuffer path if KMS doesn't pan
-  out). Use **go m1-8** for STATUS + tag, **draft
-  m1-8-devlog** for the devlog.
+Step-level trade-off pairs
 
-Calendar arithmetic. ARSENAL.md M1 budget is months 9-24 —
-15 months. Step budgets sum: 4+12+6+12+12+4+4 = 54 weeks of
-focused work, ~62 weeks at part-time (CLAUDE.md ×2.3) = 14
-months. Sits inside the budget with a 1-month slack for
-real-hardware surprises and revision cycles. Loose budgets
-(amdgpu 12-16, iwlwifi 12-20, shim 12-20) absorb most of
-the variance; expect one of those three to blow out by
-50-100% and not be alarming.
+  **MSI-X first vs polled completion first.**
+  (i) **Polled completion at 1-3, MSI-X follow-up at 1-4.**
+  Smaller surface per sub-block; 1-3 is independently
+  smoke-verifiable (ARSENAL_NVME_OK fires off the polled
+  path); 1-4 converts to interrupt-driven without
+  rebuilding the queue from scratch (Create-I/O-CQ is
+  re-issuable per the NVMe spec). Bisect-rich.
+  (ii) **MSI-X from the start.** 1-3 lands the I/O queue
+  with MSI-X already wired; 1-4 doesn't exist; the step
+  becomes 5 sub-blocks instead of 6. Slightly less code
+  total but a larger 1-3 sub-block (combining queue setup +
+  IRQ wiring + sector read in one commit).
+  Recommend (i). Polled-first is the conventional NVMe
+  bring-up pattern; Linux's nvme-pci.c does the same in
+  its setup path. The bisect granularity from splitting
+  matters more than the small commit-count win from
+  combining.
 
-M1 sub-block-vs-step-level cadence. M0 had a HANDOFF per
-step with sub-block-per-devlog cadence inside. M1 steps are
-larger and probably want internal sub-block decomposition
-in their per-step HANDOFFs (M1-1 NVMe will decompose into:
-PCIe config parsing, MSI-X setup, admin queue, I/O queues,
-IRQ wiring, smoke validation — 5-6 sub-blocks; M1-2 LinuxKPI
-shim will decompose into: types, allocators, IRQ, locks,
-PCI, device — 6-8 sub-blocks). The HANDOFF.md file follows
-the M0 pattern: overwritten at each step kickoff.
+  **Number of I/O queue pairs.**
+  (i) **Single shared I/O queue.** One submission + one
+  completion queue, all CPUs submit through it. Single
+  MSI-X vector. Simple. M0/M1-scale workload doesn't
+  saturate; Linux's nvme-pci defaults to one queue per
+  online CPU but that's overkill until a workload needs
+  parallel disk I/O.
+  (ii) **One I/O queue per CPU.** SMP-friendly; matches
+  Linux's default. Requires per-CPU vector allocation,
+  per-CPU SQ tail tracking, per-CPU CQ phase tag bits.
+  Bigger surface; not justified at M1.
+  Recommend (i) at step 1. The HANDOFF for step 2+ can
+  revisit if amdgpu / iwlwifi's storage paths surface a
+  parallel-I/O demand. M2's Stage compositor will need
+  the per-CPU queues for graceful UI under load, but
+  that's M2.
 
-First step — recommendation: M1 step 1 (NVMe)
+  **DMA buffer source.**
+  (i) **Frame allocator** (page-aligned 4-KiB frames at
+  known physical addresses; HHDM-mapped virtual access
+  for the kernel side). Step 1's queues and sector-read
+  buffer all come from FRAMES.
+  (ii) **Heap-allocated** (variable size, alignment via
+  `core::alloc::Layout`). Sufficient for queues but the
+  NVMe spec requires page-aligned buffers for PRP1; heap
+  alignment would need explicit support.
+  Recommend (i). Frame allocator is the right primitive
+  for DMA — that's what frame allocators exist for. Heap
+  for everything else; frames for DMA / queues. Pattern
+  carries forward through every M1 driver.
 
-Why NVMe first, not amdgpu (the headliner) or the LinuxKPI
-shim (the foundational piece)?
+  **Driver file layout.**
+  (i) **Single nvme.rs file.** All step 1 code lives in
+  one file (~600-800 LOC at step exit). Easy to navigate.
+  (ii) **nvme/ module directory** with admin.rs, io.rs,
+  registers.rs. More organized; over-organized at the
+  M1-step-1 LOC scale.
+  Recommend (i). M0 pattern is one file per subsystem;
+  preserve until a file genuinely outgrows 1500-2000 LOC.
+  At M1 step 4 (amdgpu) and step 5 (iwlwifi) the
+  directory-per-driver shape will be appropriate.
 
-  - **Bounded scope.** ARSENAL.md says ~5K LOC. NVMe spec
-    is public, well-documented, with mature reference
-    implementations (Linux, FreeBSD, Redox). The driver
-    is fundamentally a queue-pair I/O scheduler — much
-    smaller than amdgpu (~500K LOC in Linux).
-  - **Zero shim dependency.** Native Rust, no LinuxKPI.
-    Step 1 unblocks itself; the shim shape can wait until
-    we have at least one driver's worth of "what does a
-    Rust driver in Arsenal actually look like" experience.
-  - **Validates PCIe + MSI-X paths.** Every other M1
-    driver needs these. NVMe is the smallest surface to
-    exercise them.
-  - **Useful outcome.** Kernel can boot from real disk
-    (via QEMU's nvme device first; via real Framework
-    NVMe at step 6). Replaces M0's virtio-blk dependence
-    on QEMU.
-  - **No real-hardware blocker.** All of step 1 happens
-    in QEMU. Hardware purchase can wait until step 4 or
-    later.
+  **Sentinel granularity.**
+  (a) **Single ARSENAL_NVME_OK** at 1-3 (polled sector
+  read completes). 1-4's MSI-X conversion uses the same
+  sentinel — same property asserted, different path.
+  (b) **Two sentinels**: ARSENAL_NVME_OK at 1-3 (polled),
+  ARSENAL_NVME_IRQ_OK at 1-4 (MSI-X). Per-sub-block
+  granularity in CI.
+  (c) **Three sentinels**: add ARSENAL_NVME_ADMIN_OK at
+  1-2 (admin queue + Identify complete).
+  Recommend (a). NVMe-as-a-whole has one observable
+  property at M1 step 1: "kernel can read sector 0 of an
+  emulated NVMe disk." That maps to one sentinel. 1-4's
+  conversion is a code-path change, not a new property —
+  the same sentinel firing through a different path is
+  equivalent evidence.
 
-What step 1 would touch:
+  **Replace virtio-blk in the smoke vs additive.**
+  (i) **Additive** — keep virtio-blk for boot + the BLK_OK
+  sentinel; add NVMe alongside. Smoke command line grows.
+  (ii) **Replace** — drop virtio-blk, NVMe handles both the
+  driver demonstration and (eventually) the boot path.
+  Need to remove the BLK_OK sentinel + virtio_blk::smoke
+  call site.
+  Recommend (i) at step 1. virtio-blk works; removing it
+  is unmotivated at this point. Real-hardware Framework 13
+  AMD doesn't have virtio-blk, so step 6 (real-iron boot)
+  is the natural deletion point — but step 6 also needs
+  the install-medium boot path which Limine handles, not
+  virtio-blk. Defer the virtio-blk deletion to a polish
+  commit post-step-1, not blocking on it.
 
-  - `arsenal-kernel/src/nvme.rs` (new, ~5K LOC target;
-    smaller is better — Linux's nvme-core.c is ~6K LOC
-    and supports far more than M1 needs).
-  - `arsenal-kernel/src/pci.rs` (existing PCI scanner
-    needs to grow MSI-X capability discovery; M0 PCI only
-    enumerates and pretty-prints).
-  - `arsenal-kernel/src/apic.rs` (IRQ vector allocation
-    becomes dynamic; NVMe wants per-queue vectors, no
-    longer a fixed 0xEF / 0xFF / 0x21 set).
-  - `arsenal-kernel/src/ioapic.rs` (MSI-X bypasses IOAPIC
-    — MSI-X messages go directly to LAPIC. IOAPIC stays
-    for legacy IRQs only).
-  - `arsenal-kernel/src/idt.rs` (vectors allocated at
-    runtime; the Lazy IDT needs a registration API for
-    M1+).
-  - `ci/qemu-smoke.sh` (swap virtio-blk for nvme; add
-    ARSENAL_NVME_OK sentinel).
-  - `Cargo.toml` (likely no new deps for step 1; NVMe
-    structs are small enough to hand-write).
+  **NVMe spec version target.**
+  (i) **1.4** — broadly supported in commodity hardware
+  (2019-spec, every current consumer NVMe SSD shipped in
+  the last 5+ years implements 1.4 or later). QEMU
+  emulates 1.4 by default. Most spec features M1 step 1
+  needs are 1.0-era; 1.4 brings only features we don't
+  consume (Persistent Event Log, Sanitize, etc.).
+  (ii) **2.0** — newer spec; some additions M2+ might
+  want (Zoned Namespaces, Endurance Groups). Adds parser
+  complexity for an M1 step that doesn't need it.
+  Recommend (i). Target 1.4 explicitly; fall back to 1.0
+  patterns if QEMU's emulated controller reports an older
+  version. M1 step 1 reads the VS register and asserts
+  ≥ 1.0; no behavior change based on version.
 
-Milestone-level trade-off pairs
-
-The 10 trade-offs whose resolution shapes M1 most. Steps 1-7
-each have step-level trade-off pairs in their own HANDOFFs;
-these are the milestone-spanning ones.
-
-  **LinuxKPI shim strategy.**
-  (i) **Incremental per-driver-need.** Build only what the
-  current driver target requires; grow when the next driver
-  exercises new API. Smaller shim surface at any point in
-  time; lower upfront cost; per-driver scope-creep risk.
-  (ii) **Structural FreeBSD-modeled foundation.** Port the
-  drm-kmod shim's structural skeleton (types, headers, the
-  20-30 most-used APIs) up front; per-driver work fills in
-  details. Larger upfront cost; lower per-driver scope-creep.
-  (iii) **Hybrid.** Structural for the foundational types
-  (printk, kmalloc, gfp_t, struct device, dma_addr_t) and
-  the PCIe / IRQ / locking APIs; incremental for everything
-  else (i2c, ACPI methods, scatter-gather, bouncing).
-  Recommend (iii). The "load-bearing 30 APIs every driver
-  uses" come up front; the long tail of per-driver-specific
-  APIs grow as needed. FreeBSD's drm-kmod is the precedent;
-  Asahi's m1n1 + the Asahi kernel team's documentation of
-  Linux driver porting is the secondary reference. This is
-  the step-2 trade-off but recording the milestone-level
-  decision here.
-
-  **First driver target.**
-  (i) **NVMe (native Rust, ~5K LOC).** Recommended above.
-  (ii) **amdgpu (LinuxKPI port).** Headlining; biggest
-  proof-of-concept for the shim. But it requires step 2's
-  shim first, and the failure-mode-surface area is huge.
-  (iii) **xHCI (either native Rust or LinuxKPI port).**
-  Useful — unlocks USB keyboards and mass storage for the
-  install-on-real-hardware path. But xHCI's spec is more
-  complex than NVMe's; ARSENAL.md flags the "evaluate at
-  start" decision specifically.
-  Recommend (i). NVMe is the smallest useful driver with
-  zero dependencies on the rest of M1. amdgpu first would
-  collapse the shim into amdgpu's specific needs; xHCI
-  first overlaps with the keyboard story (M0's PS/2 still
-  works on QEMU and on real hardware Framework offers via
-  legacy controller).
-
-  **xHCI shape — native Rust vs LinuxKPI port.**
-  (i) **Native Rust.** Cleaner — direct against our IRQ /
-  DMA / device-registration primitives. ~10-15K LOC. The
-  Redox xhci crate (MIT) and Theseus's xhci module are
-  prior Rust art; vendoring isn't out of the question if
-  CLAUDE.md §3 license checks pass.
-  (ii) **LinuxKPI port of xhci-hcd.** ~20K LOC of C goes
-  unchanged; the shim covers it. Faster to get working;
-  exposes more shim surface (USB-specific APIs like
-  usb_hcd_ops which amdgpu / NVMe don't exercise).
-  Recommend evaluation at step 3 kickoff, not here. Both
-  are viable; the choice depends on how step 2 leaves the
-  shim shaped. If the shim has clean USB-bus support
-  already from some other driver pulled in at step 2, (ii)
-  is cheap. If not, (i) is the cleaner path. Defer.
-
-  **Real-hardware purchase timing.**
-  (i) **Now (start of M1).** Buy the Framework 13 AMD
-  before step 1 begins. Use it for cross-checking each
-  step's QEMU output against real silicon as we go.
-  Highest cost (sits idle through steps 1-3); highest
-  early-failure-mode visibility.
-  (ii) **End of step 3** (post-NVMe, post-shim foundation,
-  post-xHCI). Buy when we have a kernel that's at least
-  plausibly bootable on real iron. Most of M1's surface
-  still ahead.
-  (iii) **End of step 5** (post-iwlwifi). Buy when the
-  driver lineup is complete and we just need to validate
-  real-iron boot.
-  Recommend (ii). End-of-step-3 gives us NVMe (storage),
-  the shim foundation (whatever it ends up looking like),
-  and xHCI (USB for the install medium). amdgpu KMS and
-  iwlwifi are the final steps that benefit most from
-  real-hardware feedback. Buying earlier than step 3 risks
-  the laptop sitting idle while we work in QEMU; buying
-  later than step 3 means amdgpu development is
-  QEMU-only-with-poor-fidelity (QEMU's amdgpu emulation
-  doesn't exercise real GPU hardware). Specific SKU:
-  Framework 13 AMD Ryzen AI 7 350 (Strix Point) at the
-  expected purchase date in mid-2026; choose lid color
-  and memory at order time.
-
-  **Continuous integration on real iron.**
-  (i) **Manual sessions, document each.** When real
-  hardware arrives, each step's exit criterion includes
-  a "boots on real hardware and prints the expected
-  output" manual checkpoint, recorded in the step's
-  devlog. No automated CI on real hardware.
-  (ii) **Dedicated runner.** Set up the Framework as a
-  CI runner with network boot + serial console. Run the
-  smoke automatically on every push.
-  (iii) **Hybrid:** QEMU CI on every push (today's
-  setup), real-iron CI nightly or per-merge.
-  Recommend (i) at M1 start, revisit at step 6 when the
-  Framework arrives. CI infrastructure on the Framework
-  takes its own engineering surface (PXE boot, serial
-  console capture, power cycling, fault recovery) and
-  isn't justified until M1 has a stable real-iron boot
-  path. Manual sessions are honest: real-iron tests in
-  the M1 devlogs are user-runnable, not pretending to
-  be CI.
-
-  **MSI-X / IRQ model evolution.**
-  (i) **Static IDT, dynamic vector allocation.** Keep
-  M0's Lazy<IDT> static; add a `idt::allocate_vector()`
-  helper that returns the next unused vector + installs
-  the handler. NVMe asks for one vector per queue; the
-  allocator hands them out. Simple, fits M0's shape.
-  (ii) **Per-CPU IDT.** Each CPU has its own IDT (Linux
-  does this). More flexible for SMP IRQ routing; bigger
-  refactor; not justified for M1's single-machine
-  workload.
-  (iii) **MSI-X routes to specific LAPIC vectors only;
-  IOAPIC stays for legacy IRQs.** Already implied by 4-3;
-  here we just confirm.
-  Recommend (i) at M1 — keeps the M0 shape and adds the
-  smallest helper that NVMe needs. Step 1 HANDOFF will
-  spec this concretely.
-
-  **First inherited driver at step 2.**
-  (i) **virtio-balloon.** Tiny (~600 LOC in Linux); pure
-  virtio-bus interaction; lets us validate the shim's
-  PCIe + IRQ + device-registration paths without any
-  fancy DMA / scatter-gather / firmware loading.
-  (ii) **e1000 (Intel gigabit Ethernet).** Bigger (~3000
-  LOC); needs DMA descriptor rings, ethtool stubs,
-  netdev registration. Better stress test of the shim.
-  (iii) **8250 serial driver from Linux.** Tiny but
-  conflicts with our existing serial.rs; not useful as a
-  shim validator.
-  Recommend (i). virtio-balloon is the smallest useful
-  inherited driver that exists in the Linux tree; it
-  exercises the shim without taking on stream-of-data
-  surface that's better validated at step 3 (xHCI) or
-  step 4 (amdgpu). Pick at step-2 kickoff.
-
-  **Boot loader on real iron.**
-  (i) **Limine continues.** ARSENAL.md commits to Limine
-  for the BSP boot path; M0 confirmed it works for SMP
-  bring-up via MpRequest. Real-iron Limine is the same
-  binary as QEMU-Limine.
-  (ii) **Switch to systemd-boot or rEFInd.** Mature; well-
-  understood UEFI loaders. Loses our SMP integration via
-  MpRequest.
-  (iii) **Direct UEFI boot (no second-stage loader).**
-  Smallest dependency; biggest engineering cost (we'd be
-  writing our own bootloader).
-  Recommend (i). The M0 commitment stands; M1 inherits it
-  unchanged.
-
-  **Slint shape.**
-  (i) **Pure Slint software renderer.** ARSENAL.md
-  commits; Slint's software-rendered mode paints to a
-  pixel buffer that we route to our fb. ~50K LOC of
-  vendored Slint runtime (MIT/Apache, clear under
-  CLAUDE.md §3).
-  (ii) **Slint via direct DRM (when amdgpu KMS is up).**
-  Software-rendered through KMS framebuffer at native
-  resolution. Slightly more code but uses the GPU's
-  scanout path.
-  (iii) **Defer Slint entirely.** Stage at M2 absorbs the
-  UI surface; M1 Slint app is a "we proved Slint works"
-  exercise that doesn't ship to users.
-  Recommend (i) at step 7. ARSENAL.md commits to Slint;
-  software-renderer is the simplest M1 path; KMS-routed
-  rendering arrives naturally at M2 when Stage takes
-  over.
-
-  **Sub-step granularity within M1 steps.**
-  (a) **One devlog per sub-block** (M0 step 3 pattern —
-  3A through 3G each got a devlog).
-  (b) **One devlog per step** with sub-block detail
-  inside (M0 step 4 pattern — single devlog for the
-  whole step).
-  (c) **One devlog per cluster of related sub-blocks**
-  (e.g., the LinuxKPI shim at step 2 has 6-8 sub-blocks;
-  cluster as "shim foundation" / "PCI bridge" / "IRQ
-  bridge" / "DMA bridge" with one devlog each).
-  Recommend (c) for M1. Per-sub-block was right for M0's
-  daily-or-hourly cadence; M1 sub-blocks span weeks each
-  and the devlog cadence should match. Each step's
-  HANDOFF will set its own sub-block-to-devlog mapping;
-  step 8 (M1 retrospective) wraps the milestone-level
-  story.
+  **Sub-block granularity.**
+  (a) **Six-commit shape** above (MSI-X foundation + IDT
+  vector / device + BAR / reset + admin / I/O queue read /
+  MSI-X conversion / STATUS+devlog). Bisect-rich.
+  (b) **Five-commit shape** combining 1-0 with 1-1 (MSI-X
+  + IDT-vector tooling + NVMe device discovery in one
+  commit). Smaller history; harder to bisect if MSI-X
+  parsing has a subtle bug that surfaces at step 3 (xHCI)
+  three weeks later.
+  (c) **Four-commit shape** also combining 1-3 with 1-4
+  (single commit ships polled + MSI-X). Saves a commit
+  but loses the "polled smoke green before MSI-X
+  conversion" bisect point.
+  Recommend (a). MSI-X capability parsing in pci.rs is a
+  foundation step 3+ also consumes; making it a standalone
+  commit lets future bisection isolate "did the MSI-X
+  walker change?" cleanly. The 1-3 / 1-4 split similarly
+  protects the "polled NVMe works" property as a
+  standalone milestone.
 
 Sanity check before kicking off
 
-    git tag --list                          # arsenal-M0-complete now present
-    git log --oneline -10                   # 9793487 (HEAD), b535195, e2057de,
-                                            # 6a69383, 78b38e2, b6b3785,
-                                            # b70f0f2, f3f431e, 8b20132,
-                                            # 1b316c9
-    git status --short                      # clean except this file
+    git tag --list | grep arsenal             # arsenal-M0-complete
+    git log --oneline -10                     # 9df4682 (HEAD),
+                                              # 9793487, b535195,
+                                              # e2057de, 6a69383,
+                                              # 78b38e2, b6b3785,
+                                              # b70f0f2, f3f431e,
+                                              # 8b20132
+    git status --short                        # ?? HANDOFF.md (only,
+                                              # while drafting this)
+                                              # or clean once committed
     cargo build -p arsenal-kernel --target x86_64-unknown-none --release
-                                            # clean, ~1.52 MB ELF
+                                              # clean, ~1.52 MB ELF
     cargo clippy -p arsenal-kernel --target x86_64-unknown-none --release -- -D warnings
-                                            # clean
-    cargo xtask iso                         # arsenal.iso ~19.3 MB
-    ci/qemu-smoke.sh                        # ==> PASS (13 sentinels in ~1.2-1.5 s)
+                                              # clean
+    cargo xtask iso                           # arsenal.iso ~19.3 MB
+    ci/qemu-smoke.sh                          # ==> PASS (13 sentinels)
 
 Expected: HEAD as above; smoke PASSes with 13 sentinels;
-boot→prompt around 94 ms.
+boot→prompt around 100 ms.
 
-If the sanity check fails before the first M1 step kicks off,
-the likely culprits are toolchain (nightly-2026-04-01 still
-available?), CI environment (the smoke harness's Python TLS
-listener requires openssl in PATH on macOS), or a regression
-between M0 close and M1 start that the deferred bootloader
-reclaim from 4-2 surfaced under some new condition. Walk the
-M0 retrospective in STATUS § "Last completed milestone" for
-the load-bearing invariants.
+If 1-1 or 1-2 fails to make progress (controller doesn't go
+from disabled to ready), the likely culprits are:
 
-Out of scope for M1 specifically
+  (a) **CAP register read returns 0.** NVMe's CAP at offset
+  0x00 is 64-bit. If we read it as two 32-bit halves with
+  the wrong endianness or with the lapic_read-style 32-bit
+  helper that doesn't span 64-bit reads cleanly, the result
+  comes out garbage. The MMIO BAR for NVMe is mapped at the
+  HHDM offset like every other MMIO; the read pattern is
+  `core::ptr::read_volatile::<u64>` against the HHDM-virtual
+  base.
 
-  - **Vulkan / 3D acceleration.** amdgpu at M1 is KMS only.
-    Vulkan via radv (mesa) is M2 or v0.5.
-  - **Multi-monitor / multi-GPU.** Framework 13 AMD has one
-    GPU and one display; M1 is single-pipe single-monitor.
-  - **Bluetooth.** Framework 13 AMD ships with the WiFi
-    module also supporting Bluetooth; M1 wires Wi-Fi only.
-    BT stack is post-M1.
-  - **Touchpad gestures / multitouch.** Single-touch tap +
-    motion at M1 (via xHCI / HID); gesture recognition is
-    post-M1.
-  - **Suspend / resume.** Power-off and cold-boot are M1;
-    ACPI S3/S4 sleep and modern S0ix idle are M2+.
-  - **Battery / charge / thermal management.** Reads via
-    ACPI _BST / _BIF only at M1; thermal throttling
-    feedback into the scheduler is post-M1.
-  - **Audio.** No HDA driver at M1; Stage at M2 includes
-    audio routing.
-  - **File systems.** A read-only FAT32 / ext2 for the
-    install medium at M1 maximum; full-featured filesystems
-    (ext4 write, btrfs, ZFS) wait for v0.5+. ARSENAL.md
-    doesn't specify the M1 filesystem target; recommend
-    deferring until M1 step 6 (real-iron boot) makes it
-    necessary.
-  - **Container / sandbox runtime.** Cardboard Box at M2.
-  - **POSIX subset / libc compat.** relibc work is v0.5.
-  - **WebKitGTK / Servo / browser.** M2 / v0.5.
+  (b) **CC.EN write doesn't take effect.** CC at offset 0x14
+  is 32-bit; the EN bit (bit 0) is the controller's
+  enable / disable signal. Writing CC.EN = 1 while CC.EN was
+  already 1 (residual from firmware) is undefined per the
+  spec — must explicitly disable first (CC.EN = 0; spin
+  CSTS.RDY → 0; configure; CC.EN = 1; spin CSTS.RDY → 1).
+  The CSTS.RDY → 0 spin has no real-world timeout (QEMU
+  ~1ms, real hardware ~tens of ms); a `while_until_with_
+  bound` loop with a generous 1-second cap surfaces a wedged
+  controller before the smoke times out.
+
+  (c) **AQA / ASQ / ACQ written after CC.EN = 1.** Spec is
+  explicit: AQA, ASQ, ACQ must be programmed *before* CC.EN
+  flips to 1. The bring-up sequence is fixed: disable →
+  program admin queue → enable.
+
+  (d) **Admin queue physical address misaligned.** ASQ
+  must point at a 4-KiB-aligned physical address; same for
+  ACQ. The frame allocator hands out 4-KiB-aligned frames
+  by definition, so just pass `frames::FRAMES.alloc_frame
+  ().start_address().as_u64()` straight through — no
+  manual alignment.
+
+  (e) **Doorbell write missing on submission.** SQ tail
+  doorbell at offset 0x1000 + 2 * SQID * (4 << DSTRD) must
+  be written after staging a command in the SQ — that's the
+  "tell the controller new work is available" signal. The
+  classic bring-up bug: stage the command, never doorbell,
+  controller idles forever. Polled completion checks the
+  CQ head doorbell shape, *not* whether the controller
+  noticed the SQ update.
+
+  (f) **CQ phase tag flip not handled.** Each I/O completion
+  flips a "phase" bit so the driver can tell new completions
+  from stale buffer contents. Initial phase is 1; first
+  completion sets phase to 1 (queue zero-initialized);
+  subsequent wrap-arounds flip phase to 0, 1, 0, etc. The
+  polled completion loop must track the expected phase per
+  queue and compare against the CQ entry's phase field.
+
+  (g) **MSI-X table BAR confusion.** MSI-X tables live in
+  one of the device's BARs (NVMe usually puts them in BAR0
+  with an offset). The capability structure encodes which
+  BAR + what offset; 1-0's parser must extract both, not
+  assume BAR0+0. Step 1 logs the BAR + offset at 1-0 so
+  any mismatch surfaces in the boot log.
+
+Out of scope for step 1 specifically
+
+  - **Write paths.** Step 1 reads sector 0 only. Write
+    (opcode 0x01) and Flush (opcode 0x00) aren't needed
+    until step 6 (real-hardware install medium); add then.
+  - **Multi-namespace support.** Step 1 hardcodes NSID = 1.
+    NVMe spec allows up to 2^32 - 1 namespaces; commodity
+    consumer SSDs typically expose 1.
+  - **Multiple controllers.** Step 1 finds the first NVMe
+    PCI device and uses it; additional NVMe controllers
+    (multi-disk systems, NVMe-of-fabrics) are post-M1.
+  - **PCIe Hotplug.** Step 1 enumerates at boot only.
+  - **NVMe Set Features / Get Features past the bring-up
+    set.** Step 1 uses the default arbitration, default
+    power state, no power management. PM at M1 step 6+ or
+    M2 when power matters.
+  - **Asynchronous Event Notifications.** AEN polling is
+    Linux's monitor for SMART warnings, error log entries,
+    namespace attach/detach. Post-M1.
+  - **NVMe-MI** (Management Interface). BMC / out-of-band
+    management. Not consumer-hardware territory; permanently
+    out of scope.
+  - **NVMe-oF** (over Fabrics). Network NVMe. Not commodity
+    hardware; permanently out of scope.
+  - **Filesystem on the NVMe device.** Step 1 reads raw
+    sector 0. A filesystem driver (FAT32 read, ext2 read)
+    is M1 step 6 territory at the earliest, more likely
+    v0.5.
 
 Permanently out of scope (do not propose)
 
@@ -547,14 +496,12 @@ Permanently out of scope (do not propose)
   - Reverting any M0 commit. M0 closed and tagged.
   - Force-pushing to origin. Branch is in sync; preserve
     history.
-  - Dropping BSD-2-Clause license header from any new
-    Arsenal-base file. Inherited Linux driver files retain
-    GPLv2; the shim source files are BSD-2; explicit license
-    boundaries documented per CLAUDE.md §3.
-  - Pulling a GPL crate into the kernel base. Inherited
-    Linux drivers via the LinuxKPI boundary are the only
-    GPL path; vendored crates remain BSD / MIT / Apache /
-    ISC / zlib / SIL-OFL.
+  - Dropping BSD-2-Clause license header from any new file.
+    nvme.rs is BSD-2; nvme spec is openly available with
+    no copyright on protocol details.
+  - Pulling a GPL crate into the kernel base for NVMe. Linux
+    drivers via LinuxKPI is the only GPL path; NVMe is
+    native Rust per ARSENAL.md.
   - Religious framing. CLAUDE.md hard rule.
   - Reintroducing HolyC. ADR-0004's discard is final.
   - Going back to stable Rust.
@@ -563,84 +510,64 @@ Permanently out of scope (do not propose)
 
 Three notes worth flagging before you go
 
-  1. **The LinuxKPI shim is a 12-20 week single block of
-     work that doesn't ship anything user-visible on its
-     own.** This is the morale-load-bearing piece of M1.
-     The HANDOFF for step 2 should include explicit
-     intermediate milestones (one shim API surface lands +
-     compiles + has a smoke test, repeat) so progress is
-     visible week-over-week, not just at the end. The
-     FreeBSD drm-kmod team's pattern of "compile-only
-     CI for the shim, full driver-integration CI when
-     the shim is half-built" is the model.
+  1. **NVMe's controller-reset sequence is the most
+     spec-fragile piece of step 1.** The order of writes
+     (disable, program admin queue, enable) and the polling
+     of CSTS.RDY across the transitions has half a dozen
+     subtle wrong-order failure modes. Read the M1 step 1
+     HANDOFF's failure-mode list above before kicking off
+     1-2; better still, sketch the sequence as inline ASCII
+     in nvme.rs's `init` function before writing any code.
+     The NVMe 1.4 spec § 7.6.1 (Controller Initialization)
+     is the canonical reference; § 3.5.1 (Memory-Based
+     Transport Model Initialization) and § 5.21.1.7 (Feature
+     Identifier 11 — Arbitration) are secondary. Half-
+     spec'd implementations work on QEMU and fail on real
+     hardware where timing matters; full-spec implementations
+     work on both. M1 step 6's real-hardware bring-up will
+     reward over-specification at step 1.
 
-  2. **Real-hardware purchase is a $1500-$2000 commitment
-     for the Framework 13 AMD Ryzen AI 7 350 (Strix Point)
-     with sensible memory (32 GiB) and storage (1 TB
-     NVMe). Order lead time on Framework is typically 2-4
-     weeks at announce-and-ship batch boundaries. Place the
-     order at end of step 3 (post-xHCI) per the recommended
-     trade-off; the laptop should arrive within 2-3 weeks
-     of step 4 (amdgpu KMS) starting. Confirm pricing /
-     availability at order time.
+  2. **MSI-X programming is the moment the IRQ model evolves
+     past M0's IDT.** The M0 IDT is `spin::Lazy<...>` —
+     initialized once, used forever. M1 step 1 introduces
+     `idt::register_vector(handler)` for dynamic allocation.
+     The Lazy initializer at idt.rs runs ONCE; subsequent
+     `register_vector` calls must mutate the IDT after the
+     initial load. The x86_64 crate's `InterruptDescriptor
+     Table` is mutable through `&mut`, but our IDT lives
+     behind Lazy which only exposes `&IDT`. The natural
+     refactor: replace Lazy with a `Mutex<Option<Inter
+     ruptDescriptorTable>>` + a `register_vector(handler)`
+     that locks, updates, and re-loads IDTR via `LIDT`.
+     This is one of those "easy to get subtly wrong" pieces;
+     the step 1-0 HANDOFF or commit body should document
+     the locking discipline explicitly.
 
-  3. **M1's cadence is genuinely different from M0's.**
-     M0 step 4 ran in one calendar day; that's not what M1
-     looks like. M1 step 1 (NVMe) is a 4-6 week effort; M1
-     step 2 (shim) is 12-20 weeks. Sub-block-per-devlog at
-     daily cadence collapses; one devlog per sub-block at
-     weekly cadence is the right shape. The HANDOFF /
-     commit cadence slows accordingly. CLAUDE.md's "noticing
-     when I'm heads-down on a single bug for multiple
-     sessions" cue applies *more* in M1 than M0; flag
-     promptly if a single sub-block stretches past 2 weeks
-     of grinding without visible progress.
-
-Real-hardware logistics (M1 step 6 prep)
-
-ARSENAL.md commits to Framework 13 AMD as the v1.0 hardware
-target. M1's step 6 is "first boot on real iron." Practical
-steps:
-
-  - **SKU selection.** Framework 13 AMD Ryzen AI 7 350
-    (Strix Point) is the current premium SKU as of
-    mid-2026; the Ryzen AI 5 340 is the budget option.
-    Either works for M1; Strix Point gives more headroom
-    for M2 / Stage compositor work. Recommend the higher
-    SKU.
-
-  - **Memory and storage.** Framework offers 16 / 32 / 64
-    GiB DDR5; 32 GiB is the M1 sweet spot. NVMe: any of
-    the offered 500 GB / 1 TB / 2 TB; 1 TB is plenty for
-    dev work without paying the 2 TB premium.
-
-  - **WiFi module.** Framework 13 AMD ships with either
-    Mediatek MT7921 (mt76 Linux driver) or Intel AX210
-    (iwlwifi). Step 5 of M1 implements whichever ships;
-    ARSENAL.md mentions iwlwifi specifically, so AX210 is
-    the assumed target. Confirm at order time.
-
-  - **Boot medium.** USB drive flashed with arsenal.iso
-    (the same artifact the QEMU smoke runs). Limine boots
-    on UEFI without intervention. Recommend a USB-C
-    drive (the Framework's USB-A port is via the
-    expansion-card system; USB-C is always-available).
-
-  - **Recovery posture.** Keep a Linux live-USB nearby
-    during step 6. Real-hardware bring-up will reveal
-    panics we can't reproduce in QEMU; being able to
-    boot Linux and pull serial logs / disk dumps is the
-    fallback path.
+  3. **Step 1 is M1's velocity-establishment sub-step.** The
+     M0 step 4 cadence (six sub-blocks in one calendar day)
+     does not apply. M1 step 1 lands in 4-6 calendar weeks.
+     If 1-2 (controller reset + admin queue) takes more
+     than two sessions of grinding, that's the moment to
+     pause, write up what's been tried, and step away for
+     a day (CLAUDE.md cue: "This has been the active issue
+     for three sessions. Want to write up what we've tried
+     and step away for a day?"). Don't drive through. NVMe
+     controller-reset failures have a stubborn habit of
+     yielding to a fresh look after rest, and they rarely
+     yield to grinding.
 
 Wait for the pick. Do not pick silently. The natural first
-move is **go m1-1** for the NVMe-first plan above, or **draft
-m1-1 HANDOFF** if you want the step-level kickoff document
-written before any code lands (recommended for M1's first
-step — the step-level HANDOFF is the planning artifact M0's
-cadence depended on). Alternatives: **go m1-2** to start with
-the shim foundation (riskier — no driver target to drive the
-API surface, scope creep likely), or **defer** to first
-re-read ARSENAL.md and revisit the milestone-level trade-offs
-above (especially the LinuxKPI shim strategy and the first
-driver target — these are the most consequential resolutions
-of M1).
+split is 1-0 as a standalone session (MSI-X capability +
+IDT vector tooling — foundational infrastructure with no
+NVMe content yet), 1-1 in one focused session (NVMe device
+discovery + BAR + register primitives), 1-2 as the longest
+single sub-block of step 1 (controller reset + admin queue +
+Identify, the spec-rich piece), 1-3 in one session that ends
+with ARSENAL_NVME_OK firing, 1-4 as a short follow-up
+(MSI-X conversion), 1-5 as the paper session. Use **go
+m1-1-0** to start. Happy to combine 1-3 + 1-4 if you want
+the "interrupt-driven NVMe" milestone in one push, or to
+defer 1-0 and let 1-1 use a hand-coded MSI-X parser inline
+in nvme.rs — the latter would couple MSI-X to NVMe though,
+which 1-0's recommendation is specifically against. Your
+call.
