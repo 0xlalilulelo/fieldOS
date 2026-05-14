@@ -11,11 +11,12 @@
 // `dispatch(&buf[..len])` (a structural stub at 3G-1; 3G-2 lands
 // the `help` / `hw` / `panic` commands).
 //
-// Cooperative-only: the shell yields between every poll, so a
-// task that wants CPU time gets it. With idle's 100 Hz hlt-wake
-// from 3F-3 and the round-robin scheduler from 3B, the shell is
-// scheduled every few ms in steady state — well above human
-// typing speed.
+// 4-5 moved the kbd path from cooperative polling to IRQ-driven
+// receive via a SPSC ring buffer. shell::run now blocks on
+// kbd::recv_blocking, which yields cooperatively whenever the ring
+// is empty and resumes on the next IRQ-driven push. Latency is
+// bounded by the cooperative round-robin (and hard preemption from
+// 4-4), not by a polling interval.
 //
 // Two visible-polish items deferred from 3G-1:
 //   * No fb-visible cursor at the insertion point. fb::print_str
@@ -38,7 +39,6 @@ use core::fmt::Write;
 use crate::apic;
 use crate::frames;
 use crate::kbd;
-use crate::sched;
 use crate::serial;
 
 /// Maximum input line length, including the trailing newline. A
@@ -72,8 +72,7 @@ pub fn run() -> ! {
     let mut len: usize = 0;
 
     loop {
-        sched::yield_now();
-        let Some(b) = kbd::poll() else { continue };
+        let b = kbd::recv_blocking();
         match b {
             LF => {
                 serial::write_str("\n");

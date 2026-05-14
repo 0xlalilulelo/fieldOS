@@ -161,10 +161,14 @@ extern "C" fn _start() -> ! {
     );
 
     // 4-3: map the IOAPIC MMIO, read its version register, mask
-    // every redirection-table entry. Doesn't program any routing
-    // yet — 4-5 will unmask IRQ1 for the keyboard once the IRQ
-    // handler is wired through the IDT.
+    // every redirection-table entry. 4-5 unmasks IRQ1 below.
     ioapic::init();
+
+    // 4-5: route IRQ1 (keyboard) -> the GSI from MADT overrides
+    // -> vector 0x21 -> BSP. The IDT entry for 0x21 was wired by
+    // idt::init at boot. From this point on, keyboard bytes
+    // arrive via IRQ; the polled kbd::poll() path is gone.
+    kbd::init_irq();
 
     // 4-2: bring up every AP Limine reports via the MP request.
     // Limine handles each AP's real-mode -> long-mode transition

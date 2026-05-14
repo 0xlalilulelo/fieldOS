@@ -15,6 +15,7 @@ use x86_64::structures::idt::{
 
 use crate::apic;
 use crate::gdt;
+use crate::kbd;
 use crate::serial;
 
 fn halt_loop() -> ! {
@@ -131,6 +132,12 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     // this point in boot; 3F-3 will sti alongside idle's hlt
     // restoration, at which point this handler actually fires.
     idt[apic::TIMER_VECTOR].set_handler_fn(apic::timer_handler);
+
+    // 4-5: keyboard IRQ at vector 0x21. The IOAPIC redirection-table
+    // entry for the keyboard's GSI is masked at 4-3's ioapic::init
+    // and unmasked by kbd::init_irq when called from main after both
+    // ioapic::init and kbd::init have run.
+    idt[apic::KEYBOARD_VECTOR].set_handler_fn(kbd::keyboard_handler);
 
     idt
 });

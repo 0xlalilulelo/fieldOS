@@ -67,6 +67,12 @@ pub const SPURIOUS_VECTOR: u8 = 0xFF;
 /// 8259) and below the spurious vector at 0xFF.
 pub const TIMER_VECTOR: u8 = 0xEF;
 
+/// Keyboard IRQ vector. Lives in the legacy ISA range but the 8259
+/// is masked (3F-0); IOAPIC at 4-3 owns vector dispatch, and 4-5
+/// programs the redirection-table entry for the keyboard GSI to
+/// fire this vector on the BSP.
+pub const KEYBOARD_VECTOR: u8 = 0x21;
+
 /// PIT channel-2 setup. PC compatible since 1981: channel 2's gate is
 /// software-controlled via port 0x61 bit 0 and its OUT line is
 /// readable via 0x61 bit 5. We use mode 0 (interrupt on terminal
@@ -230,14 +236,7 @@ pub extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {
 /// HANDOFF.md at commit dcf2377).
 pub extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     cpu::current_cpu().ticks.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: `apic::init` maps the LAPIC MMIO and software-enables
-    // the LAPIC before arming the timer LVT; cpu::init_bsp loads
-    // MSR_GS_BASE before idle's sti opens the IF gate. By the time
-    // this handler can fire, both LAPIC MMIO and GS are live.
-    // Writing 0 to EOI is the spec-defined acknowledgement (Intel
-    // SDM Vol. 3A §10.8.5); EOI has no read side effects and only
-    // a single legal write.
-    unsafe { lapic_write(LAPIC_REG_EOI, 0) };
+    send_eoi();
 
     // 4-4: hard preemption. sched::preempt checks the current task's
     // slice budget and rotates the runqueue if expired; runs in IRQ
@@ -245,6 +244,21 @@ pub extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     // internal preempt_count gate suppresses re-entry during the
     // critical sections that need it.
     sched::preempt();
+}
+
+/// Acknowledge the current in-service interrupt to the LAPIC. Per
+/// Intel SDM Vol. 3A §10.8.5, writing 0 to the EOI register clears
+/// the highest-priority bit in the ISR and lets the next pending
+/// IRQ dispatch. Spurious interrupts (vector 0xFF) are the only
+/// case that must NOT EOI.
+pub fn send_eoi() {
+    // SAFETY: apic::init maps the LAPIC MMIO before any IRQ can
+    // deliver; cpu::init_bsp / smp::ap_entry load MSR_GS_BASE
+    // before opening the IF gate. By the time send_eoi is callable
+    // (only from IRQ handlers or just-after-IRQ code), the mapping
+    // and GS base are live. EOI has no read side effect and only
+    // one legal write.
+    unsafe { lapic_write(LAPIC_REG_EOI, 0) };
 }
 
 /// Calibrate the LAPIC timer against PIT channel 2. Programs the
