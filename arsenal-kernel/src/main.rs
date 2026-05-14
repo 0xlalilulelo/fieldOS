@@ -297,12 +297,17 @@ extern "C" fn _start() -> ! {
     }
 
     // M1 step 1-1: discover the NVMe controller, map BAR0, log
-    // CAP / VS / spec assertions. 1-2 will build the admin queue
-    // + Identify on top; 1-3 the I/O queue + first sector read.
-    // At step 1-1 we just probe and log — no controller reset,
-    // no queues, no IRQs. Drops the handle since 1-2 hasn't
-    // wired the next consumer yet.
-    let _nvme = nvme::init();
+    // CAP / VS / spec assertions.
+    // M1 step 1-2: disable + program admin queue + enable; submit
+    // Identify Controller and Identify Namespace via the admin
+    // queue (polled completion). 1-3 builds the I/O queue + first
+    // sector read on top; 1-4 converts to MSI-X. The Controller
+    // lives on main's stack through M1 step 1; 1-3 will refactor
+    // to a static if it needs the handle to outlive sched::init.
+    let mut nvme_ctrl = nvme::init();
+    nvme::setup_admin(&mut nvme_ctrl);
+    nvme::identify_controller(&mut nvme_ctrl);
+    nvme::identify_namespace(&mut nvme_ctrl, 1);
 
     // virtio-blk smoke: locate the device, init, read sector 0,
     // assert the hybrid-ISO MBR boot signature 0xAA55, print
