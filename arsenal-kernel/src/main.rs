@@ -13,8 +13,10 @@ use limine::BaseRevision;
 use limine::memory_map::EntryType;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker,
+    RsdpRequest,
 };
 
+mod acpi;
 mod apic;
 mod cpu;
 mod fb;
@@ -59,6 +61,10 @@ static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
@@ -118,6 +124,15 @@ extern "C" fn _start() -> ! {
     // interrupts armed yet — that's 3F-1 (software-enable + spurious
     // vector) and 3F-2 (timer LVT).
     apic::init();
+
+    // 4-0: walk RSDP → (X)RSDT → MADT, enumerate processor LAPIC
+    // entries, IOAPICs, and ISA IRQ overrides. The BSP's MADT entry
+    // is cross-checked against apic::lapic_id() so any firmware
+    // inconsistency surfaces before 4-2 sends IPIs.
+    let rsdp = RSDP_REQUEST
+        .get_response()
+        .expect("limine: RSDP response missing — bootloader did not provide ACPI tables");
+    acpi::init(rsdp.address());
 
     // 3G-0: PS/2 keyboard. Polled-only; the shell task (3G-1) will
     // call kbd::poll on each cooperative iteration. init drains any

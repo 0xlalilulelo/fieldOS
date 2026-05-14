@@ -108,6 +108,12 @@ static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 /// to re-issue an MMIO read.
 static LAPIC_VERSION: AtomicU32 = AtomicU32::new(0);
 
+/// BSP APIC ID cached at `init`. 4-0's acpi::init cross-checks this
+/// against the MADT-reported BSP entry; future per-CPU paths will
+/// read it via current_cpu() at M0 step 4-1, but until that lands
+/// this single static suffices for the BSP-only world.
+static LAPIC_ID: AtomicU32 = AtomicU32::new(0);
+
 /// Latched on the first spurious interrupt so the log records the
 /// occurrence exactly once. A spurious "storm" (continuous delivery
 /// during a mis-configured bring-up) would otherwise drown serial
@@ -150,6 +156,13 @@ pub fn ticks() -> usize {
 /// if `init` has not yet run.
 pub fn version() -> u32 {
     LAPIC_VERSION.load(Ordering::Relaxed)
+}
+
+/// BSP APIC ID cached at `init`. xAPIC stores the ID in bits 24..31
+/// of the LAPIC_ID register; this returns the extracted ID, not the
+/// raw register. Returns 0 if `init` has not yet run.
+pub fn lapic_id() -> u8 {
+    LAPIC_ID.load(Ordering::Relaxed) as u8
 }
 
 pub fn observe_timer_ok() {
@@ -373,6 +386,7 @@ pub fn init() {
     let id = unsafe { lapic_read(LAPIC_REG_ID) };
     let version = unsafe { lapic_read(LAPIC_REG_VERSION) };
     LAPIC_VERSION.store(version, Ordering::Relaxed);
+    LAPIC_ID.store(id >> 24, Ordering::Relaxed);
 
     // Software-enable the LAPIC. SVR bit 8 set, vector bits hold our
     // spurious vector. From this point on, the LAPIC will deliver
