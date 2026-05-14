@@ -62,7 +62,7 @@ impl Task {
         let stack = Box::new(KernelStack([0u8; STACK_SIZE]));
         let stack_top = (&stack.0 as *const u8 as usize + STACK_SIZE) as u64;
 
-        // Initial stack frame, matched to the 3B-3 switch_to epilogue:
+        // Initial stack frame, matched to the 4-4 switch_to epilogue:
         //
         //     pop r15
         //     pop r14
@@ -70,6 +70,7 @@ impl Task {
         //     pop r12
         //     pop rbp
         //     pop rbx
+        //     popfq         ; restores rflags (4-4 added)
         //     ret           ; pops entry into RIP
         //
         // Memory from saved_rsp upward:
@@ -80,26 +81,34 @@ impl Task {
         //   saved_rsp + 24    r12 = 0
         //   saved_rsp + 32    rbp = 0
         //   saved_rsp + 40    rbx = 0
-        //   saved_rsp + 48    entry   (return address — popped by ret)
-        //   saved_rsp + 56    alignment padding (unused)
+        //   saved_rsp + 48    rflags = 0x202 (IF=1, reserved bit 1)
+        //   saved_rsp + 56    entry   (return address — popped by ret)
+        //   saved_rsp + 64    alignment padding (unused)
         //
-        // saved_rsp = stack_top - 64 keeps both saved_rsp and the
-        // entry slot 16-byte aligned. After `ret` pops entry, RSP =
-        // saved_rsp + 56 → (RSP+8) is 16-aligned, satisfying the
-        // SysV ABI on entry's first instruction.
-        let saved_rsp = stack_top - 64;
-        // SAFETY: [saved_rsp, saved_rsp+64) is the top 64 bytes of a
-        // freshly-allocated KernelStack we exclusively own. The
-        // pointer is 16-aligned by KernelStack's repr; STACK_SIZE
-        // (16 KiB) is well above 64 so we stay inside the allocation.
+        // saved_rsp = stack_top - 72 places saved_rsp at offset 8
+        // within a 16-byte aligned block (stack_top is 16-aligned;
+        // 72 mod 16 = 8). After all pops + popfq + ret, RSP =
+        // saved_rsp + 64 = stack_top - 8 → (RSP) mod 16 = 8,
+        // satisfying the SysV ABI on entry's first instruction
+        // (the ABI requires rsp ≡ 8 mod 16 at function entry).
+        let saved_rsp = stack_top - 72;
+        // SAFETY: [saved_rsp, saved_rsp+72) is the top 72 bytes of
+        // a freshly-allocated KernelStack we exclusively own. The
+        // pointer is 8-aligned (stack_top - 72, stack_top is 16-
+        // aligned by KernelStack's repr); STACK_SIZE (32 KiB) is
+        // well above 72 so we stay inside the allocation.
         unsafe {
             let p = saved_rsp as *mut u64;
             for i in 0..6 {
                 p.add(i).write(0); // r15..rbx
             }
-            p.add(6).write(entry as usize as u64);
-            p.add(7).write(0); // alignment padding
-            debug_assert_eq!(p.add(6).read(), entry as usize as u64);
+            // rflags slot: IF=1 (bit 9) + reserved bit 1 set per
+            // Intel SDM Vol. 1 §3.4.3. Fresh tasks start with
+            // interrupts enabled.
+            p.add(6).write(0x202);
+            p.add(7).write(entry as usize as u64);
+            p.add(8).write(0); // alignment padding
+            debug_assert_eq!(p.add(7).read(), entry as usize as u64);
         }
 
         Box::new(Self {

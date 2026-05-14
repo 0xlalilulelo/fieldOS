@@ -23,6 +23,7 @@ use x86_64::structures::idt::InterruptStackFrame;
 
 use crate::cpu;
 use crate::paging;
+use crate::sched;
 use crate::serial;
 
 // LAPIC register offsets (Intel SDM Vol. 3A §10.4.1 Table 10-1).
@@ -237,6 +238,13 @@ pub extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     // SDM Vol. 3A §10.8.5); EOI has no read side effects and only
     // a single legal write.
     unsafe { lapic_write(LAPIC_REG_EOI, 0) };
+
+    // 4-4: hard preemption. sched::preempt checks the current task's
+    // slice budget and rotates the runqueue if expired; runs in IRQ
+    // context with IF=0 (interrupt gate cleared it). preempt's
+    // internal preempt_count gate suppresses re-entry during the
+    // critical sections that need it.
+    sched::preempt();
 }
 
 /// Calibrate the LAPIC timer against PIT channel 2. Programs the

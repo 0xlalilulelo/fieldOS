@@ -57,12 +57,15 @@ pub struct CpuLocal {
     /// serial log records the event exactly once and a misconfigured
     /// bring-up cannot drown serial output before it can be observed.
     pub spurious_seen: AtomicBool,
-    /// Preempt-disable counter. 4-4's timer-handler dispatcher will
-    /// skip the runqueue rotation when this is non-zero; declared at
-    /// 4-1 so the layout is stable for AP startup at 4-2 before the
-    /// preemption code lands.
+    /// Preempt-disable counter. 4-4's timer-handler dispatcher
+    /// skips the runqueue rotation when this is non-zero.
     #[allow(dead_code)]
     pub preempt_count: AtomicUsize,
+    /// Tick count at which this core most recently switched into
+    /// the currently-running task. 4-4's preempt path compares
+    /// `ticks - last_switch_tick` against the slice budget; both
+    /// cooperative and preemptive switches reset this on switch.
+    pub last_switch_tick: AtomicUsize,
 }
 
 impl CpuLocal {
@@ -77,6 +80,7 @@ impl CpuLocal {
             ticks: AtomicUsize::new(0),
             spurious_seen: AtomicBool::new(false),
             preempt_count: AtomicUsize::new(0),
+            last_switch_tick: AtomicUsize::new(0),
         }
     }
 }

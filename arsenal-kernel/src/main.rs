@@ -25,6 +25,7 @@ mod gdt;
 mod heap;
 mod idt;
 mod ioapic;
+mod irq;
 mod kbd;
 mod net;
 mod paging;
@@ -318,6 +319,14 @@ extern "C" fn _start() -> ! {
     sched::spawn(ping_entry);
     sched::spawn(pong_entry);
 
+    // 4-4 preempt witness: a tight loop that never calls yield_now.
+    // Under cooperative-only scheduling this task would starve every
+    // peer (shell, ping, pong, net::poll_loop, idle). Under hard
+    // preemption, the timer slices it out every SLICE_TICKS and
+    // peers continue running — every other sentinel still fires,
+    // which is how the smoke validates 4-4.
+    sched::spawn(preempt_witness);
+
     // 3G-1: shell task. Prints `> `, emits ARSENAL_PROMPT_OK, then
     // loops on kbd::poll feeding a 256-byte line buffer with VT100
     // backspace handling and a stub dispatch (3G-2 lands the
@@ -370,6 +379,20 @@ fn finish() -> ! {
 /// asm that would actually invoke this; today it's never executed.
 fn task_smoke_entry() -> ! {
     halt();
+}
+
+/// 4-4 preempt witness. Tight loop that never yields. The smoke's
+/// validation is implicit: every other task (shell, ping, pong,
+/// net::poll_loop) must still get CPU time despite this task
+/// hogging its slice, which only happens if hard preemption is
+/// correctly slicing this task out.
+fn preempt_witness() -> ! {
+    serial::write_str("smoke: preempt witness alive (never yields)\n");
+    let mut x: u64 = 0;
+    loop {
+        x = x.wrapping_add(1);
+        core::hint::black_box(x);
+    }
 }
 
 struct BootMem {
