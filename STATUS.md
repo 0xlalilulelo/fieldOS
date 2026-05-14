@@ -14,14 +14,52 @@ preserved on commit `60e1a48`). M1's surface per ARSENAL.md:
 LinuxKPI shim, amdgpu KMS, NVMe, xHCI, iwlwifi. First boot on
 real Framework 13 AMD hardware is the milestone's exit criterion.
 
+### M1 step plan (9 steps)
+
+The milestone HANDOFF at git 9df4682 proposed an 8-step plan;
+during M1 step 1 (NVMe) kickoff, the plan was restructured to
+insert virtio-gpu (native Rust) as step 4 before amdgpu KMS.
+Rationale: QEMU does not emulate amdgpu, so the M1 step 4
+HANDOFF would otherwise have no CI substrate — amdgpu
+development would proceed against real Framework hardware
+only, with no per-commit smoke validation. virtio-gpu (~1000-
+1500 LOC, no shim dependency) gives the kernel a KMS-capable
+GPU driver that QEMU smokes on every commit; the GPU/display
+abstraction stabilizes against virtio-gpu before amdgpu has
+to consume it. Pushes M1 from ~62 to ~67 weeks at part-time
+pace; still inside the 15-month ARSENAL.md budget.
+
+1. **NVMe native Rust** (~5K LOC ceiling per ARSENAL.md;
+   target ~600-800 LOC actual). No shim dependency. Validates
+   PCIe + MSI-X paths. **Active.**
+2. **LinuxKPI shim foundation + first tiny inherited driver.**
+   ARSENAL.md's "single largest engineering task" — budget
+   12-20 weeks.
+3. **xHCI USB.** Native Rust vs LinuxKPI port — evaluate at
+   step kickoff.
+4. **virtio-gpu native Rust.** KMS-capable GPU driver for
+   QEMU CI; stabilizes the kernel-side GPU/display
+   abstraction. ~1000-1500 LOC.
+5. **amdgpu KMS via LinuxKPI shim.** The headlining driver;
+   ports against the abstraction step 4 stabilized.
+6. **iwlwifi + mac80211 via LinuxKPI.** Wireless.
+7. **First boot on real Framework 13 AMD hardware.** Real-
+   iron exit criterion. ARSENAL.md performance gate
+   (cold boot to login < 8 s) asserted here.
+8. **Slint app on software-rendered framebuffer.** First
+   "modern UI" — runs on virtio-gpu in CI, amdgpu on real
+   hardware.
+9. **M1 retrospective + arsenal-M1-complete tag.**
+
 ### Active work
 
-**No active sub-block yet.** Next session writes the M1
-HANDOFF — break the milestone into sub-blocks, name the first
-target, surface trade-offs (LinuxKPI shim depth, which driver
-ports first, real-hardware CI strategy), and pick a starting
-direction. Don't start coding M1 surface before the HANDOFF
-lands.
+**M1 step 1 — NVMe.** Step-level HANDOFF at HEAD with
+six-sub-block decomposition (PCIe MSI-X + dynamic IDT
+vector → device discovery → controller reset + admin queue
+→ I/O queue + polled sector read → MSI-X conversion → STATUS
++ devlog). Next session starts **go m1-1-0** (PCIe MSI-X
+capability parsing + dynamic IDT vector allocation —
+foundation step 3 / 5 will also consume).
 
 Expected pace for M1: substantially slower than M0. The
 ARSENAL.md month-9-to-month-24 budget assumes ~15 hr/week

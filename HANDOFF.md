@@ -13,7 +13,7 @@ The natural outcome at step exit: the QEMU smoke gains an
 `-device nvme` and reads sector 0 of the emulated NVMe via
 our driver. ARSENAL_NVME_OK joins the sentinel set. Per the
 milestone HANDOFF's recommendation, virtio-blk stays in the
-QEMU command line — it satisfies the boot path until step 6
+QEMU command line — it satisfies the boot path until step 7
 (real hardware) makes it unnecessary. The smoke's
 ARSENAL_BLK_OK keeps firing; ARSENAL_NVME_OK is additive.
 
@@ -79,7 +79,7 @@ Where the project is
     estimate — M1 step 1 targets *minimal correct NVMe*,
     not feature-complete; more features accrue in later
     steps if needed for amdgpu/iwlwifi storage paths or
-    M1 step 6's real-hardware install medium). pci.rs
+    M1 step 7's real-hardware install medium). pci.rs
     grows ~150 LOC for the MSI-X capability walker.
     idt.rs grows ~50 LOC for vector registration.
 
@@ -310,7 +310,7 @@ Step-level trade-off pairs
   M1-step-1 LOC scale.
   Recommend (i). M0 pattern is one file per subsystem;
   preserve until a file genuinely outgrows 1500-2000 LOC.
-  At M1 step 4 (amdgpu) and step 5 (iwlwifi) the
+  At M1 step 5 (amdgpu) and step 6 (iwlwifi) the
   directory-per-driver shape will be appropriate.
 
   **Sentinel granularity.**
@@ -338,8 +338,8 @@ Step-level trade-off pairs
   call site.
   Recommend (i) at step 1. virtio-blk works; removing it
   is unmotivated at this point. Real-hardware Framework 13
-  AMD doesn't have virtio-blk, so step 6 (real-iron boot)
-  is the natural deletion point — but step 6 also needs
+  AMD doesn't have virtio-blk, so step 7 (real-iron boot)
+  is the natural deletion point — but step 7 also needs
   the install-medium boot path which Limine handles, not
   virtio-blk. Defer the virtio-blk deletion to a polish
   commit post-step-1, not blocking on it.
@@ -464,7 +464,7 @@ Out of scope for step 1 specifically
 
   - **Write paths.** Step 1 reads sector 0 only. Write
     (opcode 0x01) and Flush (opcode 0x00) aren't needed
-    until step 6 (real-hardware install medium); add then.
+    until step 7 (real-hardware install medium); add then.
   - **Multi-namespace support.** Step 1 hardcodes NSID = 1.
     NVMe spec allows up to 2^32 - 1 namespaces; commodity
     consumer SSDs typically expose 1.
@@ -474,7 +474,7 @@ Out of scope for step 1 specifically
   - **PCIe Hotplug.** Step 1 enumerates at boot only.
   - **NVMe Set Features / Get Features past the bring-up
     set.** Step 1 uses the default arbitration, default
-    power state, no power management. PM at M1 step 6+ or
+    power state, no power management. PM at M1 step 7+ or
     M2 when power matters.
   - **Asynchronous Event Notifications.** AEN polling is
     Linux's monitor for SMART warnings, error log entries,
@@ -486,7 +486,7 @@ Out of scope for step 1 specifically
     hardware; permanently out of scope.
   - **Filesystem on the NVMe device.** Step 1 reads raw
     sector 0. A filesystem driver (FAT32 read, ext2 read)
-    is M1 step 6 territory at the earliest, more likely
+    is M1 step 7 territory at the earliest, more likely
     v0.5.
 
 Permanently out of scope (do not propose)
@@ -524,7 +524,7 @@ Three notes worth flagging before you go
      Identifier 11 — Arbitration) are secondary. Half-
      spec'd implementations work on QEMU and fail on real
      hardware where timing matters; full-spec implementations
-     work on both. M1 step 6's real-hardware bring-up will
+     work on both. M1 step 7's real-hardware bring-up will
      reward over-specification at step 1.
 
   2. **MSI-X programming is the moment the IRQ model evolves
