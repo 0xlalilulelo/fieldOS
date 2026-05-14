@@ -308,6 +308,12 @@ extern "C" fn _start() -> ! {
     nvme::setup_admin(&mut nvme_ctrl);
     nvme::identify_controller(&mut nvme_ctrl);
     nvme::identify_namespace(&mut nvme_ctrl, 1);
+    // M1 step 1-3: create one I/O queue pair via the admin queue,
+    // read sector 0 of NSID 1 with polled completion, assert the
+    // hybrid-ISO MBR signature 0xAA55, emit ARSENAL_NVME_OK. 1-4
+    // converts the I/O queue to MSI-X interrupt-driven completion.
+    nvme::setup_io_queue(&mut nvme_ctrl);
+    nvme::smoke_read_sector_0(&mut nvme_ctrl, 1);
 
     // virtio-blk smoke: locate the device, init, read sector 0,
     // assert the hybrid-ISO MBR boot signature 0xAA55, print

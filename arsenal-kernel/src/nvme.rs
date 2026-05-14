@@ -77,11 +77,26 @@ const CSTS_RDY: u32 = 1 << 0;
 const CSTS_CFS: u32 = 1 << 1;
 
 /// Admin command opcodes (NVMe 1.4 §5).
+const OPC_CREATE_IO_SQ: u8 = 0x01;
+const OPC_CREATE_IO_CQ: u8 = 0x05;
 const OPC_IDENTIFY: u8 = 0x06;
+
+/// NVM I/O command opcodes (NVMe 1.4 §6).
+const OPC_READ: u8 = 0x02;
 
 /// CNS values for the Identify command (NVMe 1.4 §5.21, Table 246).
 const CNS_NAMESPACE: u32 = 0x00;
 const CNS_CONTROLLER: u32 = 0x01;
+
+/// First I/O queue ID. Admin is queue 0; M1 step 1 uses a single
+/// I/O queue pair at QID=1 (HANDOFF.md "Number of I/O queue pairs"
+/// trade-off resolved (i): single shared I/O queue).
+const IO_QID: u16 = 1;
+
+/// I/O queue depth — same 64 as admin. Far below QEMU's reported
+/// MQES (2048); M1 single-block read is well within one queue
+/// page's worth of entries.
+const IO_QUEUE_SIZE: u16 = 64;
 
 /// CSTS poll bound. QEMU TCG transitions in microseconds; real
 /// hardware may take tens of milliseconds. 100M iterations of a
@@ -124,13 +139,20 @@ struct CqEntry {
     status: u16,
 }
 
-/// Admin queue state, owned by the Controller after `setup_admin`
-/// returns. The frames backing sq_phys / cq_phys are allocated
-/// once at admin-queue setup and live for the kernel's lifetime
-/// (no Drop free path — M1's frame allocator doesn't have a use
-/// case for "controller-shutdown" yet).
+/// Per-queue state for an NVMe submission/completion queue pair.
+/// Used for the admin queue (qid=0) and the I/O queue (qid=1) at
+/// M1 step 1. The frames backing sq_phys / cq_phys are allocated
+/// once at queue setup and live for the kernel's lifetime (no
+/// Drop free path — M1's frame allocator doesn't have a use case
+/// for "controller-shutdown" yet).
 #[allow(dead_code)]
-pub struct AdminQueue {
+pub struct NvmeQueue {
+    /// 0 for admin, 1+ for I/O queues. Determines the doorbell
+    /// offsets in BAR0.
+    pub qid: u16,
+    /// Queue depth. 64 throughout M1 step 1 (one frame per queue);
+    /// post-M1 may grow per-queue to amortize MMIO doorbell cost.
+    pub size: u16,
     pub sq_phys: u64,
     pub cq_phys: u64,
     /// Index of the next SQ slot we'll write. Tail follows the
@@ -145,6 +167,15 @@ pub struct AdminQueue {
     /// to phase=1). Flips on every CQ wrap.
     pub cq_phase: u8,
     pub next_cid: u16,
+}
+
+/// Identifies which queue a submit/poll helper acts on. submit_qe
+/// uses this to look up the right field on the Controller; the
+/// doorbell offsets fall out of the queue's qid.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueueKind {
+    Admin,
+    Io,
 }
 
 // CAP register field accessors (NVMe 1.4 §3.1.1, Table 28).
@@ -178,9 +209,13 @@ pub struct Controller {
     pub cap: u64,
     pub version: u32,
     pub doorbell_stride: u8,
-    /// None until `setup_admin` runs; Some thereafter. 1-3's I/O
-    /// queue setup uses the admin queue from here.
-    pub admin: Option<AdminQueue>,
+    /// None until `setup_admin` runs; Some thereafter. M1-1-3's
+    /// I/O queue setup issues admin commands through this.
+    pub admin: Option<NvmeQueue>,
+    /// None until `setup_io_queue` runs; Some thereafter. M1-1-3+
+    /// reads/writes flow through this. Single I/O queue at M1
+    /// (HANDOFF trade-off (i)); per-CPU queues are M2 work.
+    pub io: Option<NvmeQueue>,
 }
 
 #[allow(dead_code)]
@@ -309,6 +344,7 @@ pub fn init() -> Controller {
         version,
         doorbell_stride: dstrd,
         admin: None,
+        io: None,
     }
 }
 
@@ -380,7 +416,9 @@ pub fn setup_admin(ctrl: &mut Controller) {
     // 5. Spin until the controller signals ready.
     wait_csts(ctrl, CSTS_RDY, CSTS_RDY);
 
-    ctrl.admin = Some(AdminQueue {
+    ctrl.admin = Some(NvmeQueue {
+        qid: 0,
+        size: ADMIN_QUEUE_SIZE,
         sq_phys,
         cq_phys,
         sq_tail: 0,
@@ -406,8 +444,8 @@ pub fn identify_controller(ctrl: &mut Controller) {
     // SAFETY: freshly-allocated frame; we own it exclusively.
     unsafe { core::ptr::write_bytes(buf_virt as *mut u8, 0, 4096) };
 
-    let cid = submit_admin(ctrl, OPC_IDENTIFY, 0, buf_phys, CNS_CONTROLLER);
-    let status = poll_admin(ctrl, cid);
+    let cid = submit_qe(ctrl, QueueKind::Admin, OPC_IDENTIFY, 0, buf_phys, CNS_CONTROLLER, 0, 0);
+    let status = poll_qe(ctrl, QueueKind::Admin, cid);
     assert_eq!(
         status & 0xFFFE,
         0,
@@ -441,8 +479,8 @@ pub fn identify_namespace(ctrl: &mut Controller, nsid: u32) {
     // SAFETY: freshly-allocated frame; we own it exclusively.
     unsafe { core::ptr::write_bytes(buf_virt as *mut u8, 0, 4096) };
 
-    let cid = submit_admin(ctrl, OPC_IDENTIFY, nsid, buf_phys, CNS_NAMESPACE);
-    let status = poll_admin(ctrl, cid);
+    let cid = submit_qe(ctrl, QueueKind::Admin, OPC_IDENTIFY, nsid, buf_phys, CNS_NAMESPACE, 0, 0);
+    let status = poll_qe(ctrl, QueueKind::Admin, cid);
     assert_eq!(
         status & 0xFFFE,
         0,
@@ -469,21 +507,25 @@ pub fn identify_namespace(ctrl: &mut Controller, nsid: u32) {
     frames::FRAMES.free_frame(buf_frame);
 }
 
-/// Write the SQE, advance the local tail, ring the SQ0 tail
-/// doorbell. Returns the assigned CID so the caller can match
-/// the completion.
-fn submit_admin(ctrl: &mut Controller, opc: u8, nsid: u32, prp1: u64, cdw10: u32) -> u16 {
+/// Write the SQE, advance the local tail, ring the SQ tail
+/// doorbell for the named queue. Returns the assigned CID so the
+/// caller can match the completion. Works for both admin (qid=0)
+/// and the I/O queue (qid=1+); the doorbell offset is computed
+/// from queue.qid and CAP.DSTRD.
+#[allow(clippy::too_many_arguments)] // NVMe SQEs natively pack a u8 opcode plus six CDWs;
+// taking each as a typed parameter is more legible than a builder
+// pattern at M1 step 1's call-site count (~4 submitters total).
+fn submit_qe(ctrl: &mut Controller, kind: QueueKind, opc: u8, nsid: u32, prp1: u64,
+             cdw10: u32, cdw11: u32, cdw12: u32) -> u16 {
+    let dstrd = ctrl.doorbell_stride;
     // Stage the SQE + advance the local tail inside a short
-    // admin-borrow scope, then release before touching MMIO via
+    // borrow scope, then release before touching MMIO via
     // ctrl.write32 (which needs &Controller, conflicting with
-    // the &mut admin borrow if held across).
-    let (cid, new_tail) = {
-        let admin = ctrl
-            .admin
-            .as_mut()
-            .expect("nvme: submit_admin without setup_admin");
-        let cid = admin.next_cid;
-        admin.next_cid = admin.next_cid.wrapping_add(1);
+    // the &mut queue borrow if held across).
+    let (cid, new_tail, sq_tail_db) = {
+        let q = queue_mut(ctrl, kind);
+        let cid = q.next_cid;
+        q.next_cid = q.next_cid.wrapping_add(1);
 
         let sqe = SqEntry {
             cdw0: (opc as u32) | ((cid as u32) << 16),
@@ -493,83 +535,239 @@ fn submit_admin(ctrl: &mut Controller, opc: u8, nsid: u32, prp1: u64, cdw10: u32
             prp1,
             prp2: 0,
             cdw10,
-            cdw11: 0,
-            cdw12: 0,
+            cdw11,
+            cdw12,
             cdw13: 0,
             cdw14: 0,
             cdw15: 0,
         };
 
-        let slot = admin.sq_tail as usize;
-        let sq_base = phys_to_virt(admin.sq_phys) as *mut SqEntry;
-        // SAFETY: sq_base points at the admin SQ frame (4 KiB,
-        // 64 entries × 64 bytes). slot < ADMIN_QUEUE_SIZE.
+        let slot = q.sq_tail as usize;
+        let sq_base = phys_to_virt(q.sq_phys) as *mut SqEntry;
+        // SAFETY: sq_base points at the SQ frame (4 KiB, 64
+        // entries × 64 bytes). slot < q.size.
         unsafe { sq_base.add(slot).write_volatile(sqe) };
 
-        admin.sq_tail = (admin.sq_tail + 1) % ADMIN_QUEUE_SIZE;
-        (cid, admin.sq_tail)
+        q.sq_tail = (q.sq_tail + 1) % q.size;
+        let db = DOORBELL_BASE + (2 * q.qid as usize) * (4 << dstrd);
+        (cid, q.sq_tail, db)
     };
 
-    // SAFETY: doorbell at 0x1000 is inside the BAR0 mapping (16
-    // KiB). The write tells the controller about the new SQE.
-    // SQ0 tail doorbell is at DOORBELL_BASE + 0, independent of
-    // DSTRD (the stride only affects subsequent doorbell offsets).
-    unsafe { ctrl.write32(DOORBELL_BASE, new_tail as u32) };
+    // SAFETY: sq_tail_db is at DOORBELL_BASE + 2*qid*(4<<DSTRD),
+    // inside the 16 KiB BAR0 mapping. The write tells the
+    // controller about the new SQE.
+    unsafe { ctrl.write32(sq_tail_db, new_tail as u32) };
 
     cid
 }
 
-/// Spin until a completion appears at admin.cq_head with the
-/// expected phase tag. Return the (post-phase-strip) status field.
-/// Panics if the completion's CID doesn't match `expected_cid` or
-/// if the poll exceeds CSTS_POLL_LIMIT iterations.
-fn poll_admin(ctrl: &mut Controller, expected_cid: u16) -> u16 {
-    // Spec section §3.1.10: CQ0 head doorbell at
-    // 0x1000 + (4 << CAP.DSTRD). Computed up front so the
-    // admin-borrow scope inside the poll loop stays narrow.
-    let cq_head_db = DOORBELL_BASE + (4usize << ctrl.doorbell_stride);
-
+/// Spin until a completion appears at queue.cq_head with the
+/// expected phase tag. Returns the (post-phase-strip) status
+/// field. Panics if the completion's CID doesn't match
+/// `expected_cid` or if the poll exceeds CSTS_POLL_LIMIT iters.
+fn poll_qe(ctrl: &mut Controller, kind: QueueKind, expected_cid: u16) -> u16 {
+    let dstrd = ctrl.doorbell_stride;
     for _ in 0..CSTS_POLL_LIMIT {
-        // Narrow admin-borrow scope: read the candidate CQE,
-        // advance bookkeeping if it's ours. Releasing the borrow
-        // before ctrl.write32 keeps the doorbell write outside
-        // the borrow.
+        // Narrow borrow scope: read the candidate CQE, advance
+        // bookkeeping if it's ours. Releasing the borrow before
+        // ctrl.write32 keeps the doorbell write outside the borrow.
         let outcome = {
-            let admin = ctrl
-                .admin
-                .as_mut()
-                .expect("nvme: poll_admin without setup_admin");
-            let cq_base = phys_to_virt(admin.cq_phys) as *const CqEntry;
-            // SAFETY: cq_base points at the admin CQ frame; cq_head
-            // < ADMIN_QUEUE_SIZE.
-            let cqe = unsafe { cq_base.add(admin.cq_head as usize).read_volatile() };
+            let q = queue_mut(ctrl, kind);
+            let cq_base = phys_to_virt(q.cq_phys) as *const CqEntry;
+            // SAFETY: cq_base points at the CQ frame; cq_head < q.size.
+            let cqe = unsafe { cq_base.add(q.cq_head as usize).read_volatile() };
             let phase = (cqe.status & 1) as u8;
-            if phase != admin.cq_phase {
+            if phase != q.cq_phase {
                 None
             } else {
                 assert_eq!(
                     cqe.cid, expected_cid,
-                    "nvme: admin CQE cid={} but expected {expected_cid} (status={:#06x})",
-                    cqe.cid, cqe.status,
+                    "nvme: CQE cid={} but expected {expected_cid} (status={:#06x}) on qid={}",
+                    cqe.cid, cqe.status, q.qid,
                 );
                 let status = cqe.status >> 1;
-                admin.cq_head = (admin.cq_head + 1) % ADMIN_QUEUE_SIZE;
-                if admin.cq_head == 0 {
-                    admin.cq_phase ^= 1;
+                q.cq_head = (q.cq_head + 1) % q.size;
+                if q.cq_head == 0 {
+                    q.cq_phase ^= 1;
                 }
-                Some((status, admin.cq_head))
+                let db = DOORBELL_BASE + (2 * q.qid as usize + 1) * (4 << dstrd);
+                Some((status, q.cq_head, db))
             }
         };
 
-        if let Some((status, new_head)) = outcome {
-            // SAFETY: cq_head_db is inside the BAR0 mapping; the
-            // write ACKs consumption of the entry to the controller.
-            unsafe { ctrl.write32(cq_head_db, new_head as u32) };
+        if let Some((status, new_head, db)) = outcome {
+            // SAFETY: db is inside the BAR0 mapping; write ACKs
+            // consumption of the entry to the controller.
+            unsafe { ctrl.write32(db, new_head as u32) };
             return status;
         }
         core::hint::spin_loop();
     }
-    panic!("nvme: timed out polling for admin CID {expected_cid}");
+    panic!("nvme: timed out polling for CID {expected_cid} on {kind:?}",
+           kind = match kind { QueueKind::Admin => "admin", QueueKind::Io => "io" });
+}
+
+/// Create one I/O completion queue + one I/O submission queue at
+/// QID=1 via admin Create-I/O-CQ + Create-I/O-SQ commands. Polled
+/// completion; MSI-X conversion lands at M1-1-4.
+///
+/// CDW10 for both Create commands (NVMe 1.4 §5.4, §5.5): bits 0..15
+/// = QID, bits 16..31 = QSIZE (zero-based).
+/// CDW11 for Create I/O CQ: bit 0 = PC (physically contiguous),
+/// bit 1 = IEN (interrupts enabled), bits 16..31 = IV (vector).
+/// CDW11 for Create I/O SQ: bit 0 = PC, bits 1..2 = QPRIO,
+/// bits 16..31 = CQID.
+pub fn setup_io_queue(ctrl: &mut Controller) {
+    assert!(ctrl.io.is_none(), "nvme: setup_io_queue called twice");
+
+    let cq_frame = frames::FRAMES
+        .alloc_frame()
+        .expect("nvme: OOM allocating I/O CQ frame");
+    let sq_frame = frames::FRAMES
+        .alloc_frame()
+        .expect("nvme: OOM allocating I/O SQ frame");
+    let cq_phys = cq_frame.start_address().as_u64();
+    let sq_phys = sq_frame.start_address().as_u64();
+
+    // SAFETY: freshly-allocated frames; we own them exclusively.
+    unsafe {
+        core::ptr::write_bytes(phys_to_virt(cq_phys) as *mut u8, 0, 4096);
+        core::ptr::write_bytes(phys_to_virt(sq_phys) as *mut u8, 0, 4096);
+    }
+
+    let qsize_field = (IO_QUEUE_SIZE as u32 - 1) << 16;
+    let cdw10 = qsize_field | (IO_QID as u32);
+
+    // Create I/O CQ first (must exist before its paired SQ).
+    // CDW11 = PC=1, IEN=0 (polled at 1-3; 1-4 sets IEN+IV).
+    let cdw11_cq = 0x0000_0001;
+    let cid = submit_qe(
+        ctrl,
+        QueueKind::Admin,
+        OPC_CREATE_IO_CQ,
+        0,
+        cq_phys,
+        cdw10,
+        cdw11_cq,
+        0,
+    );
+    let status = poll_qe(ctrl, QueueKind::Admin, cid);
+    assert_eq!(
+        status & 0xFFFE,
+        0,
+        "nvme: Create I/O CQ returned non-zero status {status:#06x}",
+    );
+
+    // Create I/O SQ targeting CQID=IO_QID. CDW11 = PC=1, QPRIO=0,
+    // CQID in upper 16 bits.
+    let cdw11_sq = ((IO_QID as u32) << 16) | 0x0000_0001;
+    let cid = submit_qe(
+        ctrl,
+        QueueKind::Admin,
+        OPC_CREATE_IO_SQ,
+        0,
+        sq_phys,
+        cdw10,
+        cdw11_sq,
+        0,
+    );
+    let status = poll_qe(ctrl, QueueKind::Admin, cid);
+    assert_eq!(
+        status & 0xFFFE,
+        0,
+        "nvme: Create I/O SQ returned non-zero status {status:#06x}",
+    );
+
+    ctrl.io = Some(NvmeQueue {
+        qid: IO_QID,
+        size: IO_QUEUE_SIZE,
+        sq_phys,
+        cq_phys,
+        sq_tail: 0,
+        cq_head: 0,
+        cq_phase: 1,
+        next_cid: 0,
+    });
+
+    let _ = writeln!(
+        serial::Writer,
+        "nvme: io queue up (qid={IO_QID} sq_phys={sq_phys:#018x} cq_phys={cq_phys:#018x} depth={IO_QUEUE_SIZE})",
+    );
+}
+
+/// Read one logical block from `nsid` at `slba` into a freshly-
+/// allocated 4-KiB DMA buffer, assert the MBR boot-signature
+/// 0xAA55 at byte 510, emit ARSENAL_NVME_OK on success. Mirrors
+/// the 3C virtio-blk sector-0 smoke pattern. Polled completion;
+/// 1-4 switches to MSI-X.
+pub fn smoke_read_sector_0(ctrl: &mut Controller, nsid: u32) {
+    let buf_frame = frames::FRAMES
+        .alloc_frame()
+        .expect("nvme: OOM allocating read buffer");
+    let buf_phys = buf_frame.start_address().as_u64();
+    let buf_virt = phys_to_virt(buf_phys);
+    // SAFETY: freshly-allocated frame; we own it exclusively.
+    unsafe { core::ptr::write_bytes(buf_virt as *mut u8, 0, 4096) };
+
+    // Read command (NVMe 1.4 §6.9 Figure 391):
+    //   CDW10 = SLBA[31:0]
+    //   CDW11 = SLBA[63:32]
+    //   CDW12 = NLB[15:0] zero-based + flags
+    // NLB=0 → one block. PRP1 = buffer phys; PRP2 unused for a
+    // single 4-KiB transfer covering ≤ one host page.
+    let slba: u64 = 0;
+    let cdw10 = slba as u32;
+    let cdw11 = (slba >> 32) as u32;
+    let cdw12 = 0; // NLB=0 (one block), no flags
+
+    let cid = submit_qe(
+        ctrl,
+        QueueKind::Io,
+        OPC_READ,
+        nsid,
+        buf_phys,
+        cdw10,
+        cdw11,
+        cdw12,
+    );
+    let status = poll_qe(ctrl, QueueKind::Io, cid);
+    assert_eq!(
+        status & 0xFFFE,
+        0,
+        "nvme: Read sector 0 returned non-zero status {status:#06x}",
+    );
+
+    // SAFETY: buf_virt holds the 4-KiB read result; the bytes
+    // [510..512] are within the first sector regardless of LBA
+    // size (M1 step 1 asserts 512-byte LBAs at identify_ns).
+    let sig: u16 = unsafe {
+        core::ptr::read_unaligned((buf_virt + 510) as *const u16)
+    };
+    assert_eq!(
+        sig, 0xAA55,
+        "nvme: sector 0 MBR signature mismatch (got {sig:#06x}); the QEMU NVMe backing should be the same hybrid ISO virtio-blk reads at 3C-3"
+    );
+
+    let _ = writeln!(
+        serial::Writer,
+        "nvme: sector 0 read OK (status={status:#06x}, sig=0xaa55)",
+    );
+    serial::write_str("ARSENAL_NVME_OK\n");
+
+    frames::FRAMES.free_frame(buf_frame);
+}
+
+fn queue_mut(ctrl: &mut Controller, kind: QueueKind) -> &mut NvmeQueue {
+    match kind {
+        QueueKind::Admin => ctrl
+            .admin
+            .as_mut()
+            .expect("nvme: admin queue not set up"),
+        QueueKind::Io => ctrl
+            .io
+            .as_mut()
+            .expect("nvme: I/O queue not set up"),
+    }
 }
 
 /// Spin until CSTS bits under `mask` match `expected`. Panics on
