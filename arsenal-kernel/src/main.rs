@@ -12,8 +12,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::BaseRevision;
 use limine::memory_map::EntryType;
 use limine::request::{
-    FramebufferRequest, HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker,
-    RsdpRequest,
+    FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest, RequestsEndMarker,
+    RequestsStartMarker, RsdpRequest,
 };
 
 mod acpi;
@@ -32,6 +32,7 @@ mod rand;
 mod sched;
 mod serial;
 mod shell;
+mod smp;
 mod task;
 mod virtio;
 mod virtio_blk;
@@ -65,6 +66,10 @@ static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static MP_REQUEST: MpRequest = MpRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
@@ -105,10 +110,18 @@ extern "C" fn _start() -> ! {
     heap_round_trip();
     serial::write_str("ARSENAL_HEAP_OK\n");
 
-    let reclaimed = frames::reclaim_bootloader(memmap.entries());
+    // 4-2: BOOTLOADER_RECLAIMABLE reclaim deferred. Limine allocates
+    // each AP a 64 KiB stack inside that region and APs sit on those
+    // stacks indefinitely at M0 (hlt loop). Reclaiming now would
+    // hand the AP stack frames back to the allocator and corrupt
+    // any AP that takes an interrupt or fault later. 4-4's AP
+    // scheduler puts APs on kernel-owned task stacks; reclamation
+    // can resume there. 3A's frames::reclaim_bootloader is preserved
+    // verbatim — just unused at this point in the boot.
     let _ = writeln!(
         serial::Writer,
-        "frames: reclaimed {reclaimed} bootloader frames; {} free / {} total",
+        "frames: bootloader reclaim deferred (APs on Limine stacks); \
+         {} free / {} total",
         frames::FRAMES.free_count(),
         frames::FRAMES.total_added()
     );
@@ -137,13 +150,29 @@ extern "C" fn _start() -> ! {
     // handlers (whose IRQs are still gated by IF=0 until idle's
     // sti) will resolve to this slot when they fire.
     cpu::init_bsp();
-    let cpu = cpu::current_cpu();
+    let bsp = cpu::current_cpu();
     let _ = writeln!(
         serial::Writer,
-        "cpu: id={} apic_id={} (BSP, single-CPU stage)",
-        cpu.id,
-        cpu.apic_id.load(core::sync::atomic::Ordering::Relaxed),
+        "cpu: bsp id={} apic_id={}",
+        bsp.id,
+        bsp.apic_id.load(core::sync::atomic::Ordering::Relaxed),
     );
+
+    // 4-2: bring up every AP Limine reports via the MP request.
+    // Limine handles each AP's real-mode -> long-mode transition
+    // and hands it to smp::ap_entry with the kernel's CR3 loaded.
+    // ap_entry initializes the AP's CpuLocal (gs base), loads the
+    // shared IDT, software-enables its LAPIC, and parks in hlt
+    // until 4-4's AP scheduler arrives.
+    if let Some(mp) = MP_REQUEST.get_response() {
+        smp::init(mp);
+    } else {
+        let _ = writeln!(
+            serial::Writer,
+            "smp: no MP response from limine — single-CPU run",
+        );
+        serial::write_str("ARSENAL_SMP_OK\n");
+    }
 
     // 3G-0: PS/2 keyboard. Polled-only; the shell task (3G-1) will
     // call kbd::poll on each cooperative iteration. init drains any

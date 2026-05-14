@@ -110,6 +110,12 @@ pub fn init(entries: &[&Entry], heap_phys_start: u64, heap_phys_end: u64) {
 /// before then the kernel is still walking through Limine's tables
 /// (in BOOTLOADER_RECLAIMABLE memory) and reclaiming would race with
 /// our own reads. Returns the number of frames newly added.
+///
+/// 3A wired this into the boot path; 4-2 deferred the call because
+/// Limine allocates each AP a 64 KiB stack in this region and APs
+/// stay on those stacks at M0. Re-enable from main.rs once 4-4
+/// places APs onto kernel-owned scheduler stacks.
+#[allow(dead_code)]
 pub fn reclaim_bootloader(entries: &[&Entry]) -> usize {
     let before = FRAMES.free_count();
     for entry in entries {

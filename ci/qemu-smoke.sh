@@ -59,7 +59,7 @@ now_ms() {
 # its "this subsystem survived" assertion in CI; remove one only when
 # the underlying assertion is folded into a stronger downstream
 # sentinel. Order does not matter — we wait for the full set.
-REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_PROMPT_OK")
+REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_SMP_OK" "ARSENAL_PROMPT_OK")
 SERIAL_LOG=$(mktemp -t arsenal-smoke-serial.XXXXXX)
 QEMU_LOG=$(mktemp -t arsenal-smoke-qemu.XXXXXX)
 CERT_DIR=$(mktemp -d -t arsenal-smoke-cert.XXXXXX)
@@ -165,7 +165,7 @@ sleep 0.3
 
 qemu-system-x86_64 \
 	-cdrom "$ISO" \
-	-m 256M -smp 1 \
+	-m 256M -smp 4 \
 	-machine q35 \
 	-accel tcg -cpu max \
 	-device virtio-rng-pci \

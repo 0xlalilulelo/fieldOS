@@ -441,6 +441,33 @@ pub fn init() {
     );
 }
 
+/// AP-side LAPIC bring-up. The BSP has already mapped the LAPIC MMIO
+/// page (paging::map_mmio in init) — that mapping is in the shared
+/// kernel page tables, so APs see it via their CR3 (Limine sets up
+/// CR3 with the kernel's tables when starting each AP). All this
+/// does is software-enable this core's LAPIC and install the
+/// spurious vector. Timer arming is BSP-only at M0 (HANDOFF.md AP
+/// timer state trade-off (i)); APs run scheduler ticks via IPIs
+/// from the BSP at 4-4.
+pub fn ap_init() {
+    // SAFETY: LAPIC MMIO mapped during BSP's apic::init; SVR bit 8
+    // = APIC software-enable. Spec-legal pattern per Intel SDM
+    // Vol. 3A §10.9 — bits 0..7 = spurious vector, bit 8 = enable.
+    unsafe {
+        lapic_write(LAPIC_REG_SVR, LAPIC_SVR_ENABLE | SPURIOUS_VECTOR as u32);
+    }
+
+    // SAFETY: LAPIC_ID register is read-only per Intel SDM Vol. 3A
+    // §10.4.6; we cache the shift-extracted ID into this AP's
+    // CpuLocal so the local current_cpu().apic_id stays consistent
+    // with the hardware register (BSP's apic::init does the
+    // equivalent into apic.rs's LAPIC_ID static).
+    let id = unsafe { lapic_read(LAPIC_REG_ID) };
+    cpu::current_cpu()
+        .apic_id
+        .store(id >> 24, Ordering::Relaxed);
+}
+
 /// Write `val` to x86 I/O port `port`.
 ///
 /// # Safety

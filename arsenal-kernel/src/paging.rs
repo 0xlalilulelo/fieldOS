@@ -30,11 +30,24 @@ const PAGE_SIZE: usize = 4096;
 /// virtual addresses without re-querying Limine.
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
+/// Physical address of the kernel-owned PML4 produced by the deep
+/// clone in `init`. APs at 4-2 read this and write their own CR3
+/// before touching any post-clone mapping (e.g. the LAPIC MMIO that
+/// apic::init added via map_mmio) — Limine starts APs with Limine's
+/// PML4 loaded, which has Limine's mappings only.
+static KERNEL_PML4_PHYS: AtomicU64 = AtomicU64::new(0);
+
 /// HHDM offset reported by Limine and stashed by `init`. Reads are
 /// undefined before `init` runs — callers gate themselves behind
 /// post-init points in the boot sequence.
 pub fn hhdm_offset() -> u64 {
     HHDM_OFFSET.load(Ordering::Relaxed)
+}
+
+/// Physical address of the kernel-owned PML4. Returns 0 before
+/// `init` runs.
+pub fn kernel_pml4_phys() -> u64 {
+    KERNEL_PML4_PHYS.load(Ordering::Relaxed)
 }
 
 /// Deep-clone a page table at `level` (4 = PML4, 3 = PDPT, 2 = PD,
@@ -173,6 +186,8 @@ pub fn init(hhdm_offset: u64) {
     // resolve identically after the CR3 write. The CR3 write
     // flushes the TLB.
     unsafe { Cr3::write(new_pml4, Cr3Flags::empty()) };
+
+    KERNEL_PML4_PHYS.store(new_pml4.start_address().as_u64(), Ordering::Relaxed);
 
     let _ = writeln!(
         serial::Writer,

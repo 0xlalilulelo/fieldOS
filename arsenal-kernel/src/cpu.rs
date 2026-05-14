@@ -21,7 +21,7 @@ use spin::Mutex;
 use crate::apic;
 use crate::task::Task;
 
-const MAX_CPUS: usize = 64;
+pub const MAX_CPUS: usize = 64;
 
 /// IA32_GS_BASE (Intel SDM Vol. 4 §2.5). Writing the CpuLocal slot
 /// address here makes `gs:[N]` reach offset N of that struct from
@@ -98,18 +98,35 @@ static CPUS: [CpuLocal; MAX_CPUS] = build_cpus();
 /// this core — the timer handler at vector 0xEF calls current_cpu()
 /// and would dereference garbage if GS base were still zero.
 pub fn init_bsp() {
-    let slot = &CPUS[0] as *const CpuLocal as *mut CpuLocal;
+    init_slot(0, apic::lapic_id() as u32);
+}
 
-    // SAFETY: slot points at CPUS[0], a 'static slot with no &mut
-    // aliases. Writing to its atomic fields is a relaxed store.
+/// Initialize an AP's per-CPU storage at slot `slot` for the core
+/// whose LAPIC ID is `apic_id`. Called from smp::ap_entry on the AP
+/// itself, after Limine has handed the core to us in 64-bit long
+/// mode with the kernel's CR3 loaded. From the moment this returns,
+/// `current_cpu()` is callable on this core and resolves to slot.
+pub fn init_ap(slot: u32, apic_id: u32) {
+    init_slot(slot, apic_id);
+}
+
+fn init_slot(slot_idx: u32, apic_id: u32) {
+    assert!(
+        (slot_idx as usize) < MAX_CPUS,
+        "cpu: slot index {slot_idx} ≥ MAX_CPUS={MAX_CPUS}",
+    );
+    let slot = &CPUS[slot_idx as usize] as *const CpuLocal as *mut CpuLocal;
+
+    // SAFETY: slot points at CPUS[slot_idx], a 'static slot with no
+    // &mut aliases. Writing to its atomic fields is a relaxed store.
     let cpu = unsafe { &*slot };
     cpu.self_ptr.store(slot, Ordering::Relaxed);
-    cpu.apic_id.store(apic::lapic_id() as u32, Ordering::Relaxed);
+    cpu.apic_id.store(apic_id, Ordering::Relaxed);
 
     // SAFETY: MSR_GS_BASE write per Intel SDM Vol. 3A §9.11.13.
     // In 64-bit mode the GS base is set by this MSR regardless of
-    // any segment-register reload; subsequent `gs:[N]` accesses
-    // resolve to slot + N. We're in ring 0.
+    // any segment-register reload; subsequent `gs:[N]` accesses on
+    // this core resolve to slot + N. Ring 0.
     unsafe {
         wrmsr(MSR_GS_BASE, slot as u64);
     }
