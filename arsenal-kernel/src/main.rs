@@ -24,6 +24,7 @@ mod frames;
 mod gdt;
 mod heap;
 mod idt;
+mod ioapic;
 mod kbd;
 mod net;
 mod paging;
@@ -157,6 +158,12 @@ extern "C" fn _start() -> ! {
         bsp.id,
         bsp.apic_id.load(core::sync::atomic::Ordering::Relaxed),
     );
+
+    // 4-3: map the IOAPIC MMIO, read its version register, mask
+    // every redirection-table entry. Doesn't program any routing
+    // yet — 4-5 will unmask IRQ1 for the keyboard once the IRQ
+    // handler is wired through the IDT.
+    ioapic::init();
 
     // 4-2: bring up every AP Limine reports via the MP request.
     // Limine handles each AP's real-mode -> long-mode transition
