@@ -16,11 +16,12 @@
 // the LAPIC and installs the spurious vector.
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use x86_64::registers::model_specific::{ApicBase, ApicBaseFlags};
 use x86_64::structures::idt::InterruptStackFrame;
 
+use crate::cpu;
 use crate::paging;
 use crate::serial;
 
@@ -114,21 +115,11 @@ static LAPIC_VERSION: AtomicU32 = AtomicU32::new(0);
 /// this single static suffices for the BSP-only world.
 static LAPIC_ID: AtomicU32 = AtomicU32::new(0);
 
-/// Latched on the first spurious interrupt so the log records the
-/// occurrence exactly once. A spurious "storm" (continuous delivery
-/// during a mis-configured bring-up) would otherwise drown serial
-/// output before the smoke could even observe a failure mode.
-static SPURIOUS_SEEN: AtomicBool = AtomicBool::new(false);
-
-/// Periodic-timer tick counter. Incremented from the timer IRQ
-/// handler; readable from anywhere via `ticks()`. 3F-3's
-/// ARSENAL_TIMER_OK sentinel observes this crossing a threshold.
-static TICKS: AtomicUsize = AtomicUsize::new(0);
-
-/// Latches the first time `observe_timer_ok` sees TICKS cross the
-/// threshold, so the sentinel prints exactly once. Lives next to
-/// SPURIOUS_SEEN and TICKS because all three are timer-observability
-/// state that conceptually belongs to the LAPIC.
+/// Latches the first time `observe_timer_ok` sees the timer cross
+/// the threshold, so the sentinel prints exactly once across the
+/// system. Per-CPU tick state lives in cpu::CpuLocal (moved 4-1);
+/// this latch stays global because ARSENAL_TIMER_OK is a one-shot
+/// system-wide observation, not per-core.
 static TIMER_OK_LATCHED: AtomicBool = AtomicBool::new(false);
 
 /// Number of timer ticks the cooperative observer must see before
@@ -139,10 +130,11 @@ static TIMER_OK_LATCHED: AtomicBool = AtomicBool::new(false);
 /// the 15 s budget.
 const TIMER_OK_THRESHOLD: usize = 10;
 
-/// Snapshot of the tick counter. Cooperative tasks call this from
-/// non-IRQ context to observe progress.
+/// Snapshot of this CPU's tick counter. Cooperative tasks call this
+/// from non-IRQ context to observe progress on the core they happen
+/// to be running on.
 pub fn ticks() -> usize {
-    TICKS.load(Ordering::Relaxed)
+    cpu::current_cpu().ticks.load(Ordering::Relaxed)
 }
 
 /// Cooperative-context probe: if the periodic timer has delivered
@@ -213,14 +205,17 @@ unsafe fn lapic_write(reg: u32, val: u32) {
 }
 
 /// Spurious interrupt handler for vector `SPURIOUS_VECTOR`. Logs
-/// the first occurrence and silently absorbs subsequent ones. Per
-/// Intel SDM Vol. 3A §10.9, spurious delivery does *not* set the
-/// LAPIC's ISR bit and therefore does not require an EOI write.
+/// the first occurrence on each core and silently absorbs subsequent
+/// ones. Per Intel SDM Vol. 3A §10.9, spurious delivery does *not*
+/// set the LAPIC's ISR bit and therefore does not require an EOI
+/// write.
 pub extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {
-    if !SPURIOUS_SEEN.swap(true, Ordering::Relaxed) {
+    let cpu = cpu::current_cpu();
+    if !cpu.spurious_seen.swap(true, Ordering::Relaxed) {
         let _ = writeln!(
             serial::Writer,
-            "apic: spurious interrupt (vector {:#x}) — logged once",
+            "apic: spurious interrupt on cpu {} (vector {:#x}) — logged once",
+            cpu.id,
             SPURIOUS_VECTOR,
         );
     }
@@ -233,14 +228,14 @@ pub extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {
 /// deferred to M0 step 4 when SMP forces the design surface (per
 /// HANDOFF.md at commit dcf2377).
 pub extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: `apic::init` runs before `idt::init` installs this
-    // handler in a way that any IRQ could deliver — and `init`
-    // both maps the LAPIC MMIO and software-enables the LAPIC
-    // before arming the timer LVT. By the time this handler can
-    // fire, LAPIC MMIO is live. Writing 0 to the EOI register is
-    // the spec-defined acknowledgement (Intel SDM Vol. 3A §10.8.5);
-    // EOI has no read side effects and only a single legal write.
+    cpu::current_cpu().ticks.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: `apic::init` maps the LAPIC MMIO and software-enables
+    // the LAPIC before arming the timer LVT; cpu::init_bsp loads
+    // MSR_GS_BASE before idle's sti opens the IF gate. By the time
+    // this handler can fire, both LAPIC MMIO and GS are live.
+    // Writing 0 to EOI is the spec-defined acknowledgement (Intel
+    // SDM Vol. 3A §10.8.5); EOI has no read side effects and only
+    // a single legal write.
     unsafe { lapic_write(LAPIC_REG_EOI, 0) };
 }
 

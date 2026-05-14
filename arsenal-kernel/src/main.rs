@@ -114,9 +114,6 @@ extern "C" fn _start() -> ! {
     );
     serial::write_str("ARSENAL_FRAMES_OK\n");
 
-    let cpu = cpu::current_cpu();
-    let _ = writeln!(serial::Writer, "cpu: id={} (single-CPU stage)", cpu.id);
-
     // 3F-0: mask the legacy 8259 PIC so it stops competing for
     // vectors 0x20..0x2F, discover the LAPIC base via the
     // IA32_APIC_BASE MSR, map its 4 KiB MMIO page through
@@ -133,6 +130,20 @@ extern "C" fn _start() -> ! {
         .get_response()
         .expect("limine: RSDP response missing — bootloader did not provide ACPI tables");
     acpi::init(rsdp.address());
+
+    // 4-1: per-CPU storage via GS base. Populate CPUS[0].self_ptr,
+    // cache the BSP's LAPIC ID, and write MSR_GS_BASE. From this
+    // point on, current_cpu() is callable; the timer / spurious
+    // handlers (whose IRQs are still gated by IF=0 until idle's
+    // sti) will resolve to this slot when they fire.
+    cpu::init_bsp();
+    let cpu = cpu::current_cpu();
+    let _ = writeln!(
+        serial::Writer,
+        "cpu: id={} apic_id={} (BSP, single-CPU stage)",
+        cpu.id,
+        cpu.apic_id.load(core::sync::atomic::Ordering::Relaxed),
+    );
 
     // 3G-0: PS/2 keyboard. Polled-only; the shell task (3G-1) will
     // call kbd::poll on each cooperative iteration. init drains any
