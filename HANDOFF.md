@@ -1,775 +1,646 @@
-Kickoff for the next session — M0 step 4, SMP.
+Kickoff for the next milestone — Arsenal M1, "real iron."
 
-M0 step 3 closed cleanly on 2026-05-13 across seven sub-blocks
-(3A frame allocator → 3B scheduler skeleton → 3C virtio → 3D
-smoltcp + rustls → 3E framebuffer console → 3F LAPIC + soft
-preemption → 3G `>` prompt + perf gate). HEAD is 1b316c9
-(docs(status,devlogs): M0 step 3 complete, step 4 (SMP) next);
-main is five commits ahead of origin/main (3G-0 PS/2 polling,
-3G-1 shell + line editor, 3G-2 commands, 3G-3 perf gate,
-3G-paper STATUS + devlog). Working tree clean. Smoke green at
-**ten sentinels in ~430-600 ms locally**, ~45 s on
-`ubuntu-24.04`; the perf gate observes 0 ms boot→prompt under
-TCG (kernel boot fits within one 50 ms polling cycle of the
-harness). ARSENAL.md's M0 boot-to-prompt < 2 s target is met
-with massive headroom; `BOOT_BUDGET_MS=2000 ci/qemu-smoke.sh`
-is the conformance check, default 3000 ms is the hosted-runner
-slack.
+M0 closed at `arsenal-M0-complete` (commit 9793487, 2026-05-14)
+across six steps and ~16 calendar days post-pivot. ARSENAL.md
+M0 gates met: 96 ms boot→prompt vs 2000 ms target, zero unsafe
+outside designated FFI boundaries, prompt keyboard-navigable
+with `hw` summary. Working tree clean, branch in sync with
+origin/main.
 
-Step 4 is the last major surface of M0. After it lands, the
-M0 milestone tag (`M0-complete`) ships and the next plan
-section is M1 (LinuxKPI shim, amdgpu KMS, NVMe / xHCI /
-iwlwifi). STATUS.md § "Active work — M0 step 4 — SMP" already
-names the surface: inter-processor interrupts via LAPIC ICR,
-AP startup through the canonical INIT-SIPI-SIPI sequence
-(ACPI MADT enumerates the processor entries), per-CPU LAPIC
-state (TICKS per core, SPURIOUS_SEEN per core — the
-single-CPU `AtomicUsize` shape from 3F splits per-core), hard
-preemption discipline (IRQ-driven context switch from inside
-the timer handler, rflags save/restore in `switch_to`,
-per-CPU preempt-disable counter), and IOAPIC bring-up so
-device IRQs route through the LAPIC (which unlocks IRQ-driven
-keyboard, virtio MSI-X, and the rest of the device-IRQ
-ecosystem that 3G-0's "polled only" decision deferred).
+M1 per ARSENAL.md (months 9-24 of the original calendar plan)
+is "real iron" — first boot on a Framework 13 AMD laptop, with
+enough driver support (storage, USB, GPU framebuffer, wireless)
+to be useful. Six concrete deliverables from § "Three Concrete
+Starting Milestones":
 
-Step 4's design space — multi-core correctness, IRQ-context
-safety, ACPI parsing — is **genuinely the biggest jump in M0**.
-3A through 3G each ran in 1-2 calendar days; step 4 sub-blocks
-will take longer per block and may need re-decomposition once
-the AP trampoline / hard-preemption pieces actually land. The
-sub-block proposal below is a first-pass split; expect to
-revise after 4-0 lands and the design constraints settle.
+  1. LinuxKPI shim layer in Rust, modeled on FreeBSD
+     drm-kmod patterns. **ARSENAL.md flags this as the single
+     largest engineering task — budget accordingly.**
+  2. amdgpu driver under LinuxKPI, KMS only (no Vulkan).
+  3. NVMe driver (native Rust, ~5K LOC per ARSENAL.md).
+  4. xHCI USB driver (native Rust or LinuxKPI port —
+     evaluate at start).
+  5. iwlwifi + mac80211 via LinuxKPI.
+  6. First boot on real Framework 13 AMD hardware.
+
+Plus a Slint app running in a software-rendered framebuffer
+(seventh deliverable, listed separately in ARSENAL.md).
+
+ARSENAL.md M1 gates:
+  - **Performance:** cold boot to login on Framework 13 AMD
+    < 8 s.
+  - **Security:** Linux drivers run with minimum required
+    kernel capabilities; no shared kernel state beyond
+    explicit shim interfaces.
+  - **Usability:** Wi-Fi association via TUI works on first
+    try.
+
+This HANDOFF is *milestone-level* — it proposes a step
+decomposition for all of M1, surfaces the trade-offs whose
+resolution will shape the next 12+ months of work, and
+recommends a starting point. Subsequent HANDOFFs (one per
+step kickoff, following the M0 pattern) will be step-level
+and overwrite this file.
 
 read CLAUDE.md (peer concerns, Rust-only, BSD-2-Clause base,
-build loop sacred, no unsafe without // SAFETY: invariant
-comment) → STATUS.md (M0 step 3 complete, step 4 is the
-active block; § "Active work — M0 step 4 — SMP" enumerates
-the surface) → docs/plan/ARSENAL.md § "Three Concrete Starting
-Milestones" → M0 ("basic SMP" is in the M0 deliverable list at
-line 163; performance / security / usability gates from step 3
-remain in force, and the M0-complete tag is what closes the
-milestone) → docs/devlogs/2026-05-arsenal-prompt.md (M0 step 3
-exit log, ends with "step 4 next" and names IOAPIC /
-hard-preemption as the two specifically-deferred items from
-3G) → arsenal-kernel/src/apic.rs (467 LOC post-3F; the single
-LAPIC instance is currently a process-global; the TICKS and
-SPURIOUS_SEEN AtomicUsize/AtomicBool become per-core; init() is
-BSP-only and AP-init is the new entry — `apic::ap_init`) →
-arsenal-kernel/src/cpu.rs (70 LOC; the per-CPU data area is
-currently single-CPU; step 4 either widens this struct or
-replaces it with a GS-base-indexed table — see trade-off pair
-below) → arsenal-kernel/src/sched.rs (292 LOC post-3G; the
-global runqueue `Mutex<VecDeque<Box<Task>>>` becomes either a
-single global with IRQ-disabled critical sections or per-CPU
-local + work-stealing — recommend single global at M0, see
-trade-off) → arsenal-kernel/src/task.rs (112 LOC; the 32 KiB
-stack budget from 3F-2 applies to AP boot stacks too — heap
-allocation pattern is already established) → arsenal-kernel/
-src/idt.rs (140 LOC; vectors 0xEF timer / 0xFF spurious wired
-today; step 4 adds IRQ1 → some vector once IOAPIC routes it,
-and rewrites the timer handler to dispatch through the
-scheduler instead of just incrementing TICKS) → arsenal-kernel/
-src/paging.rs (182 LOC; map_mmio already handles the LAPIC and
-virtio MMIO cases; IOAPIC is one more MMIO region with the
-same shape) → arsenal-kernel/src/kbd.rs (252 LOC; the polled
-path stays as fallback during 4-5's transition, then the
-poll-based shell loop is replaced by an event-source wait) →
-arsenal-kernel/src/main.rs (400 LOC; the boot order is
-serial → frames → paging → heap → ACPI (new at 4-0) →
-SMP-bring-up (new at 4-2) → virtio → net → shell → sched::init.
-sched::init becomes the BSP's final transition into the
-scheduler; APs reach their own sched::ap_init via the
-trampoline path) → ci/qemu-smoke.sh (REQUIRED_SENTINELS grows
-by one or two depending on per-block sentinel choice — see
-"Sentinel discipline" below; the QEMU command line gains
-`-smp 4` (or `-smp 2` for tighter loop) so the BSP actually
-has APs to bring up) → Cargo.toml (4-0 may add the `acpi` crate
-from rust-osdev (Apache-2.0 / MIT, no_std) if we pick that
-over a hand-rolled MADT walker — see trade-off pair below) →
-git log --oneline -10 → run the sanity check below → propose
-4-N commit shape (or argue for a different decomposition) →
-wait for me to pick → "go 4-N" for code, "draft 4-N" for
-paper deliverables.
+build loop sacred, "use Limine"; the LinuxKPI / GPLv2 driver
+boundary is the first M1 surface that exercises CLAUDE.md
+§3's combined-work license discipline) → STATUS.md (M0
+complete, M1 active with no sub-block yet; the five posture
+changes carrying forward from M0 are load-bearing for any
+M1 driver) → docs/plan/ARSENAL.md § "M1 — Real iron" → the
+ADR-0004 pivot history at docs/adrs/0004-arsenal-pivot.md
+(Rust-only commitment that constrains the LinuxKPI shim
+shape; inherited driver C stays GPLv2 in the LinuxKPI shim
+boundary, our shim is Rust + BSD-2) → arsenal-kernel/src/
+(at M0 exit: 22 .rs files, ~5,900 LOC, ELF 1.52 MB; M1
+step 1 adds ~1 file per driver subsystem, expect ELF to
+2.5-4 MB range by M1 mid-point) → docs/devlogs/
+2026-05-arsenal-smp.md § "What M1 looks like" (the M0
+exit devlog enumerates the M1 surface with one sentence
+per item; this HANDOFF expands each into a step) →
+git log --oneline -20 → run the sanity check below →
+propose step decomposition (or argue for a different
+shape) → wait for me to pick the first step → "go step 1"
+for code (or whatever the first step shorthand becomes),
+"draft step 1 HANDOFF" for the step-level kickoff document.
 
 Where the project is
 
-  - main is at HEAD 1b316c9 (docs(status,devlogs): M0 step 3
-    complete, step 4 (SMP) next). Working tree is clean
-    except this file. main is five commits ahead of
-    origin/main; this HANDOFF makes it six. Push to origin
-    should bundle 1b316c9 through the 4-kickoff commit so the
-    M0 step 3 closeout and the step 4 kickoff land together.
-  - LOC: arsenal-kernel/src/ is 21 files post-3G with 5,281
-    total lines (kbd.rs 252, shell.rs 233, apic.rs 467,
-    sched.rs 292, task.rs 112, idt.rs 140, cpu.rs 70,
-    paging.rs 182, main.rs 400, the rest tracking the M0 step
-    3 surface). ELF release post-3G is 1,487,408 bytes;
-    ISO 19.3 MB. Step 4 budget: ~600-900 lines net across the
-    seven sub-commits below — 4-0 (ACPI) is the biggest single
-    block at ~180-250 LOC, 4-2 (AP bring-up) is ~200-280 LOC
-    counting the asm trampoline, the rest are 60-150 each.
-  - Toolchain: nightly-2026-04-01 pinned in
-    rust-toolchain.toml. Step 4 uses no new nightly features;
-    `global_asm!` for the AP trampoline is the established
-    3B pattern.
-  - Crates currently linked: limine 0.5, linked_list_allocator
-    0.10, spin 0.10, x86_64 0.15, smoltcp 0.12, rustls 0.23,
-    rustls-rustcrypto 0.0.2-alpha, getrandom 0.4 + 0.2.
-    Potential addition for 4-0: `acpi` 5.x or 6.x from
-    rust-osdev (Apache-2.0 / MIT, no_std) — see trade-off; if
-    we hand-roll MADT, no new deps for step 4.
-  - Sentinels: smoke requires ten post-3G —
-    ARSENAL_BOOT_OK / HEAP_OK / FRAMES_OK / SCHED_OK / BLK_OK /
-    NET_OK / TCP_OK / TLS_OK / TIMER_OK / PROMPT_OK. Step 4
-    adds at minimum one (ARSENAL_SMP_OK at 4-2, after all
-    enumerated APs reach kernel-side init barrier); the
-    aggressive shape would also add ARSENAL_ACPI_OK at 4-0
-    and ARSENAL_IOAPIC_OK at 4-3 for bisect granularity. See
-    "Sentinel discipline" below for the trade-off.
-  - QEMU command line today: q35, 256 MiB RAM, virtio-blk +
-    virtio-net + virtio-rng, `-cpu max`. **No `-smp` flag** —
-    single CPU. Step 4's smoke needs `-smp 2` minimum, `-smp 4`
-    to exercise the per-CPU storage and runqueue paths on
-    something more than a trivial topology.
-  - HANDOFF.md (this file) is being rewritten now for step 4.
-    Prior contents (3G kickoff) are in git history at 61aace9.
+  - HEAD: 9793487 (docs(devlogs): Arsenal SMP + M0 milestone
+    exit). Tagged arsenal-M0-complete. Working tree clean.
+    In sync with origin/main. The Field OS arc's
+    M0-complete / M1-complete / M2-complete tags coexist on
+    earlier commits (the C arc, preserved at field-os-v0.1).
 
-Step 4 — SMP
+  - Kernel: 22 .rs files (acpi, apic, cpu, fb, fb_font,
+    frames, gdt, heap, idt, ioapic, irq, kbd, main, net,
+    paging, pci, rand, sched, serial, shell, smp, task,
+    virtio, virtio_blk, virtio_net) at ~5,900 LOC plus the
+    Spleen font + small smoke harness. ELF release 1.52 MB,
+    ISO 19.3 MB.
+
+  - Smoke: 13 required sentinels, ~1.2-1.5 s on QEMU TCG
+    with -smp 4. Boot→prompt 94 ms (budget 3000 ms). The
+    sentinel list at M0 exit:
+    ARSENAL_BOOT_OK / HEAP_OK / FRAMES_OK / BLK_OK /
+    NET_OK / SCHED_OK / TCP_OK / TLS_OK / TIMER_OK /
+    ACPI_OK / IOAPIC_OK / SMP_OK / PROMPT_OK.
+
+  - Toolchain: nightly-2026-04-01 pinned in
+    rust-toolchain.toml. M1's first new toolchain dependency
+    is likely Slint at step 7; the rest of M1 is driver work
+    that doesn't push the toolchain frontier.
+
+  - Vendored crates at M0 exit: limine 0.5,
+    linked_list_allocator 0.10, spin 0.10, x86_64 0.15,
+    smoltcp 0.12, rustls 0.23, rustls-rustcrypto 0.0.2-alpha,
+    getrandom 0.4 + 0.2, bitflags 2. All BSD / MIT / Apache-2.0
+    / ISC — clear under CLAUDE.md §3. M1 grows this list:
+    pci-types (BSD/MIT, structured PCIe config parsing) and a
+    Slint runtime crate at step 7 are the likely first
+    additions; per-driver shim source files for inherited
+    Linux code retain GPLv2 in their original form per
+    CLAUDE.md §3 / the FreeBSD drm-kmod pattern.
+
+  - QEMU smoke command line at M0 exit:
+    `-cdrom $ISO -m 256M -smp 4 -machine q35 -accel tcg
+    -cpu max -device virtio-rng-pci
+    -drive file=$ISO,if=none,id=blk0,format=raw,readonly=on
+    -device virtio-blk-pci,drive=blk0
+    -netdev user,id=net0
+    -device virtio-net-pci,netdev=net0
+    -display none -no-reboot -no-shutdown
+    -serial file:$SERIAL_LOG -d guest_errors -D $QEMU_LOG`.
+    M1 step 1 (NVMe) replaces `-device virtio-blk-pci` with
+    `-device nvme,serial=arsenal0,drive=blk0`.
+
+  - Real hardware: not yet purchased. ARSENAL.md commits to
+    Framework 13 AMD as the v1.0 configuration target. The
+    purchase timing is one of the milestone-level trade-offs
+    below; recommend purchase mid-M1 (after step 1 NVMe is
+    stable in QEMU) so the first real-hardware boot has a
+    storage path that works.
+
+M1 — proposed step decomposition
 
 The plan below is the kickoff proposal, not gospel. The user
-picks the shape; deviations get justified before code lands.
-Step 4's sub-block boundaries are the most likely to shift in
-all of M0 — the AP bring-up path (4-2) and hard preemption
-(4-4) each have multiple stable points where the work could
-land in one commit or three.
+picks; deviations get justified before code lands. M1's eight
+steps roughly correspond to the seven ARSENAL.md deliverables
+plus a milestone-close step at the end. The first three steps
+are QEMU-only (no real-hardware dependency); steps 4-7 need
+the Framework 13 AMD; step 8 is the milestone exit.
 
-Sub-candidate decomposition
+  **Step 1 — NVMe native Rust (~5K LOC).** First M1 driver.
+  Native Rust per ARSENAL.md; no LinuxKPI dependency. The
+  smallest useful M1 driver and the first to exercise the
+  PCIe configuration / MSI-X / DMA paths every other driver
+  also needs. Outcome: kernel can boot from a real NVMe disk
+  in QEMU. Smoke gains ARSENAL_NVME_OK and the QEMU command
+  line swaps virtio-blk for `-device nvme`. Calendar budget:
+  4-6 weeks at part-time pace. Use **go m1-1** for kickoff.
 
-  (4-0) **ACPI MADT parser.** Adds `arsenal-kernel/src/acpi.rs`.
-        RSDP via Limine's `RsdpRequest` (Limine 0.5 provides
-        the RSDP pointer directly — no EBDA / BIOS scan
-        needed). Walk the RSDT (or XSDT if revision ≥ 2);
-        find the MADT (signature "APIC"). Parse the MADT
-        header (Local APIC address, flags) and enumerate the
-        entries: Type 0 (Processor Local APIC) records the
-        APIC IDs of all logical processors and a per-entry
-        "enabled" / "online-capable" flag, Type 1 (I/O APIC)
-        records IOAPIC ID + base address + GSI base, Type 2
-        (Interrupt Source Override) records ISA-IRQ → GSI
-        remappings (the IRQ1 keyboard case lives here on most
-        firmware). Expose `acpi::cpus() -> &[CpuInfo]`,
-        `acpi::ioapics() -> &[IoapicInfo]`, and `acpi::
-        irq_override(isa_irq: u8) -> Option<GsiOverride>`.
-        Sentinel ARSENAL_ACPI_OK emitted from acpi::init once
-        the MADT walk completes and the BSP's APIC ID matches
-        the LAPIC ID register from 3F. ~180-250 LOC if
-        hand-rolled; ~50 LOC of glue if the `acpi` crate is
-        adopted (but the crate brings ~3000 LOC of parser
-        surface for M0 features we don't use — see trade-off).
-        One commit: `feat(kernel): ACPI MADT parser`. Use
-        **go 4-0**.
+  **Step 2 — LinuxKPI shim foundation + tiny inherited
+  driver.** Build the smallest viable shim surface that
+  satisfies one inherited driver — recommend a simple Linux
+  driver as the first target (a virtio-balloon driver, or a
+  small Intel NIC driver from net/ethernet/intel/e1000 —
+  decide at the step kickoff). The shim covers printk-style
+  logging, kmalloc / kfree against our heap, GFP_KERNEL
+  flags as no-ops, struct device + driver registration,
+  pci_register_driver / pci_unregister_driver, IRQ
+  registration via our IDT / IOAPIC, basic locking
+  (spinlock_t / mutex_t mapping to spin::Mutex). DMA bounce
+  buffers wait for amdgpu / iwlwifi. The driver source files
+  retain GPLv2; the shim is BSD-2; the combined work ships
+  with explicit license boundaries (the FreeBSD drm-kmod
+  precedent). Calendar budget: 12-20 weeks — this is
+  ARSENAL.md's "single largest engineering task" and the
+  estimate is loose. Use **go m1-2**.
 
-  (4-1) **Per-CPU storage via GS base.** Replaces single-CPU
-        cpu.rs with per-CPU data accessed via `MSR_GS_BASE`
-        (0xC0000101) pointing at a `CpuLocal` struct per core.
-        BSP allocates one `CpuLocal` for itself in 4-1
-        (single-CPU behavior unchanged); AP entry path in 4-2
-        is what actually populates the others. The struct
-        holds: APIC ID, scheduler runqueue head (today still
-        a pointer into the single global runqueue from
-        sched.rs — see 4-4 trade-off for per-CPU rq), TICKS
-        (moved from apic.rs), SPURIOUS_SEEN (moved from
-        apic.rs), preempt-disable counter (placeholder until
-        4-4 wires it), current_task pointer (moved from
-        AtomicPtr in sched.rs). Access via `gs:[offset]` in
-        asm or via a `current_cpu()` helper that issues
-        `rdgsbase` (or `mov rax, gs:[0]` for the self-pointer
-        idiom). Refactor `apic::ticks()` and `apic::
-        observe_timer_ok()` to read per-CPU. ~120 LOC plus
-        ~40 LOC of refactor across apic.rs and sched.rs. One
-        commit: `refactor(kernel): per-CPU data via GS base`.
-        Use **go 4-1**.
+  **Step 3 — xHCI USB driver.** Per ARSENAL.md "evaluate at
+  start" — the native-Rust-vs-LinuxKPI choice is the
+  load-bearing trade-off below. Native Rust is the cleaner
+  shape; the Linux xhci-hcd port via the shim from step 2
+  is the broader-shim-validation shape. Recommend native
+  Rust at step kickoff; revisit if scope blows up. Outcome:
+  USB keyboard works post-Limine, USB mass storage works
+  for installer / live USB. Calendar budget: 6-10 weeks
+  native, 4-8 weeks LinuxKPI port (less code, more shim
+  surface). Use **go m1-3**.
 
-  (4-2) **AP startup via INIT-SIPI-SIPI.** The real-mode
-        trampoline. Carve out a fixed 4 KiB page under 1 MiB
-        — recommend 0x8000 (vector 0x08 in the SIPI second
-        byte field). Mark the page un-reclaimable in the
-        frame allocator at boot (4-2's first detour will be
-        confirming Limine doesn't hand 0x8000 back as usable —
-        most QEMU configurations leave 0x6000-0x9FFFF
-        reserved, but the Limine memory map is the
-        authoritative source). The trampoline is hand-written
-        16-bit → 32-bit → 64-bit code in a separate `.S`
-        file or `global_asm!` block: enable PAE + LME + paging,
-        load the BSP's CR3 (APs reuse the kernel's page
-        tables), jump to 64-bit `ap_entry` in Rust.
-        BSP-side: for each enumerated AP from 4-0's
-        `acpi::cpus()`, allocate a 32 KiB kernel stack (heap
-        Box like task::Task does), populate the AP's
-        `CpuLocal` from 4-1, send INIT IPI via LAPIC ICR
-        (vector field zero, delivery mode 0b101 INIT, target
-        APIC ID), 10 ms PIT-polled delay, send first SIPI
-        (vector 0x08, delivery mode 0b110 Startup), 200 µs
-        delay, send second SIPI. AP reaches `ap_entry`, sets
-        its CpuLocal from a parking-slot the BSP filled in,
-        increments AP_ONLINE_COUNT, calls `apic::ap_init`
-        (LAPIC software-enable, no timer arming yet — timer
-        is BSP-only at M0; APs run scheduler ticks via IPI
-        broadcast from the BSP at 4-4), then sched::ap_idle
-        loop. BSP waits on AP_ONLINE_COUNT reaching `cpus().
-        len() - 1`, then emits ARSENAL_SMP_OK. ~200-280 LOC
-        (50 LOC trampoline asm, 80 LOC BSP-side INIT-SIPI-SIPI
-        + IPI helpers in apic.rs, 60 LOC AP-side ap_entry +
-        ap_idle in sched.rs, 30-90 LOC of debugging helpers
-        that may or may not stay). One commit if it lands
-        clean: `feat(kernel): AP startup via INIT-SIPI-SIPI`.
-        Two commits if the trampoline lands separate from
-        the BSP-side ICR programming. Use **go 4-2**.
+  **Step 4 — amdgpu KMS via LinuxKPI shim.** The headlining
+  driver. Brings up Framework 13 AMD's integrated GPU
+  (Phoenix / Hawk Point / Strix Point depending on SKU)
+  enough to produce a framebuffer at native resolution.
+  KMS only — no Vulkan, no DRI, no 3D acceleration. amdgpu
+  also needs DMA bounce buffers, scatter-gather lists,
+  i2c bus access, ACPI methods (AML interpretation) for
+  ATIF / WMI handshake — the shim grows significantly at
+  this step. Firmware blobs (sienna_cichlid_sdma.bin etc.)
+  require provenance documentation. Calendar budget: 12-16
+  weeks. **This is the step most likely to surface
+  fundamental shim design issues that ripple back to step 2.**
+  Use **go m1-4**.
 
-  (4-3) **IOAPIC bring-up.** Map the IOAPIC MMIO region (base
-        from 4-0's `acpi::ioapics()[0].base`, typically
-        0xFEC00000) through `paging::map_mmio` — same dance
-        as 3F-0 for the LAPIC. IOAPIC has two MMIO registers:
-        IOREGSEL (offset 0x00, index register) and IOWIN
-        (offset 0x10, data window); read register N by
-        writing N to IOREGSEL then reading IOWIN. Read
-        IOAPIC_VER (register 0x01) to learn redirection-table
-        size (typically 24 entries on QEMU). Initial state:
-        all entries masked (bit 16 set in the low half of each
-        redirection-table entry pair). Provide `ioapic::
-        program(gsi: u8, vector: u8, target_cpu: u8)` to
-        unmask a specific GSI → vector → target APIC ID
-        routing. Don't actually program any GSI at 4-3 — the
-        keyboard's IRQ1 → GSI (via 4-0's irq_override map)
-        gets programmed by 4-5 when it consumes the IOAPIC
-        API. 4-3's smoke is structural ("IOAPIC mapped, ver
-        register reasonable, all entries masked"); optional
-        ARSENAL_IOAPIC_OK sentinel — see "Sentinel discipline"
-        below for whether to add it. ~120 LOC. One commit:
-        `feat(kernel): IOAPIC bring-up`. Use **go 4-3**.
+  **Step 5 — iwlwifi + mac80211 via LinuxKPI.** Wireless.
+  mac80211 is Linux's 802.11 stack (~50K LOC); iwlwifi is
+  Intel's wifi driver (~30K LOC). Plus the firmware blob.
+  Note: Framework 13 AMD ships with either an AMD-branded
+  Mediatek MT7921 (mt76 driver) or an Intel AX210 (iwlwifi)
+  depending on configuration; the step-level HANDOFF picks
+  one based on the actual purchased SKU. WPA2/3 supplicant
+  (wpa_supplicant) is itself ~100K LOC in C; for M1 we
+  port the minimum subset needed for "associate to a
+  preconfigured network" (the ARSENAL.md M1 usability
+  gate). Calendar budget: 12-20 weeks. Use **go m1-5**.
 
-  (4-4) **Hard preemption.** The hardest single block in
-        step 4 and likely the one that decomposes further once
-        the design lands. Three pieces in one commit if they
-        all converge; three commits if they don't:
-        (a) **rflags save/restore in `switch_to`.** Today's
-        cooperative `switch_to` (sched.rs::switch_to via
-        global_asm!) saves/restores callee-saved GP regs only;
-        IF=1 propagates from idle's `sti` because we never
-        touch rflags. Under IRQ-driven preemption, the timer
-        handler runs with IF=0 (interrupt gate clears IF on
-        entry), then context-switches mid-IRQ — rflags must
-        be saved-with-IF=0 and restored-with-IF=0 on the prev
-        task so when the prev task is re-scheduled it resumes
-        with IF=0 too, with the IRET on handler exit (vs
-        sysret or plain ret) being what restores IF=1 in the
-        normal cooperative case. `pushfq` + `popfq` in
-        switch_to, with care about ordering.
-        (b) **IRQ-safe runqueue access.** Today's runqueue is
-        `Mutex<VecDeque<Box<Task>>>` (spin::Mutex). An IRQ
-        handler that tries to acquire the runqueue while
-        cooperative code holds it deadlocks. Two paths:
-        (i) wrap every runqueue lock in IRQ-disable (cli +
-        save_flags / restore_flags + sti pattern, akin to
-        Linux's `spin_lock_irqsave`); (ii) per-CPU local
-        runqueues with no cross-core locking (work-stealing
-        for load balance). Recommend (i) at M0 — single
-        global runqueue with IRQ-saved locks is correct,
-        well-understood, and the contention story doesn't
-        matter at single-digit cores. (ii) is post-M0.
-        (c) **Timer handler dispatches the scheduler.**
-        Today's timer handler increments TICKS and writes
-        EOI. Step 4's handler additionally calls a "consider
-        preemption" path: if `current_task`'s time-slice has
-        elapsed (TICKS - task.start_tick > SLICE_TICKS),
-        push current onto runqueue, pop next, switch_to.
-        Time-slice budget: 10 ms × 10 = 100 ms slice for
-        single-core M0 (whole-second responsiveness with
-        room for 10 cooperative tasks). The actual switch
-        happens from IRQ context — switch_to must be
-        IRQ-context-safe (it already is, since cooperative
-        switches don't manipulate IRQ state, but verify).
-        Per-CPU preempt-disable counter prevents reentry
-        during the switch itself (counter > 0 ⇒ skip
-        preemption this tick). ~200 LOC across sched.rs and
-        apic.rs (timer handler). One commit: `feat(kernel):
-        hard preemption discipline` (or three sub-commits if
-        the design forces it: rflags / IRQ-safe lock / timer
-        dispatcher). Use **go 4-4**.
+  **Step 6 — First boot on real Framework 13 AMD.** USB
+  installer, UEFI boot, Limine, kernel, all four drivers
+  from steps 1-5 running on real silicon. Expect a 2-4
+  week stabilization period for real-hardware quirks not
+  seen in QEMU. The ARSENAL.md performance gate (cold
+  boot to login < 8 s) is asserted here. Calendar budget:
+  4-8 weeks. **This step ends most ambiguity about the
+  hardware purchase timing — see logistics below.** Use
+  **go m1-6**.
 
-  (4-5) **IRQ-driven keyboard.** Now that IOAPIC routes IRQs
-        and the timer handler runs the scheduler, IRQ1 →
-        IOAPIC GSI (1, or whatever the override says — usually
-        the identity mapping; QEMU q35 ISA bus has the
-        identity override) → LAPIC vector 0x21 wires through.
-        Add an IDT entry for 0x21 (keyboard handler).
-        Handler: read scancode from i8042 port 0x60, push
-        into a per-CPU 256-byte ring buffer, write EOI to
-        LAPIC. Shell task changes from `kbd::poll` in a tight
-        loop to `kbd::recv_blocking` which yields if the ring
-        is empty and gets re-scheduled when the handler
-        flips a "data pending" flag (or, simpler, when the
-        shell task's next preempt-tick comes around and the
-        ring is non-empty). Replace shell.rs::run's
-        cooperative-poll loop. Remove kbd's polled poll()
-        path or keep as a fallback (recommend remove —
-        polled was the 3G compromise; keeping both is dead
-        code now that IOAPIC routes for us). ~80 LOC net.
-        One commit: `feat(kernel): IRQ-driven keyboard`. Use
-        **go 4-5**.
+  **Step 7 — Slint app on software-rendered framebuffer.**
+  First "modern UI" on top of M0's fb console. Slint is
+  the Rust UI framework ARSENAL.md commits to (MIT/Apache
+  dual-licensed; commercial license for proprietary apps
+  also available — our use is open-source so MIT path).
+  Software-rendered means no GPU acceleration — paint
+  pixels to our fb directly. Likely a single "settings
+  app" or "system info" widget at M1; richer apps wait
+  for M2's Stage compositor. Calendar budget: 4-8 weeks.
+  Use **go m1-7**.
 
-  (4-6) **STATUS + devlog + M0-complete tag.** STATUS flips
-        step 4 from "next" to "complete," writes the step 4
-        retrospective sub-section (the trampoline page
-        reservation detour, the GS-base vs APIC-ID-array
-        trade-off, the time-slice budget calibration, any
-        IRQ-safe-lock surprises), and **closes M0**. The M0
-        retrospective lives at the top of STATUS (the
-        seven-step arc 3A-3G plus step 4, what posture
-        changes carry forward to M1, what surprises showed
-        up, how the calendar vs FTE-weeks projection held —
-        ARSENAL.md's "0-9 calendar months" budget against
-        actual months at M0-complete). Devlog at
-        `docs/devlogs/2026-05-arsenal-smp.md` (or whatever
-        month it actually lands) records the ACPI parser
-        depth call (hand-rolled vs `acpi` crate), the AP
-        trampoline page choice, the per-CPU storage
-        mechanism choice, the hard-preemption design, and
-        the "this is what the M0 milestone exit looked like"
-        summary. Two-or-three commits: `docs(status): M0
-        complete, M1 (LinuxKPI shim) next` and
-        `docs(devlogs): Arsenal SMP + M0 milestone exit`,
-        then the tag `git tag M0-complete` on the final
-        SHA. Use **go 4-6** for STATUS, **draft 4-6-devlog**
-        for the devlog, **go tag M0-complete** for the tag.
+  **Step 8 — M1 milestone exit.** STATUS retrospective,
+  devlog at docs/devlogs/2026-NN-arsenal-real-iron.md (or
+  per-step devlogs aggregated; pattern decided at step
+  kickoff), arsenal-M1-complete tag. The M1 retrospective
+  documents the LinuxKPI shim's final shape (how big it
+  grew, which Linux APIs were stubbed vs full vs not-
+  needed), what surprises showed up on real hardware, and
+  what posture changes carry to M2 (Stage compositor will
+  consume the M1 amdgpu KMS output through DRM dumb
+  buffers, or via the framebuffer path if KMS doesn't pan
+  out). Use **go m1-8** for STATUS + tag, **draft
+  m1-8-devlog** for the devlog.
 
-Realistic session-count estimate: 4-0 is one focused session
-— ACPI table walking is mechanical but the first attempt at
-parsing the MADT's variable-length entry list typically
-misses a length-field subtlety. 4-1 is one session — the
-GS-base mechanism is well-understood but the refactor surface
-touches apic.rs and sched.rs, so the first build will surface
-ordering issues (cpu_local() called before MSR_GS_BASE is
-populated). 4-2 is **two-to-three** sessions; the AP
-trampoline is the single hardest piece of code in all of M0,
-and the bring-up loop typically takes two-three iterations to
-get the timing right (INIT delay, first SIPI, 200 µs delay,
-second SIPI — QEMU is forgiving but real hardware at M1 is
-not). 4-3 is one session. 4-4 is **two sessions** at minimum;
-the rflags / IRQ-safe-lock / timer-dispatcher trio interacts,
-and any one of the three has at least one subtle failure
-mode (re-entry, lock ordering, scheduler reentrance in the
-preempted task's stack frame). 4-5 is one session. 4-6 is
-one session including the devlog and the M0 tag. Per
-CLAUDE.md's "~15 hours per week, multiply by ~2.3," step 4
-is **3-5 calendar weeks** if the cadence holds, **5-8** if
-4-2 or 4-4 surface a meaningful design rethink. ARSENAL.md
-M0 budget runs calendar months 0-9; at calendar day 14
-post-pivot we're at month 1 with months 2-3 plausibly
-sufficient for step 4 if it doesn't break.
+Calendar arithmetic. ARSENAL.md M1 budget is months 9-24 —
+15 months. Step budgets sum: 4+12+6+12+12+4+4 = 54 weeks of
+focused work, ~62 weeks at part-time (CLAUDE.md ×2.3) = 14
+months. Sits inside the budget with a 1-month slack for
+real-hardware surprises and revision cycles. Loose budgets
+(amdgpu 12-16, iwlwifi 12-20, shim 12-20) absorb most of
+the variance; expect one of those three to blow out by
+50-100% and not be alarming.
 
-Trade-off pairs to surface explicitly
+M1 sub-block-vs-step-level cadence. M0 had a HANDOFF per
+step with sub-block-per-devlog cadence inside. M1 steps are
+larger and probably want internal sub-block decomposition
+in their per-step HANDOFFs (M1-1 NVMe will decompose into:
+PCIe config parsing, MSI-X setup, admin queue, I/O queues,
+IRQ wiring, smoke validation — 5-6 sub-blocks; M1-2 LinuxKPI
+shim will decompose into: types, allocators, IRQ, locks,
+PCI, device — 6-8 sub-blocks). The HANDOFF.md file follows
+the M0 pattern: overwritten at each step kickoff.
 
-  **ACPI parser depth.**
-  (i) **Hand-rolled MADT walker.** Limine gives the RSDP,
-  we walk the RSDT/XSDT looking for the "APIC" signature,
-  parse the MADT entries directly. ~180 LOC. Zero new
-  dependencies. Scope is exactly what step 4 needs:
-  enumerate CPUs, find IOAPICs, learn ISA-IRQ overrides.
-  Doesn't grow with future features (FADT for ACPI shutdown,
-  HPET for higher-res timing, MCFG for PCIe ECAM) — those
-  would each add their own ~40-80 LOC parser at their own
-  step.
-  (ii) **Vendor the `acpi` crate from rust-osdev**
-  (https://github.com/rust-osdev/acpi, Apache-2.0 / MIT,
-  no_std). Battle-tested across multiple hobby OSes;
-  parses every table M0 cares about and more. ~50 LOC of
-  glue. But it brings ~3000 LOC of parser surface (AML
-  interpreter dependencies for some tables, FADT details
-  we don't use, HPET / MCFG / SRAT scaffolding) and a
-  dependency relationship for the kernel base that
-  CLAUDE.md §3's "BSD-2 base, vendored crates BSD/MIT/
-  Apache/ISC/zlib/SIL-OFL" allows but doesn't require.
-  Recommend (i). Step 4 needs precisely one table (MADT)
-  parsed precisely once. 180 LOC is a clear, auditable,
-  vendor-free piece of code in the kernel core. Switch to
-  the `acpi` crate at M1 if FADT / HPET / MCFG arrive
-  together; until then, hand-rolled is the smaller surface.
+First step — recommendation: M1 step 1 (NVMe)
 
-  **AP trampoline page location.**
-  (i) **Fixed 0x8000** (SIPI vector field byte 0x08).
-  Universal convention; the SeaBIOS / OVMF / Coreboot
-  trio all leaves this region usable post-Limine handoff
-  on QEMU. Easy to mark un-reclaimable in the frame
-  allocator (one constant; one early `frames::reserve`
-  call before the first allocation).
-  (ii) **Dynamic — pick first usable page < 1 MiB from
-  Limine memory map.** More portable across firmware
-  weirdness, but the trampoline asm has to be position-
-  independent or relocatable, and the SIPI vector byte
-  has to be computed at AP-bring-up time.
-  (iii) **0x1000 or 0x2000** (low memory, traditionally
-  IVT / BIOS scratch on real hardware but usable on QEMU
-  post-Limine).
-  Recommend (i). 0x8000 is what Linux and FreeBSD both
-  use; QEMU q35 + Limine leaves it untouched; the
-  trampoline can be a fixed-position blob loaded via
-  global_asm with `.section .ap_trampoline, "ax"` and
-  a linker-script-placed page. Save the dynamic-pick path
-  for if M1 surfaces a firmware that uses 0x8000.
+Why NVMe first, not amdgpu (the headliner) or the LinuxKPI
+shim (the foundational piece)?
 
-  **Per-CPU storage mechanism.**
-  (i) **MSR_GS_BASE pointing at a per-CPU CpuLocal
-  struct.** Canonical x86_64 kernel pattern. `mov rax,
-  gs:[offset]` is single-instruction per-CPU access.
-  Linux, FreeBSD, illumos, Solaris all do this. Pairs
-  cleanly with `swapgs` if/when userspace lands at M2.
-  (ii) **`[CpuLocal; MAX_CPU]` array indexed by APIC ID.**
-  Simpler; no MSR involved. But access requires
-  computing or caching the current core's APIC ID, which
-  is a LAPIC MMIO read (~25 cycles) — vs the GS-base
-  approach's 1-cycle deref. And the APIC-ID-array pattern
-  doesn't generalize to userspace per-thread storage.
-  (iii) **Thread-local-style** via FS base (`MSR_FS_BASE`)
-  with the same shape as GS. Less canonical for kernels;
-  user space owns FS in the System V ABI.
-  Recommend (i). The GS-base infrastructure scales from
-  M0's per-core kernel state to M2's per-thread userspace
-  state (with swapgs at the syscall boundary). Building
-  the right shape now avoids a refactor later. The MSR
-  write is one instruction per AP-bring-up.
+  - **Bounded scope.** ARSENAL.md says ~5K LOC. NVMe spec
+    is public, well-documented, with mature reference
+    implementations (Linux, FreeBSD, Redox). The driver
+    is fundamentally a queue-pair I/O scheduler — much
+    smaller than amdgpu (~500K LOC in Linux).
+  - **Zero shim dependency.** Native Rust, no LinuxKPI.
+    Step 1 unblocks itself; the shim shape can wait until
+    we have at least one driver's worth of "what does a
+    Rust driver in Arsenal actually look like" experience.
+  - **Validates PCIe + MSI-X paths.** Every other M1
+    driver needs these. NVMe is the smallest surface to
+    exercise them.
+  - **Useful outcome.** Kernel can boot from real disk
+    (via QEMU's nvme device first; via real Framework
+    NVMe at step 6). Replaces M0's virtio-blk dependence
+    on QEMU.
+  - **No real-hardware blocker.** All of step 1 happens
+    in QEMU. Hardware purchase can wait until step 4 or
+    later.
 
-  **AP secondary stack provisioning.**
-  (i) **Heap-allocated by BSP before SIPI.** BSP calls
-  `Box::leak(Box::new([0u8; 32 * 1024]))` per AP, puts the
-  stack-top pointer into the AP's parking slot
-  (CpuLocal->kernel_rsp or a transitional global before
-  GS is set), AP picks it up immediately on entry. Matches
-  task.rs's existing 32 KiB stack pattern.
-  (ii) **Static array `[[u8; 32 * 1024]; MAX_CPU]`** in
-  .bss. No allocator dependency at AP boot time. But fixed
-  cap on CPU count and wastes BSS on configurations with
-  fewer cores than MAX_CPU.
-  Recommend (i). Heap is up by the time 4-2 runs (3A's
-  heap landed at f947d04); the per-AP `Box::leak` is the
-  same shape as task.rs's per-Task stack alloc. MAX_CPU
-  isn't a real constraint at M0 (single-digit cores) but
-  the allocator pattern composes with M1+'s "discover
-  what's there" stance.
+What step 1 would touch:
 
-  **Trampoline page reservation.**
-  (i) **Frame allocator carve-out** at boot. Add
-  `frames::reserve(addr, count)` (or similar) called from
-  main.rs before any other allocation, marking 0x8000
-  reserved so 3A's free-list never hands it out. The frame
-  is freed and reused for general allocation after 4-2
-  finishes (all APs are past the trampoline by then).
-  (ii) **Limine memory-map check.** Trust that Limine
-  marks 0x8000 reserved or usable-after-bootloader-
-  reclaim. Less code but more brittle — depends on Limine's
-  memory-map shape staying stable.
-  (iii) **Copy trampoline at AP-startup time** into
-  whatever free page is available, fix up the SIPI vector
-  byte. Most portable; most code.
-  Recommend (i). Carve-out is a 10-LOC helper, deterministic
-  across firmware versions, and frees cleanly post-bring-up.
+  - `arsenal-kernel/src/nvme.rs` (new, ~5K LOC target;
+    smaller is better — Linux's nvme-core.c is ~6K LOC
+    and supports far more than M1 needs).
+  - `arsenal-kernel/src/pci.rs` (existing PCI scanner
+    needs to grow MSI-X capability discovery; M0 PCI only
+    enumerates and pretty-prints).
+  - `arsenal-kernel/src/apic.rs` (IRQ vector allocation
+    becomes dynamic; NVMe wants per-queue vectors, no
+    longer a fixed 0xEF / 0xFF / 0x21 set).
+  - `arsenal-kernel/src/ioapic.rs` (MSI-X bypasses IOAPIC
+    — MSI-X messages go directly to LAPIC. IOAPIC stays
+    for legacy IRQs only).
+  - `arsenal-kernel/src/idt.rs` (vectors allocated at
+    runtime; the Lazy IDT needs a registration API for
+    M1+).
+  - `ci/qemu-smoke.sh` (swap virtio-blk for nvme; add
+    ARSENAL_NVME_OK sentinel).
+  - `Cargo.toml` (likely no new deps for step 1; NVMe
+    structs are small enough to hand-write).
 
-  **Hard preemption mechanism in the timer handler.**
-  (i) **Direct switch from IRQ handler.** Timer handler:
-  EOI → check time-slice expiry → if expired, call
-  sched::preempt() which does the runqueue dance + switch_to
-  with IRQ-saved-flags. The switch happens *in IRQ context*
-  on the prev task's stack; control returns to the next
-  task via switch_to's saved state. Standard kernel design.
-  (ii) **Flag-then-yield.** Timer handler sets
-  current->need_resched = true and returns. The scheduler
-  checks the flag at every cooperative entry point (yield_now,
-  blocking calls). Simpler IRQ context, but fairness
-  collapses if a task never enters the scheduler voluntarily
-  — a tight CPU-bound loop never preempts.
-  Recommend (i). True preemption is the M0 deliverable;
-  flag-based is a degenerate fallback that doesn't satisfy
-  the design. The IRQ-context switch is well-understood; the
-  fragility surface is rflags handling and the runqueue lock
-  (both addressed explicitly in 4-4).
+Milestone-level trade-off pairs
 
-  **Runqueue topology.**
-  (i) **Single global `Mutex<VecDeque<Box<Task>>>`** with
-  IRQ-saved locks (cli + lock + work + unlock + popfq).
-  Correct at any CPU count; contended at high CPU count.
-  (ii) **Per-CPU local runqueue + work-stealing.** No
-  cross-core lock contention on the common path; balancing
-  done by idle cores stealing from busy ones. ~150 LOC of
-  extra surface.
-  (iii) **Hybrid: per-CPU rq with periodic rebalance.**
-  Linux CFS / EEVDF-style. Way out of M0 scope.
-  Recommend (i). Single-core today, two-to-four-core
-  through M2; contention isn't measurable. Per-CPU rq
-  arrives at M1 or M2 once Stage's UI tasks need responsive
-  scheduling under load. Today, simple-correct beats
-  complex-fast.
+The 10 trade-offs whose resolution shapes M1 most. Steps 1-7
+each have step-level trade-off pairs in their own HANDOFFs;
+these are the milestone-spanning ones.
 
-  **IRQ vs polling for keyboard, final state.**
-  (i) **Full switch to IRQ-driven** at 4-5. Remove
-  `kbd::poll`; replace with `kbd::recv_blocking`. Cleanest
-  end state; matches the M0 step 3 → step 4 trajectory.
-  (ii) **Keep both, gated by a kernel flag.** Easier to
-  fall back if 4-5's IRQ wiring surfaces a bug. But the
-  fallback path is dead code from the moment it's not
-  needed, and CLAUDE.md §"What you should not do" includes
-  half-finished implementations.
-  Recommend (i). If IRQ keyboard regresses, git-revert is
-  the rollback. The polled path is fully preserved at
-  6e2f823 (3G-0) for reference.
+  **LinuxKPI shim strategy.**
+  (i) **Incremental per-driver-need.** Build only what the
+  current driver target requires; grow when the next driver
+  exercises new API. Smaller shim surface at any point in
+  time; lower upfront cost; per-driver scope-creep risk.
+  (ii) **Structural FreeBSD-modeled foundation.** Port the
+  drm-kmod shim's structural skeleton (types, headers, the
+  20-30 most-used APIs) up front; per-driver work fills in
+  details. Larger upfront cost; lower per-driver scope-creep.
+  (iii) **Hybrid.** Structural for the foundational types
+  (printk, kmalloc, gfp_t, struct device, dma_addr_t) and
+  the PCIe / IRQ / locking APIs; incremental for everything
+  else (i2c, ACPI methods, scatter-gather, bouncing).
+  Recommend (iii). The "load-bearing 30 APIs every driver
+  uses" come up front; the long tail of per-driver-specific
+  APIs grow as needed. FreeBSD's drm-kmod is the precedent;
+  Asahi's m1n1 + the Asahi kernel team's documentation of
+  Linux driver porting is the secondary reference. This is
+  the step-2 trade-off but recording the milestone-level
+  decision here.
 
-  **Number of APs to bring up.**
-  (i) **All enumerated.** `acpi::cpus()` returns N; BSP
-  brings up N-1 APs. The smoke harness sets `-smp 4` so
-  N=4 in CI; locally users can vary.
-  (ii) **Cap at MAX_CPU=8** (or 16, or 64). Bounds per-CPU
-  static allocations on hypothetical massive machines. M0
-  doesn't have static-sized per-CPU arrays (4-1 uses heap
-  via Box::leak), so the cap is unmotivated.
-  (iii) **Cap at 2 for M0** (BSP + 1 AP). Validates the
-  bring-up path with the simplest possible topology;
-  shipped scope-pull rather than a "we support N cores"
+  **First driver target.**
+  (i) **NVMe (native Rust, ~5K LOC).** Recommended above.
+  (ii) **amdgpu (LinuxKPI port).** Headlining; biggest
+  proof-of-concept for the shim. But it requires step 2's
+  shim first, and the failure-mode-surface area is huge.
+  (iii) **xHCI (either native Rust or LinuxKPI port).**
+  Useful — unlocks USB keyboards and mass storage for the
+  install-on-real-hardware path. But xHCI's spec is more
+  complex than NVMe's; ARSENAL.md flags the "evaluate at
+  start" decision specifically.
+  Recommend (i). NVMe is the smallest useful driver with
+  zero dependencies on the rest of M1. amdgpu first would
+  collapse the shim into amdgpu's specific needs; xHCI
+  first overlaps with the keyboard story (M0's PS/2 still
+  works on QEMU and on real hardware Framework offers via
+  legacy controller).
+
+  **xHCI shape — native Rust vs LinuxKPI port.**
+  (i) **Native Rust.** Cleaner — direct against our IRQ /
+  DMA / device-registration primitives. ~10-15K LOC. The
+  Redox xhci crate (MIT) and Theseus's xhci module are
+  prior Rust art; vendoring isn't out of the question if
+  CLAUDE.md §3 license checks pass.
+  (ii) **LinuxKPI port of xhci-hcd.** ~20K LOC of C goes
+  unchanged; the shim covers it. Faster to get working;
+  exposes more shim surface (USB-specific APIs like
+  usb_hcd_ops which amdgpu / NVMe don't exercise).
+  Recommend evaluation at step 3 kickoff, not here. Both
+  are viable; the choice depends on how step 2 leaves the
+  shim shaped. If the shim has clean USB-bus support
+  already from some other driver pulled in at step 2, (ii)
+  is cheap. If not, (i) is the cleaner path. Defer.
+
+  **Real-hardware purchase timing.**
+  (i) **Now (start of M1).** Buy the Framework 13 AMD
+  before step 1 begins. Use it for cross-checking each
+  step's QEMU output against real silicon as we go.
+  Highest cost (sits idle through steps 1-3); highest
+  early-failure-mode visibility.
+  (ii) **End of step 3** (post-NVMe, post-shim foundation,
+  post-xHCI). Buy when we have a kernel that's at least
+  plausibly bootable on real iron. Most of M1's surface
+  still ahead.
+  (iii) **End of step 5** (post-iwlwifi). Buy when the
+  driver lineup is complete and we just need to validate
+  real-iron boot.
+  Recommend (ii). End-of-step-3 gives us NVMe (storage),
+  the shim foundation (whatever it ends up looking like),
+  and xHCI (USB for the install medium). amdgpu KMS and
+  iwlwifi are the final steps that benefit most from
+  real-hardware feedback. Buying earlier than step 3 risks
+  the laptop sitting idle while we work in QEMU; buying
+  later than step 3 means amdgpu development is
+  QEMU-only-with-poor-fidelity (QEMU's amdgpu emulation
+  doesn't exercise real GPU hardware). Specific SKU:
+  Framework 13 AMD Ryzen AI 7 350 (Strix Point) at the
+  expected purchase date in mid-2026; choose lid color
+  and memory at order time.
+
+  **Continuous integration on real iron.**
+  (i) **Manual sessions, document each.** When real
+  hardware arrives, each step's exit criterion includes
+  a "boots on real hardware and prints the expected
+  output" manual checkpoint, recorded in the step's
+  devlog. No automated CI on real hardware.
+  (ii) **Dedicated runner.** Set up the Framework as a
+  CI runner with network boot + serial console. Run the
+  smoke automatically on every push.
+  (iii) **Hybrid:** QEMU CI on every push (today's
+  setup), real-iron CI nightly or per-merge.
+  Recommend (i) at M1 start, revisit at step 6 when the
+  Framework arrives. CI infrastructure on the Framework
+  takes its own engineering surface (PXE boot, serial
+  console capture, power cycling, fault recovery) and
+  isn't justified until M1 has a stable real-iron boot
+  path. Manual sessions are honest: real-iron tests in
+  the M1 devlogs are user-runnable, not pretending to
+  be CI.
+
+  **MSI-X / IRQ model evolution.**
+  (i) **Static IDT, dynamic vector allocation.** Keep
+  M0's Lazy<IDT> static; add a `idt::allocate_vector()`
+  helper that returns the next unused vector + installs
+  the handler. NVMe asks for one vector per queue; the
+  allocator hands them out. Simple, fits M0's shape.
+  (ii) **Per-CPU IDT.** Each CPU has its own IDT (Linux
+  does this). More flexible for SMP IRQ routing; bigger
+  refactor; not justified for M1's single-machine
+  workload.
+  (iii) **MSI-X routes to specific LAPIC vectors only;
+  IOAPIC stays for legacy IRQs.** Already implied by 4-3;
+  here we just confirm.
+  Recommend (i) at M1 — keeps the M0 shape and adds the
+  smallest helper that NVMe needs. Step 1 HANDOFF will
+  spec this concretely.
+
+  **First inherited driver at step 2.**
+  (i) **virtio-balloon.** Tiny (~600 LOC in Linux); pure
+  virtio-bus interaction; lets us validate the shim's
+  PCIe + IRQ + device-registration paths without any
+  fancy DMA / scatter-gather / firmware loading.
+  (ii) **e1000 (Intel gigabit Ethernet).** Bigger (~3000
+  LOC); needs DMA descriptor rings, ethtool stubs,
+  netdev registration. Better stress test of the shim.
+  (iii) **8250 serial driver from Linux.** Tiny but
+  conflicts with our existing serial.rs; not useful as a
+  shim validator.
+  Recommend (i). virtio-balloon is the smallest useful
+  inherited driver that exists in the Linux tree; it
+  exercises the shim without taking on stream-of-data
+  surface that's better validated at step 3 (xHCI) or
+  step 4 (amdgpu). Pick at step-2 kickoff.
+
+  **Boot loader on real iron.**
+  (i) **Limine continues.** ARSENAL.md commits to Limine
+  for the BSP boot path; M0 confirmed it works for SMP
+  bring-up via MpRequest. Real-iron Limine is the same
+  binary as QEMU-Limine.
+  (ii) **Switch to systemd-boot or rEFInd.** Mature; well-
+  understood UEFI loaders. Loses our SMP integration via
+  MpRequest.
+  (iii) **Direct UEFI boot (no second-stage loader).**
+  Smallest dependency; biggest engineering cost (we'd be
+  writing our own bootloader).
+  Recommend (i). The M0 commitment stands; M1 inherits it
+  unchanged.
+
+  **Slint shape.**
+  (i) **Pure Slint software renderer.** ARSENAL.md
+  commits; Slint's software-rendered mode paints to a
+  pixel buffer that we route to our fb. ~50K LOC of
+  vendored Slint runtime (MIT/Apache, clear under
+  CLAUDE.md §3).
+  (ii) **Slint via direct DRM (when amdgpu KMS is up).**
+  Software-rendered through KMS framebuffer at native
+  resolution. Slightly more code but uses the GPU's
+  scanout path.
+  (iii) **Defer Slint entirely.** Stage at M2 absorbs the
+  UI surface; M1 Slint app is a "we proved Slint works"
+  exercise that doesn't ship to users.
+  Recommend (i) at step 7. ARSENAL.md commits to Slint;
+  software-renderer is the simplest M1 path; KMS-routed
+  rendering arrives naturally at M2 when Stage takes
+  over.
+
+  **Sub-step granularity within M1 steps.**
+  (a) **One devlog per sub-block** (M0 step 3 pattern —
+  3A through 3G each got a devlog).
+  (b) **One devlog per step** with sub-block detail
+  inside (M0 step 4 pattern — single devlog for the
+  whole step).
+  (c) **One devlog per cluster of related sub-blocks**
+  (e.g., the LinuxKPI shim at step 2 has 6-8 sub-blocks;
+  cluster as "shim foundation" / "PCI bridge" / "IRQ
+  bridge" / "DMA bridge" with one devlog each).
+  Recommend (c) for M1. Per-sub-block was right for M0's
+  daily-or-hourly cadence; M1 sub-blocks span weeks each
+  and the devlog cadence should match. Each step's
+  HANDOFF will set its own sub-block-to-devlog mapping;
+  step 8 (M1 retrospective) wraps the milestone-level
   story.
-  Recommend (i) in code, (i) capped to `-smp 4` in CI smoke.
-  No artificial cap; the BSP-AP boundary is the same shape
-  whether N=2 or N=16, and exercising more makes the
-  per-CPU and IPI paths see real concurrency.
-
-  **Sentinel discipline.**
-  (a) **Three new sentinels** — ARSENAL_ACPI_OK at 4-0,
-  ARSENAL_SMP_OK at 4-2, ARSENAL_IOAPIC_OK at 4-3. Bisect-
-  rich; each block has its own smoke witness; 4-3's
-  structural-only check gets an explicit signal.
-  (b) **One new sentinel** — ARSENAL_SMP_OK at 4-2.
-  Smaller smoke footprint; 4-0 and 4-3 are validated by
-  the fact that 4-2 succeeds (you can't bring up APs
-  without ACPI enumeration; you can't route IRQs without
-  IOAPIC). But bisect points are coarser.
-  (c) **Two new sentinels** — ARSENAL_ACPI_OK at 4-0 and
-  ARSENAL_SMP_OK at 4-2; skip IOAPIC's because 4-3 is
-  structural-only and 4-5's IRQ-keyboard exercise validates
-  it implicitly.
-  Recommend (a). Per the 3F-2 task-stack retrospective:
-  the more sentinels, the faster you isolate which sub-
-  block regressed. Smoke harness already handles ten
-  sentinels with the "all required present" wait-loop from
-  3D; adding three more is mechanical.
-
-  **AP timer state.**
-  (i) **BSP-only periodic timer.** Only the BSP arms its
-  LAPIC timer (as today). APs run scheduler ticks via
-  IPI from the BSP at the same 100 Hz cadence (broadcast
-  IPI on each BSP tick, or one-to-one IPI per scheduled
-  AP). Simpler; one calibration; predictable global tick.
-  (ii) **Per-CPU periodic timer.** Each AP calibrates its
-  own LAPIC timer (same PIT calibration as 3F-2, but
-  serialized across APs since PIT is a global resource).
-  Independent clocks per core; better isolation for
-  per-CPU scheduling decisions; cleaner separation. But
-  cross-CPU time comparisons get fuzzy without TSC sync.
-  Recommend (i) at 4-2 / 4-4. M0 doesn't need independent
-  per-CPU clocks; the global tick is what time-slice
-  expiry compares against. (ii) arrives if Stage's
-  per-display vsync demands it at M2.
-
-  **Sub-candidate granularity.**
-  (a) **Seven-commit shape** above (ACPI / per-CPU / AP-
-  bring-up / IOAPIC / preemption / IRQ-kbd / STATUS+devlog).
-  Bisect-rich; matches the 3A-3G granularity.
-  (b) **Five-commit shape** combining 4-0+4-1 (ACPI + per-CPU
-  as "what's needed before we bring APs up") and 4-3+4-5
-  (IOAPIC + IRQ-keyboard as "device IRQ story"). Tighter
-  history; harder to bisect.
-  (c) **Three-commit shape** — "SMP infrastructure" (4-0
-  through 4-3), "hard preemption" (4-4), "IRQ keyboard"
-  (4-5). Coarsest; highest blast radius per commit.
-  Recommend (a). 4-2 and 4-4 are independently load-bearing
-  enough to deserve their own commits even if 4-4 stays
-  monolithic. Folding 4-1 into 4-2 is tempting but loses
-  the "GS-base refactor under single-CPU" smoke checkpoint
-  — a refactor commit that doesn't change behavior is
-  exactly the kind of bisect point that matters when 4-2
-  surfaces a subtle ordering bug.
 
 Sanity check before kicking off
 
-    git tag --list | grep field-os-v0.1   # field-os-v0.1
-    git log --oneline -10                 # 1b316c9, b792ec2,
-                                          # 7992d32, 287897f,
-                                          # 6e2f823, 61aace9,
-                                          # d940b59, 0323497,
-                                          # 6c4b169, 41e7f8d
-    git status --short                    # ?? HANDOFF.md (only,
-                                          # while drafting this)
-                                          # or clean once committed
+    git tag --list                          # arsenal-M0-complete now present
+    git log --oneline -10                   # 9793487 (HEAD), b535195, e2057de,
+                                            # 6a69383, 78b38e2, b6b3785,
+                                            # b70f0f2, f3f431e, 8b20132,
+                                            # 1b316c9
+    git status --short                      # clean except this file
     cargo build -p arsenal-kernel --target x86_64-unknown-none --release
-                                          # clean, ~1.487 MB ELF
+                                            # clean, ~1.52 MB ELF
     cargo clippy -p arsenal-kernel --target x86_64-unknown-none --release -- -D warnings
-                                          # clean
-    cargo xtask iso                       # arsenal.iso ~19.3 MB
-    ci/qemu-smoke.sh                      # ==> PASS (10 sentinels
-                                          # in ~430-600 ms locally,
-                                          # boot→prompt = 0 ms
-                                          # under TCG)
+                                            # clean
+    cargo xtask iso                         # arsenal.iso ~19.3 MB
+    ci/qemu-smoke.sh                        # ==> PASS (13 sentinels in ~1.2-1.5 s)
 
-Expected: HEAD as above; smoke PASSes with ten sentinels; perf
-gate observes 0 ms boot→prompt (kernel boot inside one 50 ms
-polling cycle of the harness).
+Expected: HEAD as above; smoke PASSes with 13 sentinels;
+boot→prompt around 94 ms.
 
-If smoke fails after 4-0 / 4-2 / 4-4 land, the likely culprits
-are: (a) MADT entry-length confusion — entries are variable-
-length records with a one-byte length field; off-by-one in
-the cursor advance loops past the end of the table; (b) AP
-trampoline timing — INIT-SIPI-SIPI's 10 ms / 200 µs delays
-must use PIT-polled wait, not the LAPIC timer (LAPIC timer is
-*the thing being brought up*; circular dependency); a too-
-short delay leaves APs at the SIPI-fetch instruction and
-neither online nor reaching the parking slot; (c) AP page-
-table sharing — if APs use the same CR3 as the BSP, any TLB-
-unsafe page-table change during 4-2 corrupts AP execution
-(safe at 4-2 because no page-table mutation runs during
-INIT-SIPI-SIPI, but worth flagging when 4-4's per-CPU
-preempt-disable counter lands and the runqueue may grow);
-(d) IRQ-context lock acquisition in the timer handler before
-4-4's IRQ-safe lock pattern is in place — old code path
-(3F's timer handler that just increments TICKS) is safe but
-4-4's preempt() inside the handler must not take the
-runqueue lock without IRQ-disable; (e) GS-base set ordering
-— `current_cpu()` called before MSR_GS_BASE is populated
-reads garbage; AP entry must set GS-base in the first three
-instructions of ap_entry before any current_cpu() call;
-(f) rflags save/restore in switch_to — `pushfq` must come
-*before* the callee-save GP pushes so the rsp arithmetic in
-the existing global_asm! stays consistent; new prev/next
-state slots in Task may need a Layout review.
+If the sanity check fails before the first M1 step kicks off,
+the likely culprits are toolchain (nightly-2026-04-01 still
+available?), CI environment (the smoke harness's Python TLS
+listener requires openssl in PATH on macOS), or a regression
+between M0 close and M1 start that the deferred bootloader
+reclaim from 4-2 surfaced under some new condition. Walk the
+M0 retrospective in STATUS § "Last completed milestone" for
+the load-bearing invariants.
 
-Out of scope for step 4 specifically
+Out of scope for M1 specifically
 
-  - Multi-socket / NUMA-aware allocation. ARSENAL.md M2 or
-    later. M0 single-socket is the only target.
-  - x2APIC mode. xAPIC (memory-mapped) is what 3F brought up
-    and what step 4 keeps using. x2APIC adds an MSR-based
-    interface for >255 logical CPUs; not M0 territory.
-  - TSC synchronization across cores. APs use the BSP-driven
-    100 Hz tick; TSC offset measurement is post-M0 if Stage
-    or perf tooling needs it.
-  - Hyperthreading topology awareness. Step 4 enumerates
-    APIC IDs flat; HT sibling detection is a post-M0
-    optimization for scheduling decisions.
-  - CPU hotplug. Linux supports it; FreeBSD partly; M0 is
-    boot-time discovery only.
-  - Power management on APs. Idle hlt is the M0 stance from
-    3F-3; APs do the same. No C-states, no P-states.
-  - IPI broadcast for TLB shootdown. Required when M0+ kernel
-    code starts mutating page tables that other CPUs have
-    cached. M0 step 4 doesn't mutate page tables post-boot;
-    when M1's LinuxKPI shim adds dynamic mappings, TLB
-    shootdown lands then.
-  - Inter-task signaling primitives (futex, condvar). M0
-    cooperative + preemptive scheduler runs to-completion or
-    voluntary-yield tasks only; signaling primitives arrive
-    with the WASI Component scheduling at v0.5.
-  - The kbd ring buffer at 4-5 grows past 256 bytes. At
-    100 Hz preempt and human typing speed (~10 Hz), 256
-    bytes is two-three orders of magnitude over what's
-    needed; growing it is unmotivated.
-  - SMP-aware `hw` output. The shell's `hw` command at 3G-2
-    hardcodes "core count: 1". Step 4-6's STATUS update
-    flips this to `acpi::cpus().len()` so the M0 step 3
-    usability gate reflects reality post-SMP.
+  - **Vulkan / 3D acceleration.** amdgpu at M1 is KMS only.
+    Vulkan via radv (mesa) is M2 or v0.5.
+  - **Multi-monitor / multi-GPU.** Framework 13 AMD has one
+    GPU and one display; M1 is single-pipe single-monitor.
+  - **Bluetooth.** Framework 13 AMD ships with the WiFi
+    module also supporting Bluetooth; M1 wires Wi-Fi only.
+    BT stack is post-M1.
+  - **Touchpad gestures / multitouch.** Single-touch tap +
+    motion at M1 (via xHCI / HID); gesture recognition is
+    post-M1.
+  - **Suspend / resume.** Power-off and cold-boot are M1;
+    ACPI S3/S4 sleep and modern S0ix idle are M2+.
+  - **Battery / charge / thermal management.** Reads via
+    ACPI _BST / _BIF only at M1; thermal throttling
+    feedback into the scheduler is post-M1.
+  - **Audio.** No HDA driver at M1; Stage at M2 includes
+    audio routing.
+  - **File systems.** A read-only FAT32 / ext2 for the
+    install medium at M1 maximum; full-featured filesystems
+    (ext4 write, btrfs, ZFS) wait for v0.5+. ARSENAL.md
+    doesn't specify the M1 filesystem target; recommend
+    deferring until M1 step 6 (real-iron boot) makes it
+    necessary.
+  - **Container / sandbox runtime.** Cardboard Box at M2.
+  - **POSIX subset / libc compat.** relibc work is v0.5.
+  - **WebKitGTK / Servo / browser.** M2 / v0.5.
 
 Permanently out of scope (do not propose)
 
   - Any unsafe block without a // SAFETY: comment naming the
     invariant the caller must uphold. CLAUDE.md hard rule.
-  - Reverting any 3A / 3B / 3C / 3D / 3E / 3F / 3G commit.
-    All landed and validated by smoke + CI.
+  - Reverting any M0 commit. M0 closed and tagged.
   - Force-pushing to origin. Branch is in sync; preserve
     history.
-  - Dropping the BSD-2-Clause license header from any new
-    file. acpi.rs, ioapic.rs (if separated from apic.rs),
-    and any ap_trampoline.S all need the header.
-  - Pulling a GPL crate into the kernel base. The `acpi`
-    crate from rust-osdev is dual-licensed Apache-2.0 / MIT,
-    so it'd be admissible if we pick (ii) above — but
-    confirm at adoption time.
+  - Dropping BSD-2-Clause license header from any new
+    Arsenal-base file. Inherited Linux driver files retain
+    GPLv2; the shim source files are BSD-2; explicit license
+    boundaries documented per CLAUDE.md §3.
+  - Pulling a GPL crate into the kernel base. Inherited
+    Linux drivers via the LinuxKPI boundary are the only
+    GPL path; vendored crates remain BSD / MIT / Apache /
+    ISC / zlib / SIL-OFL.
   - Religious framing. CLAUDE.md hard rule.
   - Reintroducing HolyC. ADR-0004's discard is final.
   - Going back to stable Rust.
-  - Skipping the build + smoke loop on a feat(kernel) commit.
+  - Skipping the build + smoke loop on a feat(kernel)
+    commit.
 
 Three notes worth flagging before you go
 
-  1. **The trampoline page reservation has to land before any
-     heap allocator activity** that would hand out 0x8000.
-     3A's frame allocator runs at boot; its free-list is
-     populated from Limine's memory map. If Limine reports
-     0x8000 as USABLE (which on QEMU q35 it does in the
-     low-memory region), the very first frame request might
-     get 0x8000 back — at which point the AP trampoline
-     can't be safely written there. 4-2's first commit (or a
-     prep commit before 4-2) must call `frames::reserve(
-     0x8000, 1)` before any other allocator user runs. The
-     boot-order edit in main.rs is one line; the helper in
-     frames.rs is ~15 LOC. Trivial code but easy to forget,
-     and the failure mode is silent (AP startup just doesn't
-     work, kernel hangs at SMP_ONLINE_COUNT-spin).
+  1. **The LinuxKPI shim is a 12-20 week single block of
+     work that doesn't ship anything user-visible on its
+     own.** This is the morale-load-bearing piece of M1.
+     The HANDOFF for step 2 should include explicit
+     intermediate milestones (one shim API surface lands +
+     compiles + has a smoke test, repeat) so progress is
+     visible week-over-week, not just at the end. The
+     FreeBSD drm-kmod team's pattern of "compile-only
+     CI for the shim, full driver-integration CI when
+     the shim is half-built" is the model.
 
-  2. **The hard-preemption block is where the cooperative
-     scheduler from 3B starts paying its debt.** Today's
-     `switch_to` is callee-save-only and runs on the prev
-     task's stack with IF=1 propagated transparently from
-     idle's `sti`. Under hard preemption, switch_to runs on
-     the prev task's stack mid-IRQ with IF=0 and a partial
-     saved-state from the interrupt gate; the rflags
-     handling has to be right or the next task resumes with
-     IF=0 silently (no immediate panic, just frozen
-     preemption — the next timer tick never delivers).
-     Recommend writing a deliberately-tight 4-4 test path:
-     a `preempt_test` task that loops on a cycle counter
-     and observes that the cycle gap between consecutive
-     observations is bounded — if preemption is broken, the
-     gap will be unbounded (the task runs to completion
-     before yielding). This is a 30 LOC validation tool
-     that catches the IF=0-silently-stuck case before it
-     hides for weeks. It can live behind a `#[cfg(test)]`
-     or just stay in main.rs as a smoke-witness alongside
-     the existing ping/pong.
+  2. **Real-hardware purchase is a $1500-$2000 commitment
+     for the Framework 13 AMD Ryzen AI 7 350 (Strix Point)
+     with sensible memory (32 GiB) and storage (1 TB
+     NVMe). Order lead time on Framework is typically 2-4
+     weeks at announce-and-ship batch boundaries. Place the
+     order at end of step 3 (post-xHCI) per the recommended
+     trade-off; the laptop should arrive within 2-3 weeks
+     of step 4 (amdgpu KMS) starting. Confirm pricing /
+     availability at order time.
 
-  3. **M0 closes when 4-6 lands.** ARSENAL.md month 0-9
-     budget; calendar day 14 post-pivot at HEAD. Even at
-     the slow end of step 4's 5-8-week estimate, M0
-     completes inside calendar month 3-4 — well under the
-     9-month budget. The right posture at that close-out
-     is not "we beat the budget by 5 months" (calendar pace
-     was abnormally fast at step 3; the budget was set
-     against ~15 hr/week part-time and the post-pivot
-     concentration is unrepresentative). The right posture
-     is "the milestone landed; the next milestone, M1
-     LinuxKPI, is genuinely calendar-scale because real
-     iron requires real driver work." M0 retrospective in
-     STATUS should note that the pace from 3A-3G was the
-     fast-end outlier and project M1 against the ARSENAL.md
-     baseline, not against M0's observed cadence.
+  3. **M1's cadence is genuinely different from M0's.**
+     M0 step 4 ran in one calendar day; that's not what M1
+     looks like. M1 step 1 (NVMe) is a 4-6 week effort; M1
+     step 2 (shim) is 12-20 weeks. Sub-block-per-devlog at
+     daily cadence collapses; one devlog per sub-block at
+     weekly cadence is the right shape. The HANDOFF /
+     commit cadence slows accordingly. CLAUDE.md's "noticing
+     when I'm heads-down on a single bug for multiple
+     sessions" cue applies *more* in M1 than M0; flag
+     promptly if a single sub-block stretches past 2 weeks
+     of grinding without visible progress.
+
+Real-hardware logistics (M1 step 6 prep)
+
+ARSENAL.md commits to Framework 13 AMD as the v1.0 hardware
+target. M1's step 6 is "first boot on real iron." Practical
+steps:
+
+  - **SKU selection.** Framework 13 AMD Ryzen AI 7 350
+    (Strix Point) is the current premium SKU as of
+    mid-2026; the Ryzen AI 5 340 is the budget option.
+    Either works for M1; Strix Point gives more headroom
+    for M2 / Stage compositor work. Recommend the higher
+    SKU.
+
+  - **Memory and storage.** Framework offers 16 / 32 / 64
+    GiB DDR5; 32 GiB is the M1 sweet spot. NVMe: any of
+    the offered 500 GB / 1 TB / 2 TB; 1 TB is plenty for
+    dev work without paying the 2 TB premium.
+
+  - **WiFi module.** Framework 13 AMD ships with either
+    Mediatek MT7921 (mt76 Linux driver) or Intel AX210
+    (iwlwifi). Step 5 of M1 implements whichever ships;
+    ARSENAL.md mentions iwlwifi specifically, so AX210 is
+    the assumed target. Confirm at order time.
+
+  - **Boot medium.** USB drive flashed with arsenal.iso
+    (the same artifact the QEMU smoke runs). Limine boots
+    on UEFI without intervention. Recommend a USB-C
+    drive (the Framework's USB-A port is via the
+    expansion-card system; USB-C is always-available).
+
+  - **Recovery posture.** Keep a Linux live-USB nearby
+    during step 6. Real-hardware bring-up will reveal
+    panics we can't reproduce in QEMU; being able to
+    boot Linux and pull serial logs / disk dumps is the
+    fallback path.
 
 Wait for the pick. Do not pick silently. The natural first
-split is 4-0 in one focused session ("MADT walks; ACPI_OK
-fires"), 4-1 in one session ("GS base populated on the BSP;
-no behavior change but the refactor lands cleanly"), 4-2
-across two-or-three sessions ("AP startup works; SMP_OK
-fires"), 4-3 in one session ("IOAPIC mapped; structurally
-correct"), 4-4 across one-or-two sessions ("hard preemption
-discipline; preempt_test bounded"), 4-5 in one session
-("IRQ keyboard replaces polled; the shell is still
-responsive"), 4-6 in one session including the devlog and
-the M0-complete tag. Happy to combine 4-0 + 4-1 if you want
-the SMP prerequisites in one push, or to do 4-4 (the hard-
-preemption block) first as a single-CPU correctness check
-before bringing APs up at 4-2 — that would prove the
-preemption design on the simpler topology before
-multi-core makes the failure modes harder to bisect. Your
-call.
+move is **go m1-1** for the NVMe-first plan above, or **draft
+m1-1 HANDOFF** if you want the step-level kickoff document
+written before any code lands (recommended for M1's first
+step — the step-level HANDOFF is the planning artifact M0's
+cadence depended on). Alternatives: **go m1-2** to start with
+the shim foundation (riskier — no driver target to drive the
+API surface, scope creep likely), or **defer** to first
+re-read ARSENAL.md and revisit the milestone-level trade-offs
+above (especially the LinuxKPI shim strategy and the first
+driver target — these are the most consequential resolutions
+of M1).
