@@ -29,12 +29,14 @@ abstraction stabilizes against virtio-gpu before amdgpu has
 to consume it. Pushes M1 from ~62 to ~67 weeks at part-time
 pace; still inside the 15-month ARSENAL.md budget.
 
-1. **NVMe native Rust** (~5K LOC ceiling per ARSENAL.md;
-   target ~600-800 LOC actual). No shim dependency. Validates
-   PCIe + MSI-X paths. **Active.**
+1. **NVMe native Rust** (~880 LOC actual; well under ARSENAL.md's
+   ~5K LOC ceiling and slightly above the HANDOFF's 600-800 target
+   range). **Complete (2026-05-14, one calendar day, six
+   sub-blocks).** Devlog at
+   [`docs/devlogs/2026-05-arsenal-nvme.md`](docs/devlogs/2026-05-arsenal-nvme.md).
 2. **LinuxKPI shim foundation + first tiny inherited driver.**
    ARSENAL.md's "single largest engineering task" — budget
-   12-20 weeks.
+   12-20 weeks. **Active.**
 3. **xHCI USB.** Native Rust vs LinuxKPI port — evaluate at
    step kickoff.
 4. **virtio-gpu native Rust.** KMS-capable GPU driver for
@@ -51,23 +53,88 @@ pace; still inside the 15-month ARSENAL.md budget.
    hardware.
 9. **M1 retrospective + arsenal-M1-complete tag.**
 
+### M1 step 1 retrospective (NVMe — 2026-05-14)
+
+Six sub-blocks (1-0 through 1-5) across one calendar day,
+four feat commits plus the paper. Foundation work (PCIe
+MSI-X capability parsing + dynamic IDT vector allocation +
+`pub unsafe fn pci::bar_address` + `pci::config_write32`)
+will be consumed by every later M1 driver — xHCI at step 3,
+virtio-gpu at step 4, amdgpu via the shim at step 5,
+iwlwifi via the shim at step 6.
+
+Step 1 sub-commits:
+- `dd9f4a6` PCIe MSI-X capability + dynamic IDT vector
+  allocation (1-0). Foundation step.
+- `bc6ddac` NVMe device discovery + BAR mapping (1-1).
+- `061e3cb` NVMe controller reset + admin queue + Identify
+  (1-2). The spec-rich block; NVMe 1.4 §7.6.1 sequence,
+  admin SQ/CQ, Identify Controller + Identify Namespace
+  via polled completion.
+- `a75541c` NVMe I/O queue + sector 0 read, polled (1-3).
+  The cathartic block — `ARSENAL_NVME_OK` first fires
+  through the polled path.
+- `dcd9ed1` NVMe MSI-X interrupts (1-4). Converts the I/O
+  queue to interrupt-driven completion. End-to-end pipeline:
+  idt::register_vector → pci MSI-X table programming →
+  Create-I/O-CQ with IEN=1+IV=0 → MSI delivered to IDT
+  vector 0x40 → IRQ_COUNT bump → cooperative drain.
+- (this commit pair) M1 step 1 retrospective + step 2
+  kickoff (1-5).
+
+Honest cadence note: the M1 step 1 HANDOFF estimated 4-6
+weeks at part-time pace. Step 1 took ~8 focused hours on
+2026-05-14 (same calendar day M0 closed). This is the
+*post-pivot concentration window*, not the sustainable
+ARSENAL.md cadence. The M1 milestone-level budget (~67
+part-time weeks across 9 steps; ARSENAL.md months 9-24)
+does NOT shrink because step 1 finished fast — variance is
+now concentrated in the harder later steps (shim, amdgpu,
+real-hardware bring-up) where it always lived. The right
+posture is gratitude for the speed and continued discipline
+against the budget. The devlog has the full framing.
+
+Posture changes carrying to M1 step 2:
+- IDT is now `spin::Mutex<InterruptDescriptorTable>` (not
+  `Lazy`). `register_vector(handler) -> u8` is the public
+  API for dynamic vector allocation; LinuxKPI's IRQ-
+  registration shim will route through it.
+- `pci::config_read32` and `pci::config_write32` are
+  available as `pub(crate) unsafe fn`. The shim's `pci_*`
+  API mapping will need them.
+- `pci::bar_address` is `pub unsafe fn`; LinuxKPI's
+  `pci_resource_start` / `pci_iomap` shim sees through it.
+- DMA buffers come from `frames::FRAMES.alloc_frame()`
+  (4-KiB page-aligned by construction). LinuxKPI's
+  `dma_alloc_coherent` shim will be a thin wrapper.
+
 ### Active work
 
-**M1 step 1 — NVMe.** Step-level HANDOFF at HEAD with
-six-sub-block decomposition (PCIe MSI-X + dynamic IDT
-vector → device discovery → controller reset + admin queue
-→ I/O queue + polled sector read → MSI-X conversion → STATUS
-+ devlog). Next session starts **go m1-1-0** (PCIe MSI-X
-capability parsing + dynamic IDT vector allocation —
-foundation step 3 / 5 will also consume).
+**M1 step 2 — LinuxKPI shim foundation + first inherited
+driver.** No sub-block yet; next session writes the step-2
+HANDOFF. The shim is ARSENAL.md's "single largest
+engineering task" of M1 — 12-20 part-time weeks budgeted,
+and morale-load-bearing because the shim doesn't ship
+anything user-visible on its own. Step-2 HANDOFF should
+include explicit intermediate milestones ("one shim API
+surface lands + compiles + has a smoke test, repeat") so
+progress is visible week-over-week.
 
-Expected pace for M1: substantially slower than M0. The
-ARSENAL.md month-9-to-month-24 budget assumes ~15 hr/week
-part-time × 2.3 calendar multiplier, and M1 is genuine real-
-hardware work — porting kernel C code, debugging on actual
-silicon, NVMe / amdgpu / xHCI quirks that virtual hardware
-cannot surface. The M0 post-pivot cadence was *initial-
-condition* concentration; do not project it forward.
+First inherited driver target (decided at step-2 HANDOFF
+kickoff): virtio-balloon (~600 LOC inherited C, pure
+virtio-bus interaction) is the milestone-HANDOFF
+recommendation. e1000 (~3000 LOC, more shim surface tested
+early) is the alternative.
+
+Expected pace for M1 overall: substantially slower than
+M0 or M1 step 1. The ARSENAL.md month-9-to-month-24 budget
+assumes ~15 hr/week part-time × 2.3 calendar multiplier,
+and the harder steps (shim, amdgpu, iwlwifi, real-hardware
+boot) are genuine real-hardware work — porting kernel C
+code, debugging on actual silicon, driver quirks that
+virtual hardware cannot surface. The post-pivot
+concentration window has not closed yet, but the right
+projection remains the ARSENAL.md cadence.
 
 ## Last completed milestone
 
