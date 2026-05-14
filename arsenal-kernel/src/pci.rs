@@ -32,6 +32,75 @@ const CONFIG_DATA: u16 = 0xCFC;
 
 const VIRTIO_VENDOR: u16 = 0x1AF4;
 
+/// PCI Capability ID for MSI-X (PCI Local Bus Spec 3.0, Appendix
+/// G; PCIe Base Spec §7.7.1). 16-byte table entries; per-vector
+/// mask via a Pending Bit Array (PBA).
+const PCI_CAP_ID_MSIX: u8 = 0x11;
+
+/// Status register bit 4 (within the upper half of dword 0x04) —
+/// Capabilities List supported. If clear, the capability pointer at
+/// offset 0x34 is reserved and the cap walk must not run.
+const STATUS_CAP_LIST: u32 = 1 << 20;
+
+/// Config-space offset of the capability pointer for header-type 0
+/// devices (the only header type that matters at M1).
+const CFG_CAPS_PTR: u8 = 0x34;
+
+/// MSI-X capability layout (12 bytes total):
+///   off 0    Cap ID = 0x11
+///   off 1    Next Cap pointer
+///   off 2-3  Message Control
+///   off 4-7  Table Offset / BAR Indicator
+///   off 8-11 PBA   Offset / BAR Indicator
+///
+/// Message Control bits:
+///   0..10   Table Size minus one (so add 1 for the count)
+///   14      Function Mask (one-shot mask of all vectors)
+///   15      MSI-X Enable
+const MSIX_CTRL_TABLE_SIZE_MASK: u16 = 0x07FF;
+
+/// PCI Bus / Device / Function. Newtype over the (bus, dev, func)
+/// triple — easier to pass around than three separate u8s, and
+/// the Debug impl prints in the conventional `bb:dd.f` form.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Bdf {
+    pub bus: u8,
+    pub dev: u8,
+    pub func: u8,
+}
+
+impl core::fmt::Debug for Bdf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:02x}:{:02x}.{}", self.bus, self.dev, self.func)
+    }
+}
+
+/// Parsed MSI-X capability for one PCIe function. The driver
+/// consumes this to find the BAR + offset where the MSI-X vector
+/// table and PBA live; step 1-4 maps the BAR, writes per-vector
+/// Message Address / Message Data, and unmasks entries.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub struct MsixInfo {
+    pub bdf: Bdf,
+    /// Offset of the MSI-X capability header within the device's
+    /// config space (so step 1-4 can write back to Message Control
+    /// to set the Enable bit).
+    pub cap_offset: u8,
+    /// Number of MSI-X table entries (already biased to count, not
+    /// the on-wire "N-1" encoding).
+    pub table_size: u32,
+    /// BAR number holding the MSI-X table.
+    pub table_bar: u8,
+    /// Byte offset within `table_bar` to the MSI-X table.
+    pub table_offset: u32,
+    /// BAR number holding the Pending Bit Array.
+    pub pba_bar: u8,
+    /// Byte offset within `pba_bar` to the PBA.
+    pub pba_offset: u32,
+}
+
 /// Read a 32-bit dword from PCI config space at (bus, dev, func, offset).
 ///
 /// # Safety
@@ -171,10 +240,83 @@ fn print_function(bus: u8, dev: u8, func: u8) -> bool {
     let class_code = ((class >> 24) & 0xFF) as u8;
     let subclass = ((class >> 16) & 0xFF) as u8;
     let is_virtio = vendor == VIRTIO_VENDOR;
-    let tag = if is_virtio { " (virtio)" } else { "" };
-    let _ = writeln!(
+    let virtio_tag = if is_virtio { " (virtio)" } else { "" };
+
+    // M1 step 1-0: peek the MSI-X capability for the log line so
+    // drivers know at-a-glance which devices they can wire IRQs
+    // against. The capability walk is a few extra config reads —
+    // negligible on QEMU TCG, harmless on real hardware.
+    let msix = msix_info(bus, dev, func);
+    let _ = write!(
         serial::Writer,
-        "pci {bus:02x}:{dev:02x}.{func} vendor={vendor:#06x} device={device:#06x} class={class_code:#04x}:{subclass:#04x}{tag}"
+        "pci {bus:02x}:{dev:02x}.{func} vendor={vendor:#06x} device={device:#06x} class={class_code:#04x}:{subclass:#04x}{virtio_tag}",
     );
+    if let Some(info) = msix {
+        let _ = write!(
+            serial::Writer,
+            " msix=table_size:{} bar:{} table_off:{:#x} pba_bar:{} pba_off:{:#x}",
+            info.table_size,
+            info.table_bar,
+            info.table_offset,
+            info.pba_bar,
+            info.pba_offset,
+        );
+    }
+    let _ = writeln!(serial::Writer);
     is_virtio
+}
+
+/// Walk a function's capability list and return its MSI-X
+/// capability if present. Returns None for devices without MSI-X
+/// (the legacy MSI capability at ID 0x05 is *not* matched — M1
+/// step 1+ assumes MSI-X exclusively; legacy MSI is post-M1 if
+/// any real-hardware quirk demands it).
+pub fn msix_info(bus: u8, dev: u8, func: u8) -> Option<MsixInfo> {
+    // SAFETY: standard PCI dword read; dev / func bounded by
+    // caller's verified-present BDF.
+    let status_command = unsafe { config_read32(bus, dev, func, 0x04) };
+    if status_command & STATUS_CAP_LIST == 0 {
+        return None;
+    }
+
+    // SAFETY: same as above; offset 0x34 is dword-aligned.
+    let caps_ptr_dword = unsafe { config_read32(bus, dev, func, CFG_CAPS_PTR) };
+    let mut cap_offset = (caps_ptr_dword & 0xFC) as u8;
+    // Bound the walk to avoid infinite loops on malformed
+    // capability lists. PCI spec allows ~48 capability entries
+    // within the 256-byte legacy config space; 64 is generous.
+    for _ in 0..64 {
+        if cap_offset == 0 {
+            return None;
+        }
+        debug_assert!(cap_offset >= 0x40, "pci: cap_offset {cap_offset:#x} below the 0x40 PCI capability region");
+        // SAFETY: cap_offset comes from the device's capability
+        // chain; dword-aligned because we masked low two bits.
+        let cap_header = unsafe { config_read32(bus, dev, func, cap_offset) };
+        let cap_id = (cap_header & 0xFF) as u8;
+        let next = ((cap_header >> 8) & 0xFC) as u8;
+        if cap_id == PCI_CAP_ID_MSIX {
+            // Parse Message Control (bits 16..31 of dword 0).
+            let msg_ctrl = ((cap_header >> 16) & 0xFFFF) as u16;
+            let table_size = (msg_ctrl & MSIX_CTRL_TABLE_SIZE_MASK) as u32 + 1;
+            // SAFETY: cap is at least 12 bytes; cap_offset + 4 / + 8
+            // are dword-aligned and within legacy config space when
+            // cap_offset is ≤ 0xF4.
+            let table_dword =
+                unsafe { config_read32(bus, dev, func, cap_offset + 4) };
+            let pba_dword =
+                unsafe { config_read32(bus, dev, func, cap_offset + 8) };
+            return Some(MsixInfo {
+                bdf: Bdf { bus, dev, func },
+                cap_offset,
+                table_size,
+                table_bar: (table_dword & 0x7) as u8,
+                table_offset: table_dword & !0x7,
+                pba_bar: (pba_dword & 0x7) as u8,
+                pba_offset: pba_dword & !0x7,
+            });
+        }
+        cap_offset = next;
+    }
+    None
 }
