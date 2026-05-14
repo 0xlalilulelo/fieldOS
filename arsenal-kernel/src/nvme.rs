@@ -20,8 +20,13 @@
 
 use core::fmt::Write;
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU64, Ordering};
 
+use x86_64::structures::idt::InterruptStackFrame;
+
+use crate::apic;
 use crate::frames;
+use crate::idt;
 use crate::paging;
 use crate::pci;
 use crate::serial;
@@ -92,6 +97,41 @@ const CNS_CONTROLLER: u32 = 0x01;
 /// I/O queue pair at QID=1 (HANDOFF.md "Number of I/O queue pairs"
 /// trade-off resolved (i): single shared I/O queue).
 const IO_QID: u16 = 1;
+
+/// MSI-X table index that backs the I/O queue's IRQ. NVMe Create
+/// I/O CQ's IV field names this index; the MSI-X table at this
+/// index encodes the IDT vector + LAPIC destination.
+const IO_MSIX_INDEX: u16 = 0;
+
+/// MSI-X table entry layout (PCIe Base Spec §6.8.5, Table 6-9):
+///   +0   Message Address Low  (bit 2 = dest mode 0=phys, bits 12..19 = dest ID)
+///   +4   Message Address High (zero for our 32-bit MSI-X address)
+///   +8   Message Data         (low 8 bits = vector; delivery / trigger zero)
+///   +12  Vector Control       (bit 0 = mask; clear to enable)
+const MSIX_ENTRY_BYTES: usize = 16;
+
+/// MSI-X Message Control field bit 15 — MSI-X Enable. Setting this
+/// in the device's PCI capability turns on MSI-X delivery for the
+/// whole device. The Message Control field is a 16-bit RW
+/// register that occupies bits 16..31 of the dword at cap_offset.
+const MSIX_CTRL_ENABLE_DWORD_BIT: u32 = 1 << 31;
+
+/// Count of MSI-X interrupts the I/O completion queue has fired.
+/// Bumped by `nvme_io_handler` in IRQ context; cooperative code
+/// snapshots before submit and spins until the count advances.
+/// Single I/O queue at M1 step 1; per-queue counters would be the
+/// shape for multi-queue at M2+.
+static IO_IRQ_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// IRQ handler for the I/O completion queue. The thin shape —
+/// just a counter bump and EOI — keeps IRQ latency tiny; the
+/// cooperative consumer drains the actual CQE state outside IRQ
+/// context. EOI is required because MSI-X delivers through the
+/// LAPIC just like every other vector in M0.
+extern "x86-interrupt" fn nvme_io_handler(_frame: InterruptStackFrame) {
+    IO_IRQ_COUNT.fetch_add(1, Ordering::Release);
+    apic::send_eoi();
+}
 
 /// I/O queue depth — same 64 as admin. Far below QEMU's reported
 /// MQES (2048); M1 single-block read is well within one queue
@@ -607,18 +647,116 @@ fn poll_qe(ctrl: &mut Controller, kind: QueueKind, expected_cid: u16) -> u16 {
            kind = match kind { QueueKind::Admin => "admin", QueueKind::Io => "io" });
 }
 
+/// Program the device's MSI-X table entry IO_MSIX_INDEX to deliver
+/// IDT vector `vector` to APIC ID `bsp_apic_id` (fixed delivery,
+/// physical destination mode, edge-triggered). Enable MSI-X on the
+/// device by setting bit 15 of the cap's Message Control. Returns
+/// `(table_index, vector)` for use as the IO CQ's IV / IDT
+/// dispatch pair.
+///
+/// MSI message format (Intel SDM Vol. 3A §10.11.1, PCIe §6.1.4):
+///   Message Address[31:20] = 0xFEE (LAPIC region prefix)
+///   Message Address[19:12] = Destination APIC ID
+///   Message Address[3]     = 0 (no redirection hint)
+///   Message Address[2]     = 0 (physical destination mode)
+///   Message Data[7:0]      = IDT vector
+///   Message Data[10:8]     = 0 (fixed delivery)
+///   Message Data[14]       = 0 (edge)
+///   Message Data[15]       = 0 (edge)
+fn program_msix_entry(ctrl: &mut Controller, vector: u8, bsp_apic_id: u8) {
+    let msix = pci::msix_info(ctrl.bdf.bus, ctrl.bdf.dev, ctrl.bdf.func)
+        .expect("nvme: device advertises no MSI-X capability");
+
+    // NVMe puts the MSI-X table inside BAR0 at offset 0x2000 on
+    // QEMU q35; our 16 KiB BAR0 mapping (BAR0_MAP_SIZE = 0x4000)
+    // already covers that. Hard-asserting keeps a future surprise
+    // (a real-iron controller with the table in a different BAR)
+    // obvious instead of silently corrupting an unmapped page.
+    assert_eq!(
+        msix.table_bar, 0,
+        "nvme: MSI-X table_bar={}, expected BAR 0 (M1 step 1 maps BAR0 only)",
+        msix.table_bar,
+    );
+    assert!(
+        (msix.table_offset as u64) + ((IO_MSIX_INDEX as u64 + 1) * MSIX_ENTRY_BYTES as u64)
+            <= BAR0_MAP_SIZE,
+        "nvme: MSI-X table entry {IO_MSIX_INDEX} at offset {:#x} past BAR0 map",
+        msix.table_offset + (IO_MSIX_INDEX as u32) * MSIX_ENTRY_BYTES as u32,
+    );
+
+    let entry_virt = ctrl.bar0_virt
+        + msix.table_offset as usize
+        + IO_MSIX_INDEX as usize * MSIX_ENTRY_BYTES;
+    let addr_lo = 0xFEE0_0000u32 | ((bsp_apic_id as u32) << 12);
+    let data = vector as u32;
+
+    // SAFETY: entry_virt is inside BAR0's HHDM-mapped MMIO; the
+    // four 32-bit writes target the spec-defined MSI-X table layout
+    // for entry IO_MSIX_INDEX. Vector Control bit 0 = 0 unmasks
+    // the entry; with the device's overall MSI-X Enable still 0
+    // at this moment, no MSI can fire yet.
+    unsafe {
+        write_volatile(entry_virt as *mut u32, addr_lo);
+        write_volatile((entry_virt + 4) as *mut u32, 0);
+        write_volatile((entry_virt + 8) as *mut u32, data);
+        write_volatile((entry_virt + 12) as *mut u32, 0);
+    }
+
+    // Enable MSI-X on the device. Read-modify-write the dword at
+    // cap_offset (Cap ID + Next in low 16, Message Control in high
+    // 16). Setting bit 15 of Message Control == bit 31 of the
+    // dword. Cap ID + Next + RO bits in Message Control (Table
+    // Size, etc.) are read-only and write-as-read.
+    // SAFETY: standard PCI config dword RMW; the bit pattern is
+    // spec-legal per PCIe §6.8.6.
+    let dw = unsafe {
+        pci::config_read32(ctrl.bdf.bus, ctrl.bdf.dev, ctrl.bdf.func, msix.cap_offset)
+    };
+    let new_dw = dw | MSIX_CTRL_ENABLE_DWORD_BIT;
+    // SAFETY: as above.
+    unsafe {
+        pci::config_write32(
+            ctrl.bdf.bus,
+            ctrl.bdf.dev,
+            ctrl.bdf.func,
+            msix.cap_offset,
+            new_dw,
+        )
+    };
+
+    let _ = writeln!(
+        serial::Writer,
+        "nvme: msix entry {IO_MSIX_INDEX} -> vector {vector:#04x} apic_id {bsp_apic_id}; \
+         msix-enabled (cap_offset={:#x})",
+        msix.cap_offset,
+    );
+}
+
 /// Create one I/O completion queue + one I/O submission queue at
-/// QID=1 via admin Create-I/O-CQ + Create-I/O-SQ commands. Polled
-/// completion; MSI-X conversion lands at M1-1-4.
+/// QID=1 via admin Create-I/O-CQ + Create-I/O-SQ commands.
+/// Interrupt-driven completion via MSI-X: a fresh IDT vector,
+/// programmed into MSI-X table entry IO_MSIX_INDEX, named in the
+/// Create-I/O-CQ CDW11 IV field. The I/O queue's CQE arrivals fire
+/// `nvme_io_handler` which bumps `IO_IRQ_COUNT`; cooperative
+/// callers (currently `smoke_read_sector_0`) wait on the counter.
 ///
 /// CDW10 for both Create commands (NVMe 1.4 §5.4, §5.5): bits 0..15
 /// = QID, bits 16..31 = QSIZE (zero-based).
 /// CDW11 for Create I/O CQ: bit 0 = PC (physically contiguous),
-/// bit 1 = IEN (interrupts enabled), bits 16..31 = IV (vector).
+/// bit 1 = IEN (interrupts enabled), bits 16..31 = IV (MSI-X
+/// table index — NOT the IDT vector; the MSI-X table entry at
+/// that index encodes the vector).
 /// CDW11 for Create I/O SQ: bit 0 = PC, bits 1..2 = QPRIO,
 /// bits 16..31 = CQID.
 pub fn setup_io_queue(ctrl: &mut Controller) {
     assert!(ctrl.io.is_none(), "nvme: setup_io_queue called twice");
+
+    // Allocate an IDT vector for the I/O completion handler, then
+    // program MSI-X to deliver it to the BSP. Done before queue
+    // creation so the controller's first IEN=1 CQ fires through
+    // an already-armed path.
+    let vector = idt::register_vector(nvme_io_handler);
+    program_msix_entry(ctrl, vector, apic::lapic_id());
 
     let cq_frame = frames::FRAMES
         .alloc_frame()
@@ -639,8 +777,8 @@ pub fn setup_io_queue(ctrl: &mut Controller) {
     let cdw10 = qsize_field | (IO_QID as u32);
 
     // Create I/O CQ first (must exist before its paired SQ).
-    // CDW11 = PC=1, IEN=0 (polled at 1-3; 1-4 sets IEN+IV).
-    let cdw11_cq = 0x0000_0001;
+    // CDW11 = (IV << 16) | (IEN << 1) | PC. IEN=1, IV=IO_MSIX_INDEX.
+    let cdw11_cq = ((IO_MSIX_INDEX as u32) << 16) | 0b11; // PC=1, IEN=1
     let cid = submit_qe(
         ctrl,
         QueueKind::Admin,
@@ -691,15 +829,20 @@ pub fn setup_io_queue(ctrl: &mut Controller) {
 
     let _ = writeln!(
         serial::Writer,
-        "nvme: io queue up (qid={IO_QID} sq_phys={sq_phys:#018x} cq_phys={cq_phys:#018x} depth={IO_QUEUE_SIZE})",
+        "nvme: io queue up (qid={IO_QID} sq_phys={sq_phys:#018x} cq_phys={cq_phys:#018x} depth={IO_QUEUE_SIZE} ien=1 iv={IO_MSIX_INDEX})",
     );
 }
 
 /// Read one logical block from `nsid` at `slba` into a freshly-
-/// allocated 4-KiB DMA buffer, assert the MBR boot-signature
-/// 0xAA55 at byte 510, emit ARSENAL_NVME_OK on success. Mirrors
-/// the 3C virtio-blk sector-0 smoke pattern. Polled completion;
-/// 1-4 switches to MSI-X.
+/// allocated 4-KiB DMA buffer, asserts the MBR boot-signature
+/// 0xAA55 at byte 510, emits ARSENAL_NVME_OK on success. M1-1-4
+/// uses MSI-X interrupt-driven completion: snapshot IO_IRQ_COUNT,
+/// submit, enable interrupts, spin until counter advances, then
+/// drain the (already-pending) CQE via the existing poll_qe path.
+///
+/// Mirrors the 3C virtio-blk sector-0 smoke pattern. Runs at boot
+/// before sched::init, so IF=0 throughout main except the brief
+/// sti window for this submission's MSI delivery.
 pub fn smoke_read_sector_0(ctrl: &mut Controller, nsid: u32) {
     let buf_frame = frames::FRAMES
         .alloc_frame()
@@ -720,6 +863,10 @@ pub fn smoke_read_sector_0(ctrl: &mut Controller, nsid: u32) {
     let cdw11 = (slba >> 32) as u32;
     let cdw12 = 0; // NLB=0 (one block), no flags
 
+    // Snapshot the IRQ counter before submission so the wait
+    // is "count > snapshot" — guards against a delivered-but-
+    // not-yet-observed MSI from any earlier-than-now event.
+    let target = IO_IRQ_COUNT.load(Ordering::Acquire) + 1;
     let cid = submit_qe(
         ctrl,
         QueueKind::Io,
@@ -730,6 +877,28 @@ pub fn smoke_read_sector_0(ctrl: &mut Controller, nsid: u32) {
         cdw11,
         cdw12,
     );
+
+    // Enable interrupts so the MSI can deliver. Main runs with
+    // IF=0 throughout boot until idle's sti at sched::init; this
+    // is the one boot-time IRQ-receive window we open before idle
+    // takes over. The LAPIC timer may fire concurrently — its
+    // handler increments TICKS, dispatches sched::preempt which
+    // no-ops on an empty runqueue (no tasks spawned yet), and
+    // returns. No interference with the MSI we're waiting for.
+    // SAFETY: sti / cli are privileged in ring 0, which we have;
+    // no memory or stack effect beyond IF toggling.
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+    while IO_IRQ_COUNT.load(Ordering::Acquire) < target {
+        core::hint::spin_loop();
+    }
+    // SAFETY: see above.
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+
+    // The CQE is now present in the I/O CQ (the MSI fired because
+    // the controller wrote it). poll_qe spins on the phase tag,
+    // finds the match on iteration 1, advances bookkeeping, and
+    // writes the CQ head doorbell — same path the polled version
+    // at 1-3 used, just guaranteed to return immediately.
     let status = poll_qe(ctrl, QueueKind::Io, cid);
     assert_eq!(
         status & 0xFFFE,
@@ -740,9 +909,7 @@ pub fn smoke_read_sector_0(ctrl: &mut Controller, nsid: u32) {
     // SAFETY: buf_virt holds the 4-KiB read result; the bytes
     // [510..512] are within the first sector regardless of LBA
     // size (M1 step 1 asserts 512-byte LBAs at identify_ns).
-    let sig: u16 = unsafe {
-        core::ptr::read_unaligned((buf_virt + 510) as *const u16)
-    };
+    let sig: u16 = unsafe { core::ptr::read_unaligned((buf_virt + 510) as *const u16) };
     assert_eq!(
         sig, 0xAA55,
         "nvme: sector 0 MBR signature mismatch (got {sig:#06x}); the QEMU NVMe backing should be the same hybrid ISO virtio-blk reads at 3C-3"
@@ -750,7 +917,8 @@ pub fn smoke_read_sector_0(ctrl: &mut Controller, nsid: u32) {
 
     let _ = writeln!(
         serial::Writer,
-        "nvme: sector 0 read OK (status={status:#06x}, sig=0xaa55)",
+        "nvme: sector 0 read OK (status={status:#06x}, sig=0xaa55, irq_count={})",
+        IO_IRQ_COUNT.load(Ordering::Relaxed),
     );
     serial::write_str("ARSENAL_NVME_OK\n");
 

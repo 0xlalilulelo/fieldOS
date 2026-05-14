@@ -101,6 +101,29 @@ pub struct MsixInfo {
     pub pba_offset: u32,
 }
 
+/// Write a 32-bit dword to PCI config space at (bus, dev, func, offset).
+///
+/// # Safety
+/// As `config_read32`. Caller must additionally understand the
+/// hardware effect of writing the targeted register — writes to the
+/// command/status register, BARs, capability state, and many other
+/// fields have side effects.
+pub(crate) unsafe fn config_write32(bus: u8, dev: u8, func: u8, offset: u8, val: u32) {
+    debug_assert!(dev < 32, "pci: dev must be 0..32");
+    debug_assert!(func < 8, "pci: func must be 0..8");
+    debug_assert_eq!(offset & 0x03, 0, "pci: offset must be dword-aligned");
+    let addr = (1u32 << 31)
+        | ((bus as u32) << 16)
+        | ((dev as u32 & 0x1F) << 11)
+        | ((func as u32 & 0x07) << 8)
+        | (offset as u32 & 0xFC);
+    // SAFETY: same as config_read32 — CF8/CFC ownership is universal.
+    unsafe {
+        outl(CONFIG_ADDRESS, addr);
+        outl(CONFIG_DATA, val);
+    }
+}
+
 /// Read a 32-bit dword from PCI config space at (bus, dev, func, offset).
 ///
 /// # Safety
