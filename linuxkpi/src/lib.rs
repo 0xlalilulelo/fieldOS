@@ -203,6 +203,20 @@ pub fn self_test() {
         unsafe { pci::pci_unregister_driver(&mut driver as *mut pci::pci_driver) };
     }
 
+    // M1-2-4 cc-build smoke: call linuxkpi_cc_smoke (defined in
+    // linuxkpi/csrc/smoke.c). Validates that the cc-crate-driven
+    // C compile path produces a linkable object whose symbol
+    // resolution against the Rust shim works end-to-end. The C
+    // call into printk + kmalloc/kfree exercises the FFI loop in
+    // both directions (Rust<->C<->Rust).
+    unsafe extern "C" {
+        fn linuxkpi_cc_smoke();
+    }
+    // SAFETY: linuxkpi_cc_smoke is the BSD-2 smoke harness from
+    // linuxkpi/csrc/smoke.c; it has void(void) signature and
+    // calls back into shim functions whose contracts hold here.
+    unsafe { linuxkpi_cc_smoke() };
+
     // M1-2-2 IRQ bridge: request_irq / free_irq round-trip. The
     // dispatcher pool was registered in arsenal-kernel/src/main.rs
     // via linuxkpi::irq::register_dispatchers(idt::register_vector);

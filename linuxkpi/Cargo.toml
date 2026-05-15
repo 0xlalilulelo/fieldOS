@@ -23,6 +23,20 @@ path = "src/lib.rs"
 test = false
 bench = false
 
+[build-dependencies]
+# cc 1.0 — kept for compiler-detection / cross-target flag
+# discovery / CFLAGS_* env-var plumbing for the day a future
+# host distro lands the cc-friendly fix. M1-2-4 ended up
+# bypassing cc::Build's compile() pipeline — see build.rs head
+# comment for the macOS ar/ranlib reasoning. License:
+# MIT/Apache-2.0 — clear under CLAUDE.md §3.
+cc = "1.0"
+# ar 0.9 — pure-Rust GNU-format archive writer. Used because
+# macOS's system `ar`/`ranlib` are Mach-O-only and Apple's
+# Xcode toolchain doesn't ship `llvm-ar` under that name.
+# License: MIT/Apache-2.0 — clear under CLAUDE.md §3.
+ar = "0.9"
+
 [dependencies]
 # spin 0.10 — same version arsenal-kernel uses; the shim's
 # Mutex / Spinlock wrap spin::Mutex<()> to match the kernel's
