@@ -142,16 +142,42 @@ M1-2-0 structural picks (ADR-0005):
 - Synchronous module init at M1; deferred-path stubs
   (schedule_work, queue_work, kthread_run) panic-on-call.
 
-**Next sub-block: M1-2-1** — foundational shim API surface.
-C-FFI integer typedefs + printk + pr_* family + kmalloc /
-kfree honoring GFP_KERNEL/GFP_ATOMIC + mutex / spinlock /
-atomic_t + container_of / BUG_ON / WARN_ON + jiffies /
-msleep / udelay + copy_*_user stubs that BUG_ON. Self-test
-fires from kernel main, emits `ARSENAL_LINUXKPI_OK`.
-~600-800 LOC shim Rust + ~80 LOC `shim_c.h`. One commit:
-`feat(linuxkpi): foundational types + printk + slab + locks
-+ atomics`. HANDOFF estimates 2-3 focused sessions / ~3
-calendar weeks.
+**M1-2-1 complete (2026-05-15, one focused session,
+`4b1f88e`).** ~620 LOC of shim Rust + 112 LOC of
+`shim_c.h` + wiring: types.rs (FFI typedefs), log.rs
+(printk + KERN_* prefix detection routed to serial via
+`linuxkpi_serial_sink` extern), slab.rs (kmalloc / kzalloc
+/ kfree / krealloc with 16-byte header for layout
+recovery), locks.rs (atomic_t + mutex + spinlock with
+repr(C) layouts + Rust-friendly Mutex<T> + AtomicInt).
+Self-test exercises printk (Rust + C-callable), kmalloc /
+kfree round-trip, kzalloc zero-fill, Mutex<T>::lock,
+AtomicInt inc/read/dec, C-callable mutex round-trip;
+emits `ARSENAL_LINUXKPI_OK`. Smoke is now 15 sentinels.
+Bug caught + fixed in-session: KERN_INFO encoded as
+`\x01\x06` (SOH + integer 6) instead of `\x016` (SOH +
+ASCII '6'); strip_kern_level fell through silently and the
+`[INFO]` tag never appeared. HANDOFF failure mode (g)
+material; fixed before commit.
+
+**Next sub-block: M1-2-2** — PCI bus adapter + IRQ bridge
++ DMA coherent. Linux PCI driver registration model
+(struct pci_driver / pci_register_driver / .probe dispatch
+over our pci::scan); pci_resource_start / pci_iomap /
+pci_set_master / pci_enable_device wrapping pci.rs +
+paging::map_mmio; pci_alloc_irq_vectors + request_irq /
+free_irq routing through idt::register_vector + the MSI-X
+table programming step 1 exercises in nvme.rs;
+dma_alloc_coherent over frames::FRAMES.alloc_frame +
+hhdm_offset; dma_map/unmap_single as no-ops on x86_64
+cache-coherent. Self-test: a no-op pci_driver registers,
+sees pci::scan() devices fire .probe, unregisters.
+~600-800 LOC shim + ~120 LOC `shim_c.h` growth. **HANDOFF
+estimate: 4-5 focused sessions / 3-4 calendar weeks — the
+longest single sub-block of M1 step 2.** Seven failure
+modes flagged in the HANDOFF; the (a) PCI driver match
+never fires + (b) request_irq vector leak + (d) DMA vs
+HHDM-virt confusion are the bring-up-tape-record items.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
