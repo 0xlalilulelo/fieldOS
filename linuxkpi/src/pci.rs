@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use core::ptr::NonNull;
 use spin::Mutex;
 
-use crate::types::{c_char, c_int, c_ulong, c_void};
+use crate::types::{c_char, c_int, c_uint, c_ulong, c_void};
 
 unsafe extern "C" {
     fn linuxkpi_pci_config_read32(bus: u8, dev: u8, func: u8, offset: u8) -> u32;
@@ -32,6 +32,18 @@ unsafe extern "C" {
     fn linuxkpi_pci_bar_address(bus: u8, dev: u8, func: u8, bar: u8) -> u64;
     fn linuxkpi_paging_map_mmio(phys: u64, len: u64);
     fn linuxkpi_paging_hhdm_offset() -> u64;
+    fn linuxkpi_pci_msix_info(bus: u8, dev: u8, func: u8, out: *mut MsixInfoRaw);
+}
+
+/// Mirror of `arsenal_kernel::linuxkpi_bridge::LinuxkpiMsixInfo`.
+/// Populated by the bridge's `linuxkpi_pci_msix_info` extern.
+#[repr(C)]
+struct MsixInfoRaw {
+    present: u32,
+    cap_offset: u32,
+    table_size: u32,
+    table_bar: u32,
+    table_offset: u32,
 }
 
 // =====================================================================
@@ -84,6 +96,15 @@ pub struct pci_dev {
     /// `pci_get_drvdata` manipulate this. The shim leaves it for
     /// the driver; we never inspect it.
     pub driver_data: *mut c_void,
+    /// First slot allocated by `pci_alloc_irq_vectors` for this
+    /// device, or -1 if no IRQ vectors have been allocated. The
+    /// allocation is contiguous: the device owns slots
+    /// `[msix_first_slot, msix_first_slot + msix_vector_count)`.
+    /// `pci_irq_vector(dev, idx)` returns `msix_first_slot + idx`.
+    pub msix_first_slot: c_int,
+    /// Number of vectors allocated by `pci_alloc_irq_vectors`. 0
+    /// when no allocation has been made.
+    pub msix_vector_count: c_int,
 }
 
 // SAFETY: pci_dev is a passive descriptor; concurrent access is
@@ -476,6 +497,231 @@ fn build_pci_dev(
         bar_addr,
         bar_len,
         driver_data: core::ptr::null_mut(),
+        msix_first_slot: -1,
+        msix_vector_count: 0,
+    }
+}
+
+// =====================================================================
+// MSI-X allocation — pci_alloc_irq_vectors / pci_irq_vector /
+// pci_free_irq_vectors. Programs the device's MSI-X table inline;
+// IRQ handler dispatch is the slot pool in linuxkpi/src/irq.rs.
+// =====================================================================
+
+/// Linux PCI IRQ allocation flag bits — Linux <linux/pci.h>.
+pub const PCI_IRQ_INTX: c_int = 1 << 0;
+pub const PCI_IRQ_MSI: c_int = 1 << 1;
+pub const PCI_IRQ_MSIX: c_int = 1 << 2;
+pub const PCI_IRQ_ALL_TYPES: c_int = PCI_IRQ_INTX | PCI_IRQ_MSI | PCI_IRQ_MSIX;
+
+/// Allocate `min_vecs..=max_vecs` IRQ vectors for `dev`. M1's
+/// shim supports `PCI_IRQ_MSIX` only; legacy MSI / INTx return
+/// -ENOSYS-style failure even if requested.
+///
+/// On success, returns the number of vectors allocated (in
+/// `min_vecs..=max_vecs`); the device's MSI-X table is programmed
+/// + enabled, and the per-slot dispatchers are wired through the
+///   shim's IDT pool. On failure returns negative.
+///
+/// # Safety
+/// `dev` must point to a populated `pci_dev` (i.e., one delivered
+/// to a driver's `.probe` callback by `pci_register_driver`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pci_alloc_irq_vectors(
+    dev: *mut pci_dev,
+    min_vecs: c_uint,
+    max_vecs: c_uint,
+    flags: c_uint,
+) -> c_int {
+    if dev.is_null() {
+        return -1;
+    }
+    if (flags as c_int) & PCI_IRQ_MSIX == 0 {
+        // Legacy MSI / INTx is post-M1; fail loudly.
+        return -1;
+    }
+    if min_vecs == 0 || max_vecs < min_vecs {
+        return -1;
+    }
+
+    // SAFETY: caller's contract — dev is populated.
+    let (bus, devnum, func) = unsafe {
+        (
+            (*dev).bus_number,
+            (*dev).devfn >> 3,
+            (*dev).devfn & 0x07,
+        )
+    };
+
+    // Read the MSI-X capability via the bridge.
+    let mut info = MsixInfoRaw {
+        present: 0,
+        cap_offset: 0,
+        table_size: 0,
+        table_bar: 0,
+        table_offset: 0,
+    };
+    // SAFETY: bridge fn — out points to writable stack storage.
+    unsafe { linuxkpi_pci_msix_info(bus, devnum, func, &mut info as *mut MsixInfoRaw) };
+    if info.present == 0 {
+        return -1;
+    }
+
+    // Clamp the vector count to: requested max, MSI-X table size,
+    // and the dispatcher pool's free capacity (handled by alloc_slots).
+    let table_size = info.table_size as c_uint;
+    let want = max_vecs.min(table_size);
+    if want < min_vecs {
+        return -1;
+    }
+    let count = want as usize;
+
+    let first_slot = match crate::irq::alloc_slots(count) {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    // Map the MSI-X table BAR. The BAR address is the BAR base;
+    // table_offset is the byte offset within the BAR. Per the
+    // PCIe spec the table is `count * 16` bytes long; we map
+    // exactly that.
+    let table_phys_base = unsafe {
+        linuxkpi_pci_bar_address(bus, devnum, func, info.table_bar as u8)
+    };
+    if table_phys_base == 0 {
+        return -1;
+    }
+    let table_phys = table_phys_base + info.table_offset as u64;
+    let table_len = (count as u64) * 16;
+    // SAFETY: bridge fns — map_mmio is idempotent on overlap.
+    let table_virt = unsafe {
+        linuxkpi_paging_map_mmio(table_phys, table_len);
+        let hhdm = linuxkpi_paging_hhdm_offset();
+        (table_phys + hhdm) as *mut u32
+    };
+
+    // Program each table entry. Entry layout (16 bytes):
+    //   off 0..3   Message Address Low  (LAPIC fixed-delivery)
+    //   off 4..7   Message Address High (0 for 32-bit address)
+    //   off 8..11  Message Data         (vector + delivery mode)
+    //   off 12..15 Vector Control       (bit 0 = mask)
+    //
+    // BSP destination: APIC ID 0. M1 single-CPU MSI-X delivery;
+    // multi-CPU IRQ steering arrives at M2 when the scheduler's
+    // per-CPU runqueue justifies it.
+    for i in 0..count {
+        let entry_idx = i * 4;
+        let idt_vec = crate::irq::slot_idt_vector(first_slot + i) as u32;
+        // SAFETY: table_virt + (i*4)..(i*4 + 4) is in bounds for
+        // count entries; map_mmio covered exactly that range.
+        unsafe {
+            core::ptr::write_volatile(table_virt.add(entry_idx), 0xFEE0_0000); // addr low: APIC ID 0
+            core::ptr::write_volatile(table_virt.add(entry_idx + 1), 0);       // addr high
+            core::ptr::write_volatile(table_virt.add(entry_idx + 2), idt_vec); // data: vector
+            core::ptr::write_volatile(table_virt.add(entry_idx + 3), 0);       // vector control: unmasked
+        }
+    }
+
+    // Enable MSI-X in the capability's Message Control register.
+    // The cap dword: [0..7] cap ID, [8..15] next, [16..31] msg_ctrl.
+    // Set bit 31 (msg_ctrl[15] = MSI-X Enable); clear bit 30
+    // (msg_ctrl[14] = Function Mask) so individual entries are
+    // governed by their own vector_control mask bits.
+    // SAFETY: bridge fns — capability offset is dword-aligned per
+    // PCI spec.
+    unsafe {
+        let cur = linuxkpi_pci_config_read32(bus, devnum, func, info.cap_offset as u8);
+        let new = (cur | (1u32 << 31)) & !(1u32 << 30);
+        linuxkpi_pci_config_write32(bus, devnum, func, info.cap_offset as u8, new);
+    }
+
+    // SAFETY: caller's contract — dev is writable.
+    unsafe {
+        (*dev).msix_first_slot = first_slot as c_int;
+        (*dev).msix_vector_count = count as c_int;
+    }
+
+    count as c_int
+}
+
+/// Return the IRQ number for the `idx`-th vector of `dev`'s
+/// MSI-X allocation. Equivalent in our shim to the slot index;
+/// inherited drivers pass it to `request_irq`.
+///
+/// Returns negative if `dev` has no allocation or `idx` is out
+/// of range.
+///
+/// # Safety
+/// `dev` must point to a populated `pci_dev` whose
+/// `pci_alloc_irq_vectors` call returned > 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pci_irq_vector(dev: *const pci_dev, idx: c_uint) -> c_int {
+    if dev.is_null() {
+        return -1;
+    }
+    // SAFETY: caller's contract.
+    let (first, count) = unsafe { ((*dev).msix_first_slot, (*dev).msix_vector_count) };
+    if first < 0 || (idx as c_int) >= count {
+        return -1;
+    }
+    first + idx as c_int
+}
+
+/// Release all IRQ vectors previously allocated via
+/// `pci_alloc_irq_vectors` for `dev`. Clears the corresponding
+/// shim-side slot entries (drivers that already called
+/// `request_irq` are silently unregistered) but does not reclaim
+/// the slots in the pool — slot-pool reclaim arrives if real-
+/// hardware driver churn exhausts the 16-slot capacity, which
+/// won't happen at M1.
+///
+/// Also disables MSI-X in the device's Message Control register.
+///
+/// # Safety
+/// `dev` must point to a populated `pci_dev`. Calling on a `dev`
+/// that never had `pci_alloc_irq_vectors` called is a no-op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pci_free_irq_vectors(dev: *mut pci_dev) {
+    if dev.is_null() {
+        return;
+    }
+    // SAFETY: caller's contract.
+    let (first, count) = unsafe { ((*dev).msix_first_slot, (*dev).msix_vector_count) };
+    if first < 0 || count <= 0 {
+        return;
+    }
+    // Clear shim-side handler slots so any subsequent IRQ delivery
+    // dispatches as a no-op (then sends EOI as usual).
+    for i in 0..count {
+        // SAFETY: free_irq is a pure shim fn; first + i is in
+        // 0..SLOT_COUNT by construction (alloc_slots guaranteed it).
+        unsafe { let _ = crate::irq::free_irq((first + i) as c_uint, core::ptr::null_mut()); }
+    }
+    // Disable MSI-X. Read the cap dword, clear bit 31 (Enable),
+    // set bit 30 (Function Mask) for paranoia, write back.
+    // SAFETY: caller's contract — dev is populated; cap_offset
+    // was recorded by pci_alloc_irq_vectors via the bridge.
+    unsafe {
+        let bus = (*dev).bus_number;
+        let devnum = (*dev).devfn >> 3;
+        let func = (*dev).devfn & 0x07;
+        // Re-read the MSI-X cap to find the cap_offset; cheaper
+        // than caching it in pci_dev for one disable call.
+        let mut info = MsixInfoRaw {
+            present: 0,
+            cap_offset: 0,
+            table_size: 0,
+            table_bar: 0,
+            table_offset: 0,
+        };
+        linuxkpi_pci_msix_info(bus, devnum, func, &mut info as *mut MsixInfoRaw);
+        if info.present == 1 {
+            let cur = linuxkpi_pci_config_read32(bus, devnum, func, info.cap_offset as u8);
+            let new = (cur & !(1u32 << 31)) | (1u32 << 30);
+            linuxkpi_pci_config_write32(bus, devnum, func, info.cap_offset as u8, new);
+        }
+        (*dev).msix_first_slot = -1;
+        (*dev).msix_vector_count = 0;
     }
 }
 

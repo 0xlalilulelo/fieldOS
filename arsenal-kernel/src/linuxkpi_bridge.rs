@@ -19,9 +19,23 @@
 //!   3. Document the safety contract on both sides — they must
 //!      match.
 
-use crate::{frames, paging, pci};
+use crate::{apic, frames, paging, pci};
 use x86_64::PhysAddr;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
+
+/// Flat C-shaped MSI-X capability descriptor for `linuxkpi_pci_
+/// msix_info`. Mirrors `pci::MsixInfo`'s shape but lives at the
+/// bridge boundary so linuxkpi can declare the same `#[repr(C)]`
+/// struct without depending on arsenal-kernel's types.
+#[repr(C)]
+pub struct LinuxkpiMsixInfo {
+    /// 1 if MSI-X capability is present + parsed; 0 otherwise.
+    pub present: u32,
+    pub cap_offset: u32,
+    pub table_size: u32,
+    pub table_bar: u32,
+    pub table_offset: u32,
+}
 
 /// PCI config-space dword read. Delegates to `pci::config_read32`.
 ///
@@ -115,4 +129,52 @@ pub extern "C" fn linuxkpi_frames_alloc_frame() -> u64 {
 pub unsafe extern "C" fn linuxkpi_frames_free_frame(phys: u64) {
     let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys));
     frames::FRAMES.free_frame(frame);
+}
+
+/// Send LAPIC end-of-interrupt. The shim's per-slot dispatcher
+/// calls this after every IRQ handler invocation.
+#[unsafe(no_mangle)]
+pub extern "C" fn linuxkpi_lapic_eoi() {
+    apic::send_eoi();
+}
+
+/// Read the MSI-X capability of `(bus, dev, func)` into `*out`.
+/// Sets `out.present = 0` when the function does not have an
+/// MSI-X capability; sets `present = 1` and populates the rest
+/// when present.
+///
+/// # Safety
+/// `out` must point to writable storage of size + alignment
+/// matching `LinuxkpiMsixInfo`. `(bus, dev, func)` is treated
+/// as a probe (absent functions return `present = 0`); no
+/// validity precondition.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_pci_msix_info(
+    bus: u8,
+    dev: u8,
+    func: u8,
+    out: *mut LinuxkpiMsixInfo,
+) {
+    if out.is_null() {
+        return;
+    }
+    match pci::msix_info(bus, dev, func) {
+        Some(info) => {
+            // SAFETY: out is non-null per the check; caller's
+            // contract ensures it is properly aligned + sized.
+            unsafe {
+                (*out).present = 1;
+                (*out).cap_offset = info.cap_offset as u32;
+                (*out).table_size = info.table_size;
+                (*out).table_bar = info.table_bar as u32;
+                (*out).table_offset = info.table_offset;
+            }
+        }
+        None => {
+            // SAFETY: see above.
+            unsafe {
+                (*out).present = 0;
+            }
+        }
+    }
 }

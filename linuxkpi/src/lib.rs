@@ -14,12 +14,14 @@
 //!
 //! Added at M1-2-2: PCI bus adapter (`pci`) — `struct pci_driver`
 //! registration + `.probe` dispatch + `pci_resource_*` /
-//! `pci_iomap` / `pci_set_master` / `pci_enable_device`. DMA
-//! coherent (`dma`) — `dma_alloc_coherent` over the frame
-//! allocator + no-op `dma_map_*` / `dma_sync_*` reflecting
-//! x86_64's cache-coherent DMA model. IRQ bridge
-//! (`pci_alloc_irq_vectors`, `request_irq`) is the next
-//! follow-up in M1-2-2.
+//! `pci_iomap` / `pci_set_master` / `pci_enable_device` /
+//! `pci_alloc_irq_vectors` / `pci_irq_vector` /
+//! `pci_free_irq_vectors`. IRQ bridge (`irq`) — 16-slot
+//! pre-generated dispatcher pool, `request_irq` / `free_irq`,
+//! `register_dispatchers` init for `arsenal-kernel` to call at
+//! boot. DMA coherent (`dma`) — `dma_alloc_coherent` over the
+//! frame allocator + no-op `dma_map_*` / `dma_sync_*` reflecting
+//! x86_64's cache-coherent DMA model.
 //!
 //! Surfaces deferred to later sub-blocks:
 //! - virtio bus adapter: M1-2-3.
@@ -31,8 +33,10 @@
 //!   inherited driver demands them (typically M1-2-5).
 
 #![no_std]
+#![feature(abi_x86_interrupt)]
 
 pub mod dma;
+pub mod irq;
 pub mod locks;
 pub mod log;
 pub mod pci;
@@ -187,6 +191,47 @@ pub fn self_test() {
         );
         // SAFETY: pairs with the register above.
         unsafe { pci::pci_unregister_driver(&mut driver as *mut pci::pci_driver) };
+    }
+
+    // M1-2-2 IRQ bridge: request_irq / free_irq round-trip. The
+    // dispatcher pool was registered in arsenal-kernel/src/main.rs
+    // via linuxkpi::irq::register_dispatchers(idt::register_vector);
+    // here we just exercise the slot bookkeeping (no actual IRQ
+    // delivery — that lands at M1-2-5 with virtio-balloon's first
+    // real interrupt).
+    {
+        static IRQ_FIRES: locks::AtomicInt = locks::AtomicInt::new(0);
+        unsafe extern "C" fn noop_handler(
+            _irq: types::c_int,
+            _dev_id: *mut types::c_void,
+        ) -> types::c_int {
+            IRQ_FIRES.inc();
+            irq::IRQ_HANDLED
+        }
+        // Use slot 15 (the highest pre-allocated slot) so we don't
+        // collide with whatever pci_alloc_irq_vectors will hand out
+        // at 2-5 (which starts from slot 0). This is a registration
+        // round-trip, not an IRQ delivery test.
+        let test_irq: types::c_uint = (irq::SLOT_COUNT - 1) as types::c_uint;
+        let dummy_dev_id = 0xDEAD_BEEFu64 as *mut types::c_void;
+        // SAFETY: noop_handler is extern "C" + the right signature;
+        // dummy_dev_id is opaque. Slot 15 is in 0..SLOT_COUNT.
+        let rc = unsafe {
+            irq::request_irq(
+                test_irq,
+                noop_handler,
+                0,
+                c"linuxkpi-irq-self-test".as_ptr(),
+                dummy_dev_id,
+            )
+        };
+        assert_eq!(rc, 0, "request_irq failed with rc={rc}");
+        // SAFETY: paired with the request_irq above.
+        let returned_dev_id = unsafe { irq::free_irq(test_irq, dummy_dev_id) };
+        assert_eq!(
+            returned_dev_id, dummy_dev_id,
+            "free_irq returned wrong dev_id (got {returned_dev_id:p}, expected {dummy_dev_id:p})"
+        );
     }
 
     // M1-2-2: dma_alloc_coherent round-trip. Allocates one frame,

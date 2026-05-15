@@ -8,9 +8,9 @@
  *
  * M1-2-1 surface: types + printk + slab + locks + atomics.
  * M1-2-2 surface: PCI bus adapter (pci_driver registration model)
- *   + DMA coherent.
- *   - IRQ bridge (request_irq + pci_alloc_irq_vectors) is the
- *     next M1-2-2 follow-up.
+ *   + DMA coherent + IRQ bridge (request_irq + free_irq +
+ *   pci_alloc_irq_vectors + pci_irq_vector +
+ *   pci_free_irq_vectors).
  *   - virtio bus arrives at M1-2-3.
  *   - cc-driven compilation of inherited C against this header
  *     lands at M1-2-4 — until then this header is consumed only
@@ -139,6 +139,8 @@ struct pci_dev {
     __u64 bar_addr[6];      /* cached at probe-dispatch time */
     __u64 bar_len[6];
     void *driver_data;      /* opaque to shim; pci_set_drvdata */
+    int   msix_first_slot;  /* set by pci_alloc_irq_vectors; -1 = none */
+    int   msix_vector_count;
 };
 
 struct pci_driver {
@@ -156,6 +158,33 @@ extern void *pci_iomap(const struct pci_dev *dev, int bar, __u64 max_len);
 extern void  pci_iounmap(const struct pci_dev *dev, void *addr);
 extern void  pci_set_master(struct pci_dev *dev);
 extern int   pci_enable_device(struct pci_dev *dev);
+
+/* MSI-X allocation. M1-2-2 supports PCI_IRQ_MSIX only; legacy
+ * MSI / INTx returns negative if requested. */
+#define PCI_IRQ_INTX       (1 << 0)
+#define PCI_IRQ_MSI        (1 << 1)
+#define PCI_IRQ_MSIX       (1 << 2)
+#define PCI_IRQ_ALL_TYPES  (PCI_IRQ_INTX | PCI_IRQ_MSI | PCI_IRQ_MSIX)
+
+extern int  pci_alloc_irq_vectors(struct pci_dev *dev,
+                                  unsigned int min_vecs,
+                                  unsigned int max_vecs,
+                                  unsigned int flags);
+extern int  pci_irq_vector(const struct pci_dev *dev, unsigned int idx);
+extern void pci_free_irq_vectors(struct pci_dev *dev);
+
+/* ---- <linux/interrupt.h> ---- */
+
+#define IRQ_NONE         0
+#define IRQ_HANDLED      1
+#define IRQ_WAKE_THREAD  2
+
+typedef int (*irq_handler_t)(int irq, void *dev_id);
+
+extern int        request_irq(unsigned int irq, irq_handler_t handler,
+                              unsigned long flags, const char *name,
+                              void *dev_id);
+extern void      *free_irq(unsigned int irq, void *dev_id);
 
 /* ---- <linux/dma-mapping.h> + <linux/dma-direction.h> ---- */
 

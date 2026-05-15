@@ -316,13 +316,21 @@ extern "C" fn _start() -> ! {
     nvme::setup_io_queue(&mut nvme_ctrl);
     nvme::smoke_read_sector_0(&mut nvme_ctrl, 1);
 
-    // M1 step 2-1: LinuxKPI shim foundational self-test. Exercises
-    // the four foundational primitives (printk, kmalloc/kfree,
-    // mutex, atomic) in sequence and emits ARSENAL_LINUXKPI_OK on
-    // success. Runs after heap is up and after M1-1 NVMe to
-    // position M1 step 2 work adjacent to M1 step 1; later sub-
-    // blocks (2-2 PCI bridge, 2-3 virtio bus, 2-5 virtio-balloon
-    // online) extend this slot rather than introducing new ones.
+    // M1 step 2-2 IRQ bridge: register the 16-slot dispatcher pool
+    // with the IDT so pci_alloc_irq_vectors can program MSI-X
+    // tables to deliver to known IDT vectors. Must run before
+    // linuxkpi::self_test (which exercises request_irq) and before
+    // any inherited driver's pci_alloc_irq_vectors call.
+    linuxkpi::irq::register_dispatchers(idt::register_vector);
+
+    // M1 step 2-1+: LinuxKPI shim self-test. Exercises printk,
+    // kmalloc/kfree, mutex, atomic (M1-2-1); pci walk + no-op
+    // pci_driver registration + dma_alloc_coherent (M1-2-2 PCI+DMA);
+    // request_irq/free_irq round-trip (M1-2-2 IRQ bridge).
+    // Emits ARSENAL_LINUXKPI_OK on success. Runs after heap is up
+    // and after M1-1 NVMe to position M1 step 2 work adjacent to
+    // M1 step 1; later sub-blocks (2-3 virtio bus, 2-5 virtio-
+    // balloon online) extend this slot.
     linuxkpi::self_test();
 
     // virtio-blk smoke: locate the device, init, read sector 0,

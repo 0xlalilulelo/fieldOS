@@ -29,3 +29,9 @@ bench = false
 # locking discipline (see locks.rs). License: MIT — clear under
 # CLAUDE.md §3.
 spin = "0.10"
+# x86_64 0.15 — same version arsenal-kernel uses. M1-2-2 IRQ
+# bridge needs `InterruptStackFrame` for the dispatcher pool's
+# `extern "x86-interrupt" fn` signatures so they match what
+# arsenal-kernel's `idt::register_vector` expects.
+# License: MIT/Apache-2.0 — clear under CLAUDE.md §3.
+x86_64 = { version = "0.15", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
