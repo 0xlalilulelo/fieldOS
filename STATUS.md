@@ -235,27 +235,80 @@ it, `non_camel_case_types` allow on `irq_handler_t` (Linux-
 ABI name preserved), one missing `# Safety` on the new
 no-op extern fn.
 
-**Next sub-block: M1-2-3** — virtio bus adapter. Linux
-`struct virtio_driver` / `struct virtio_device` / `struct
-virtqueue` shims over arsenal-kernel's `virtio.rs`
-primitives (find_device, the VirtqDesc/Avail/Used
-layouts). `virtqueue_add_buf` / `virtqueue_kick` /
-`virtqueue_get_buf` wrapping the descriptor-ring layout;
-`virtio_get_features` / `virtio_finalize_features` over
-the common_cfg feature-bit handshake; `virtio_cread` /
-`virtio_cwrite` over device_cfg; `virtio_pci_modern_probe`
-enumerates PCI devices with virtio's vendor ID 0x1AF4 and
-dispatches the matching virtio_driver's `.probe` (same
-pattern as PCI bus adapter at M1-2-2, narrowed to
-virtio's PCI subsystem-ID space). Self-test: a no-op
-virtio_driver registers, sees the existing virtio-blk +
-virtio-net devices fire `.probe`, unregisters cleanly.
-~400-500 LOC + ~80 LOC `shim_c.h` growth. **HANDOFF
-estimate: 2-3 focused sessions / ~2 calendar weeks.**
-After M1-2-3 lands, the "shim foundation" devlog cluster
-(2-1 + 2-2 + 2-3) is structurally complete and the work
-shifts to GPL-boundary territory (M1-2-4: vendor Linux
-6.12 LTS subset + cc-crate build integration).
+**M1-2-3 complete (2026-05-15, `2fed90c`).** ~524 LOC
+`linuxkpi/src/virtio.rs` (new) + 66 LOC bridge growth
+(LinuxkpiVirtioDev struct + linuxkpi_virtio_resolve) +
+77 LOC shim_c.h growth + 66 LOC lib.rs (self_test
+extension) + 1 LOC try_resolve visibility bump. The
+"shim foundation" devlog cluster (M1-2-1 + 2-2 + 2-3)
+is now structurally complete. Self-test extension:
+virtio walk found 3 devices (blk + net + rng) + a
+no-op virtio_driver with VIRTIO_DEV_ANY_ID matches all
+three. Virtqueue surface (find_vqs, virtqueue_add_*,
+virtqueue_kick, virtqueue_get_buf) ships as panic-on-
+call stubs; functional implementations land at M1-2-5
+when virtio-balloon online demands them.
+
+Cumulative M1-2 picture so far (post-pivot concentration
+window remains open per the established pattern; M1
+milestone budget unchanged):
+| Sub-block | HANDOFF estimate | Actual |
+|---|---|---|
+| 2-0 ADR + skeleton | 0.5 weeks | 0.5 sessions |
+| 2-1 foundational shim | 2-3 sessions | 1 session |
+| 2-2 PCI + IRQ + DMA | 4-5 sessions | 2 sessions |
+| 2-3 virtio bus | 2-3 sessions | 1 session |
+| **subtotal** | **~10-11 sessions** | **~4.5 sessions** |
+
+**Next sub-block: M1-2-4** — cc-build infrastructure +
+GPL-boundary fence. Per ADR-0005 § 2: add `cc = "1.0"`
+build-dep + `linuxkpi/build.rs` invoking
+`cc::Build::new()` with the cross-compile flag set
+(clang + `-target x86_64-unknown-none -nostdinc
+-ffreestanding -fno-stack-protector -mno-red-zone
+-mcmodel=kernel -x c -I vendor/linux-6.12/include
+-I linuxkpi/include`); license-boundary enforcement
+(refuse to compile .c outside `vendor/linux-6.12*/` or
+`linuxkpi/csrc/`).
+
+**Scope decision for M1-2-4:** the HANDOFF text bundles
+"vendor Linux 6.12 LTS subset" + "build integration"
+into a single sub-block, but vendoring upstream Linux
+headers + `virtio_balloon.c` deterministically requires
+either cached upstream source (not present in this
+environment) or many WebFetch round-trips (slow, error-
+prone for the cumulative ~thousands of LOC of header
+content with deep transitive includes). The cc-build
+infrastructure is independently valuable + bisect-rich;
+the actual vendoring naturally belongs with M1-2-5
+("balloon comes online"), where the HANDOFF already
+says compile errors from `virtio_balloon.c`'s specific
+include set drive the next batch of shim functions.
+
+**M1-2-4 deliverable (this scope):**
+- `linuxkpi/Cargo.toml`: cc = "1.0" build-dep
+- `linuxkpi/build.rs`: cc Build with cross-compile
+  flags + license-boundary enforcement
+- `linuxkpi/csrc/smoke.c`: BSD-2 smoke validating the
+  Rust↔C FFI loop end-to-end (#includes shim_c.h,
+  calls printk + kmalloc + kfree, defines a fn the
+  Rust self_test calls)
+- `vendor/linux-6.12/README.md`: vendoring discipline
+  + upstream tag pin (placeholder; real .h/.c files
+  vendored at M1-2-5 with balloon's compile)
+- `linuxkpi/src/lib.rs`: self_test calls
+  `linuxkpi_cc_smoke()` extern fn
+
+~150 LOC build infra + smoke harness + README.
+Estimated 1-2 sessions. The cc-crate cross-compile
+flag-set rabbit hole (clang-not-available, ELF-vs-Mach-O
+on macOS host, linkage of cross-compiled .o into kernel
+ELF) is the primary risk; first compile-failure
+iterations will surface flag gaps.
+
+**M1-2-5 absorbs the vendoring** + first balloon compile
++ gap-filling. The "step away for a day" cue applies
+most.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
