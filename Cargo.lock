@@ -51,6 +51,7 @@ dependencies = [
  "getrandom 0.4.2",
  "limine",
  "linked_list_allocator",
+ "linuxkpi",
  "rustls",
  "rustls-rustcrypto",
  "smoltcp",
@@ -591,6 +592,9 @@ dependencies = [
 [[package]]
 name = "linuxkpi"
 version = "0.0.0"
+dependencies = [
+ "spin 0.10.0",
+]
 
 [[package]]
 name = "lock_api"

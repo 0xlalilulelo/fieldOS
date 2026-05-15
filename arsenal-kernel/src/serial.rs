@@ -47,6 +47,43 @@ pub fn write_str(s: &str) {
     crate::fb::print_str(s);
 }
 
+/// Byte-oriented sink — emit `bytes` to COM1 verbatim. M1-2-1's
+/// linuxkpi shim routes its `printk` output through this path
+/// (via the `linuxkpi_serial_sink` extern below) because
+/// inherited C may emit non-UTF-8 bytes that `write_str`'s &str
+/// argument cannot carry. The fb mirror is not driven from here
+/// — non-UTF-8 bytes have no meaningful glyph mapping; serial-
+/// only output is the right shim diagnostic shape.
+pub fn write_bytes(bytes: &[u8]) {
+    for &byte in bytes {
+        write_byte(byte);
+    }
+}
+
+/// Sink symbol the linuxkpi crate calls into. The link step
+/// resolves linuxkpi's `extern "C" fn linuxkpi_serial_sink` to
+/// this definition; calling it before `serial::init` is well-
+/// defined (write_bytes spins on LSR_THRE, which reads as
+/// "ready" only after the UART is up — pre-init writes will
+/// hang, which is the correct loud-failure mode for a missing
+/// boot-order init).
+///
+/// # Safety
+/// `ptr` + `len` must describe a valid byte slice for the
+/// duration of the call. The caller (linuxkpi::log::printk and
+/// friends) constructs the slice from a NUL-terminated CStr or
+/// a `&[u8]` borrow, both of which satisfy the invariant.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_serial_sink(ptr: *const u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    // SAFETY: caller's contract — ptr/len describe a valid byte
+    // slice. write_bytes does not retain the slice past the call.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    write_bytes(bytes);
+}
+
 /// `core::fmt::Write` adapter so `write!` / `writeln!` work against COM1.
 pub struct Writer;
 

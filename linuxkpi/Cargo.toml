@@ -24,3 +24,8 @@ test = false
 bench = false
 
 [dependencies]
+# spin 0.10 — same version arsenal-kernel uses; the shim's
+# Mutex / Spinlock wrap spin::Mutex<()> to match the kernel's
+# locking discipline (see locks.rs). License: MIT — clear under
+# CLAUDE.md §3.
+spin = "0.10"

@@ -12,6 +12,11 @@ test = false
 bench = false
 
 [dependencies]
+# linuxkpi: M1 step 2 shim crate. Workspace member at peer level
+# (ADR-0005). At M1-2-1 the shim's foundational surface (printk +
+# slab + locks + atomics) is consumed by main.rs's self-test; later
+# sub-blocks grow the surface and the kernel's call sites.
+linuxkpi = { path = "../linuxkpi" }
 limine = "0.5"
 linked_list_allocator = "0.10"
 # smoltcp 0.12 in no_std + alloc mode. Default features pull in std + log;
