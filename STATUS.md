@@ -260,55 +260,86 @@ milestone budget unchanged):
 | 2-3 virtio bus | 2-3 sessions | 1 session |
 | **subtotal** | **~10-11 sessions** | **~4.5 sessions** |
 
-**Next sub-block: M1-2-4** — cc-build infrastructure +
-GPL-boundary fence. Per ADR-0005 § 2: add `cc = "1.0"`
-build-dep + `linuxkpi/build.rs` invoking
-`cc::Build::new()` with the cross-compile flag set
-(clang + `-target x86_64-unknown-none -nostdinc
--ffreestanding -fno-stack-protector -mno-red-zone
--mcmodel=kernel -x c -I vendor/linux-6.12/include
--I linuxkpi/include`); license-boundary enforcement
-(refuse to compile .c outside `vendor/linux-6.12*/` or
-`linuxkpi/csrc/`).
+**M1-2-4 complete (2026-05-15, `6880b01`).** ~295 LOC
+across 6 files: 164 LOC `linuxkpi/build.rs` (new) + 43
+LOC `linuxkpi/csrc/smoke.c` (new) + 52 LOC
+`vendor/linux-6.12/README.md` (new, GPLv2-fenced
+directory + vendoring discipline) + Cargo.toml/lib.rs
+wiring. The Rust↔C↔Rust FFI loop is wired end-to-end:
+the smoke output's `[INFO] linuxkpi: cc-build smoke ok`
+line confirms clang cross-compiles → `ar` crate
+archives → rust-lld pulls via `+whole-archive` →
+inherited C calls Rust shim → Rust shim calls back into
+inherited C → returns.
 
-**Scope decision for M1-2-4:** the HANDOFF text bundles
-"vendor Linux 6.12 LTS subset" + "build integration"
-into a single sub-block, but vendoring upstream Linux
-headers + `virtio_balloon.c` deterministically requires
-either cached upstream source (not present in this
-environment) or many WebFetch round-trips (slow, error-
-prone for the cumulative ~thousands of LOC of header
-content with deep transitive includes). The cc-build
-infrastructure is independently valuable + bisect-rich;
-the actual vendoring naturally belongs with M1-2-5
-("balloon comes online"), where the HANDOFF already
-says compile errors from `virtio_balloon.c`'s specific
-include set drive the next batch of shim functions.
+Two real engineering decisions surfaced this session
+that the HANDOFF M1-2-4 failure-mode list didn't
+anticipate (added to the M1-2-6 retro list):
 
-**M1-2-4 deliverable (this scope):**
-- `linuxkpi/Cargo.toml`: cc = "1.0" build-dep
-- `linuxkpi/build.rs`: cc Build with cross-compile
-  flags + license-boundary enforcement
-- `linuxkpi/csrc/smoke.c`: BSD-2 smoke validating the
-  Rust↔C FFI loop end-to-end (#includes shim_c.h,
-  calls printk + kmalloc + kfree, defines a fn the
-  Rust self_test calls)
-- `vendor/linux-6.12/README.md`: vendoring discipline
-  + upstream tag pin (placeholder; real .h/.c files
-  vendored at M1-2-5 with balloon's compile)
-- `linuxkpi/src/lib.rs`: self_test calls
-  `linuxkpi_cc_smoke()` extern fn
+1. **macOS `ar`/`ranlib` are Mach-O-only.** Apple's
+   tools (`ranlib` is a libtool symlink) silently
+   produce ELF-archive-index-less `.a` files; rust-lld
+   then can't resolve symbols. `llvm-ar` would fix it
+   but isn't shipped under that name in stock Apple
+   Xcode toolchains and isn't bundled with rustup. Fix:
+   pure-Rust `ar` crate writes GNU-format archives
+   without a symbol index; paired with rustc's
+   `+whole-archive` link modifier (stable since Rust
+   1.61) which pulls every `.o` unconditionally.
 
-~150 LOC build infra + smoke harness + README.
-Estimated 1-2 sessions. The cc-crate cross-compile
-flag-set rabbit hole (clang-not-available, ELF-vs-Mach-O
-on macOS host, linkage of cross-compiled .o into kernel
-ELF) is the primary risk; first compile-failure
-iterations will surface flag gaps.
+2. **`-nostdinc` blocks freestanding-safe builtin
+   headers.** `<stddef.h>` / `<stdint.h>` aren't libc;
+   clang ships them in its resource-dir for freestanding
+   use. Fix: `-isystem $(clang -print-resource-dir)/
+   include` — the canonical Linux Kbuild dance. M1-2-5
+   needs the same flag pair when balloon's transitive
+   includes pull stddef.h via vendored Linux headers.
 
-**M1-2-5 absorbs the vendoring** + first balloon compile
-+ gap-filling. The "step away for a day" cue applies
-most.
+**Next sub-block: M1-2-5 — virtio-balloon online + the
+deferred vendoring.** Vendor `vendor/linux-6.12/include/
+linux/{types,printk,kernel,gfp,slab,mutex,spinlock,
+atomic,err,list,kref,wait,workqueue,interrupt,pci,
+virtio,virtio_config,virtio_balloon}.h` + `vendor/linux-
+6.12/drivers/virtio/virtio_balloon.c` from upstream
+Linux 6.12 LTS, verbatim with SPDX preserved. Add
+balloon.c to `linuxkpi/build.rs`'s source manifest.
+Iterate on compile errors driving the gap-filling shim
+primitives (container_of, BUG_ON, WARN_ON, list helpers,
+IS_ERR / ERR_PTR / PTR_ERR, jiffies / msleep / udelay,
+sysfs_create_group stubs, kthread_run / kthread_stop,
+schedule_work / queue_work — typical Linux gaps).
+
+**Per HANDOFF note #1: this is the morale-load-bearing
+sub-block where the "step away for a day" cue applies
+most.** Gap-filling is the hardest-to-budget engineering
+work in M1; HANDOFF estimates 3-5 sessions / ~3-4
+calendar weeks. The session-count optimism the rest of
+M1-2 has run on does not apply here; expect real-world
+friction.
+
+**Scope-question for the session start:** vendoring
+upstream Linux source requires either WebFetch round-
+trips (the ToolSearch-deferred WebFetch tool) for ~20
+header files + `virtio_balloon.c`, or hand-curated
+matches against the ABI surface. The verbatim-from-
+upstream discipline ADR-0005 § 3 commits to is non-
+negotiable; hand-typed substitutes for upstream Linux
+files violate the GPL-boundary discipline. Plan: attempt
+WebFetch; if tractable, vendor real upstream subset and
+iterate compile errors. If WebFetch round-trip count
+exceeds session budget, scope-reduce M1-2-5 into:
+  - Part A: gap-filling shim primitives that are
+    Linux-headers-derivable (container_of via offsetof,
+    BUG_ON / WARN_ON via panic!, list_head + macros,
+    IS_ERR / ERR_PTR / PTR_ERR — these are documented
+    in the kernel docs and trivially translatable
+    without copying Linux source verbatim).
+  - Part B: vendoring + balloon's first compile +
+    iteration to ARSENAL_VIRTIO_BALLOON_OK (separate
+    session if part A consumes the budget).
+
+The ARSENAL_VIRTIO_BALLOON_OK sentinel + the M1-2-6 paper
+sub-block close the M1 step 2 milestone.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
