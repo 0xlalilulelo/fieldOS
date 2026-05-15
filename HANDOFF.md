@@ -1,99 +1,161 @@
-Kickoff for M1 step 1 — NVMe native Rust.
+Kickoff for M1 step 2 — LinuxKPI shim foundation + first
+inherited driver.
 
-M0 closed at arsenal-M0-complete (9793487, 2026-05-14). M1's
-milestone-level HANDOFF landed at 9df4682; the eight-step plan
-puts NVMe as step 1 — smallest useful M1 driver, native Rust,
-~5K LOC target per ARSENAL.md, zero dependency on the
-LinuxKPI shim, the first PCIe driver to exercise MSI-X. The
-M0 PCI scanner from 3C was enumerate-and-print only; M1
-step 1 grows it into "find the NVMe controller, parse its
-capability list, map its BARs, talk to it."
+M1 step 1 (NVMe) closed on 2026-05-14 across six sub-blocks
+(1-0 PCIe MSI-X capability + dynamic IDT vector allocation →
+1-1 NVMe device discovery + BAR mapping → 1-2 controller reset
++ admin queue + Identify → 1-3 I/O queue + sector 0 read
+polled → 1-4 MSI-X interrupts → 1-5 STATUS + devlog) in one
+calendar day. ARSENAL_NVME_OK is the 13th-then-14th sentinel
+(the smoke list now reads 14: BOOT, HEAP, FRAMES, BLK, NET,
+SCHED, TCP, TLS, TIMER, ACPI, IOAPIC, SMP, NVME, PROMPT).
+HEAD is 298d9ba (docs(devlogs): Arsenal NVMe); working tree
+clean. main is several commits ahead of origin/main; push
+when 2-0 is about to kick off so the step-1 paper + step-2
+HANDOFF land together on origin.
 
-The natural outcome at step exit: the QEMU smoke gains an
-`-device nvme` and reads sector 0 of the emulated NVMe via
-our driver. ARSENAL_NVME_OK joins the sentinel set. Per the
-milestone HANDOFF's recommendation, virtio-blk stays in the
-QEMU command line — it satisfies the boot path until step 7
-(real hardware) makes it unnecessary. The smoke's
-ARSENAL_BLK_OK keeps firing; ARSENAL_NVME_OK is additive.
+Step 2 is M1's structural backbone — the LinuxKPI shim that
+hosts every later inherited driver (amdgpu KMS at step 5,
+iwlwifi at step 6, the long tail thereafter). ARSENAL.md
+flags it explicitly as **"the single largest engineering
+task" of M1**, with a 12-20 part-time-week budget; the M1
+milestone HANDOFF (git 9df4682) underlines that the shim is
+**morale-load-bearing** because nothing user-visible ships
+until step 5 lights up amdgpu on top. The step-level
+discipline that protects against that morale gap: **one
+shim API surface lands + compiles + has a smoke test, then
+the next**, with a tiny inherited driver (virtio-balloon)
+running through the shim end-to-end at step exit so the
+step closes on a working artifact, not on an opinion that
+the shim is "ready."
 
-read CLAUDE.md (peer concerns, Rust-only, BSD-2-Clause base,
-build loop sacred, "no unsafe without // SAFETY: comment
-naming the invariant"; NVMe is the first M1 step and our
-unsafe blocks will multiply — MMIO reads, PRP physical-
-address conversions, DMA buffer transmutes) → STATUS.md
-(M0 complete, M1 active; the five posture changes from M0
-are load-bearing — especially "MMIO pages need explicit
-`paging::map_mmio` before access" which step 1 will repeat
-for the NVMe BAR) → docs/plan/ARSENAL.md § "M1 — Real iron"
-(third bullet: "NVMe driver (native Rust, ~5 K LOC)") →
-M1 milestone HANDOFF at git show 9df4682 § "First step —
-recommendation: M1 step 1 (NVMe)" + § "First driver target"
-trade-off (the milestone-level resolutions step 1 inherits) →
-NVMe spec 1.4 base (https://nvmexpress.org/specifications/);
-the M1-step-1 implementation targets 1.4 deliberately —
-broadly supported by every NVMe device in commodity hardware
-and what QEMU emulates by default → arsenal-kernel/src/pci.rs
-(M0 enumerate-and-print path; step 1 grows it to walk the
-PCIe capability list, find MSI-X, expose MSI-X table base +
-count to callers; pattern mirrors 3C's virtio modern PCI
-capability walk) → arsenal-kernel/src/virtio_blk.rs (the
-3C-3 model — single device, single queue, smoke reads sector
-0, asserts 0xAA55; M1-1's NVMe smoke follows the same shape
-at higher abstraction) → arsenal-kernel/src/idt.rs (M0's IDT
-is Lazy; step 1 adds a `register_vector` helper for dynamic
-vector allocation — NVMe wants one MSI-X vector per queue,
-not statically known at compile time) → arsenal-kernel/src/
-apic.rs (LAPIC EOI path; MSI-X delivers directly to LAPIC,
-bypassing IOAPIC — apic::send_eoi from 4-5 is reusable) →
-arsenal-kernel/src/frames.rs (DMA buffers need page-aligned
-physical memory; frame allocator hands out 4-KiB frames at
-known physical addresses) → arsenal-kernel/src/paging.rs
-(map_mmio for the NVMe BAR; hhdm_offset for the data buffer
-virt-to-phys conversion since heap-allocated buffers live in
-HHDM-mapped RAM) → arsenal-kernel/src/main.rs (boot order;
-nvme::smoke fits between virtio_net::smoke and net::init,
-matching virtio_blk's position) → ci/qemu-smoke.sh (add
-`-device nvme,serial=arsenal0,drive=nvme0`, a small raw
-backing file for nvme0, ARSENAL_NVME_OK sentinel) →
-Cargo.toml (no new dependencies at step 1; NVMe structs
-are register-shaped and ~200 LOC of bindings; we hand-write)
-→ git log --oneline -10 → run the sanity check below →
-propose 1-N commit shape (or argue for a different
-decomposition) → wait for me to pick → "go m1-1-N" for
-code, "draft m1-1-N" for paper deliverables.
+The first inherited driver is the forcing function for the
+shim's API surface — the milestone HANDOFF's resolution was
+**virtio-balloon** (~600 LOC of inherited C, pure
+virtio-bus interaction, no DMA descriptor rings, no
+firmware loading, no scatter-gather). e1000 (~3000 LOC) was
+the alternative; it stresses more shim surface but at
+unjustified cost for a step whose explicit goal is to
+*establish* the shim, not to flex it. The trade-off pair is
+preserved below for argument; recommend re-confirm
+virtio-balloon at 2-0 kickoff.
+
+read CLAUDE.md (peer concerns, Rust-only with the *one*
+exception of inherited Linux drivers under the LinuxKPI
+boundary, BSD-2-Clause base, GPLv2 preserved on inherited
+drivers as a non-negotiable combined-work commitment, build
+loop sacred, "no unsafe without // SAFETY: comment naming
+the invariant"; the shim is the first M1 surface that
+exercises CLAUDE.md §3's combined-work license discipline
+in real source — every Rust shim file is BSD-2, every
+inherited C file retains its original GPLv2 header) →
+STATUS.md (M1 step 1 complete, step 2 active; the four
+posture changes from step 1 — IDT-as-Mutex, pci config
+read/write helpers, pub bar_address, frames-as-DMA-source —
+are all load-bearing for step 2's PCI + IRQ shim adapters)
+→ docs/plan/ARSENAL.md § "M1 — Real iron" (third bullet:
+LinuxKPI shim "single largest engineering task; budget
+accordingly"; the M1 security gate "Linux drivers run with
+minimum required kernel capabilities; no shared kernel
+state beyond explicit shim interfaces" is the architectural
+constraint that keeps the shim a *shim* and not a
+backdoor) → docs/plan/ARSENAL.md § "Architectural
+Decisions" row "Driver strategy" (LinuxKPI-style shim
+hosting Linux 6.12 LTS drivers, FreeBSD drm-kmod as the
+battle-tested precedent — that precedent is the model the
+shim shape borrows from) → docs/adrs/0004-arsenal-pivot.md
+(Rust-only commitment that constrains the shim shape: the
+shim itself is Rust, only the inherited driver C is C) →
+M1 milestone HANDOFF at git show 9df4682 § "LinuxKPI shim
+strategy" trade-off (resolved hybrid: structural
+foundation for the load-bearing 30 APIs + incremental for
+the long tail) and § "First inherited driver at step 2"
+trade-off (resolved virtio-balloon) — the milestone-level
+resolutions step 2 inherits → arsenal-kernel/src/pci.rs
+(M0/M1 PCIe enumerator + step-1's MSI-X capability walker;
+2-2's pci_register_driver / pci_iomap shims wrap these,
+plus the pub(crate) config_read32 / config_write32 helpers
+step 1 introduced) → arsenal-kernel/src/idt.rs
+(register_vector(handler) -> u8 from step 1; 2-2's
+request_irq shim routes through it directly) →
+arsenal-kernel/src/frames.rs + paging.rs (4-KiB
+page-aligned frames at known physical addresses + map_mmio
++ hhdm_offset; 2-2's dma_alloc_coherent / pci_iomap shims
+are thin wrappers) → arsenal-kernel/src/virtio.rs (M0's
+virtio modern PCI transport + the VirtqDesc / VirtqAvail /
+VirtqUsed layouts; 2-3's virtio bus shim exposes these to
+inherited C as struct virtqueue) → arsenal-kernel/src/
+serial.rs (println!() → COM1; 2-1's printk / pr_info /
+pr_warn / pr_err shims route here) → arsenal-kernel/src/
+heap.rs (linked_list_allocator wired to alloc::Global; 2-1's
+kmalloc / kfree shims wrap GlobalAlloc) → arsenal-kernel/
+src/main.rs (boot order; the shim's self-test fires after
+nvme::smoke and before net::init, with virtio-balloon's
+probe slotted into a new linuxkpi::probe_drivers() call) →
+ci/qemu-smoke.sh (add `-device virtio-balloon-pci` to the
+QEMU command line at 2-5, plus 1-3 new sentinels per the
+chosen sentinel granularity — see trade-off below) →
+Cargo.toml (workspace adds new member(s) per the chosen
+crate layout — see trade-off; `cc` crate as a build
+dependency at 2-4 if we go that route, MIT/Apache-2.0,
+clear under §3) → vendor/ (currently limine + spleen; 2-4
+adds vendor/linux-6.12/ subset under explicit GPLv2 README
++ MAINTAINERS pointers — never modify the .c files; if a
+local fix is unavoidable, fork into vendor/linux-6.12-arsenal/
+with the patch documented) → git log --oneline -15 → run
+the sanity check below → propose 2-N commit shape (or
+argue for a different decomposition) → wait for me to pick
+→ "go m1-2-N" for code, "draft m1-2-N" for paper
+deliverables.
 
 Where the project is
 
-  - HEAD: 9df4682 (docs(handoff): kick off M1 (real iron)).
-    Working tree is clean except this file. main is one
-    commit ahead of origin/main; this HANDOFF makes it two.
-    Push when 1-0 is about to kick off so the milestone +
-    step HANDOFFs both land together on origin.
+  - HEAD: 298d9ba (docs(devlogs): Arsenal NVMe). Working
+    tree is clean except this file. main is several commits
+    ahead of origin/main (the M1-1 sub-block commits + the
+    paper pair); this HANDOFF makes one more. Push when 2-0
+    is about to kick off so the step 1 retrospective +
+    step 2 HANDOFF land together on origin.
 
-  - Kernel: 22 .rs files at M0 exit. Step 1 adds two new
-    files (nvme.rs, plus a small extension to pci.rs that
-    grows enough to deserve its own section but probably
-    stays in pci.rs). Expected LOC growth: ~600-800 LOC in
-    nvme.rs at step exit (well under the ~5K LOC ARSENAL.md
-    estimate — M1 step 1 targets *minimal correct NVMe*,
-    not feature-complete; more features accrue in later
-    steps if needed for amdgpu/iwlwifi storage paths or
-    M1 step 7's real-hardware install medium). pci.rs
-    grows ~150 LOC for the MSI-X capability walker.
-    idt.rs grows ~50 LOC for vector registration.
+  - Kernel: 26 .rs files at M1-1 exit. ELF release ~1.55-
+    1.60 MB (was 1.52 MB at M0; nvme.rs added ~30-50 KB +
+    pci.rs grew ~150 LOC + idt.rs grew ~80 LOC + frames/
+    paging untouched). Step 2 adds substantial structure —
+    expect ELF growth into the 2.0-2.5 MB range by step
+    exit (the shim's Rust LOC dominates; the inherited
+    C is ~600 LOC and link-time-LTO-compressed).
 
-  - ELF: 1.52 MB at M0 exit. Step 1 likely adds ~30-50 KB
-    (mostly nvme.rs's lookup tables and the new IRQ
-    handler).
+  - Smoke at M1-1 exit: 14 sentinels, ~1.3-1.6 s on QEMU
+    TCG with -smp 4. Boot→prompt 96-110 ms. Step 2 adds
+    1-3 sentinels depending on chosen granularity (see
+    trade-off below) and one new QEMU device flag at 2-5
+    (`-device virtio-balloon-pci`).
 
-  - Smoke at M0 exit: 13 sentinels, ~1.2-1.5 s on QEMU
-    TCG with -smp 4. Boot→prompt 94-108 ms. Step 1 adds
-    one sentinel (ARSENAL_NVME_OK), brings total to 14.
+  - Toolchain: nightly-2026-04-01. Step 2 may pin the C
+    cross-compiler version explicitly (the inherited C
+    expects a specific clang or gcc release — Linux 6.12
+    LTS supports clang ≥ 13 and gcc ≥ 5.1; Arsenal will
+    bias to clang for the cross-compile to match the
+    Rust-LLVM toolchain bitness assumptions). Pinning
+    happens at 2-4 in the build-integration block, not
+    before.
 
-  - Toolchain: nightly-2026-04-01. No changes for step 1.
+  - Vendored crates at M1-1 exit: limine 0.5,
+    linked_list_allocator 0.10, spin 0.10, x86_64 0.15,
+    smoltcp 0.12, rustls 0.23, rustls-rustcrypto 0.0.2-
+    alpha, getrandom 0.4 + 0.2, bitflags 2. Step 2's
+    candidate additions: `cc` (build-dep, MIT/Apache-2.0)
+    if we use the cc crate at 2-4; possibly `cty` or
+    `core::ffi` only (no extra crate) for C-FFI integer
+    typedefs at 2-1; possibly `cbindgen` (build-dep,
+    MPL-2.0 — needs §3 attention; alternative is a
+    hand-written shim_c.h header) at 2-4 for the
+    C-callable side of the shim. **MPL-2.0 status decision
+    deferred to 2-4 kickoff** — if cbindgen blocks, hand-
+    writing the header is straightforward at the shim's
+    scale.
 
-  - QEMU command line at step 1 exit (proposed):
+  - QEMU command line at step 2 exit (proposed):
     `-cdrom $ISO -m 256M -smp 4 -machine q35 -accel tcg
     -cpu max -device virtio-rng-pci
     -drive file=$ISO,if=none,id=blk0,format=raw,readonly=on
@@ -102,472 +164,720 @@ Where the project is
     -device nvme,serial=arsenal0,drive=nvme0
     -netdev user,id=net0
     -device virtio-net-pci,netdev=net0
+    -device virtio-balloon-pci
     -display none -no-reboot -no-shutdown
     -serial file:$SERIAL_LOG -d guest_errors -D $QEMU_LOG`.
-    The `$NVME_BACKING` file is a small (1 MiB) raw image
-    the smoke creates via `dd if=/dev/zero ... bs=1M count=1`
-    with the MBR signature written at byte 510 — same
-    pattern 3C used to validate virtio-blk's sector 0 read.
+    The balloon device requires no backing file; QEMU
+    presents it as a virtio-pci device the shim's
+    virtio-bus adapter discovers + the inherited
+    virtio_balloon.c probes + binds to.
 
-M1 step 1 — proposed sub-block decomposition
+M1 step 2 — proposed sub-block decomposition
 
-The plan below is the kickoff proposal, not gospel. The user
-picks; deviations get justified before code lands. Step 1
-decomposes into six sub-blocks (the M0 step 3 cadence —
-~one per week at part-time pace, six weeks total fits inside
-the milestone HANDOFF's 4-6 week budget with one slack week
-for real-hardware-style surprises QEMU surfaces).
+The plan below is the kickoff proposal, not gospel. The
+user picks; deviations get justified before code lands.
+Step 2 decomposes into seven sub-blocks (one structural
+ADR + four shim-API surfaces + the vendor/integration
++ the inherited driver coming online + the paper). The
+milestone HANDOFF's "one devlog per cluster" guidance
+groups these into three devlogs: **shim foundation** (2-0
++ 2-1 + 2-2 + 2-3), **GPL boundary** (2-4), **first
+inherited driver** (2-5). The retrospective at 2-6 gets
+its own paper.
 
-  **(M1-1-0) PCIe MSI-X capability enumeration.** Extend
-  `arsenal-kernel/src/pci.rs` to walk the PCIe capability
-  list and recognize MSI-X (capability ID 0x11). For each
-  device with MSI-X, decode the Message Control field (table
-  size, function mask, enable), record the table BAR + offset,
-  and expose a `pci::msix_info(bdf) -> Option<MsixInfo>`
-  getter. The capability walk pattern is already established
-  by 3C's virtio modern PCI transport (vendor-specific
-  capability ID 0x09); MSI-X is a different ID but the same
-  walk shape. Also adds `idt::register_vector(handler) -> u8`
-  — a small dynamic allocator over a fixed range of vectors
-  (recommend 0x40..0xEF, leaving the M0 ones 0x21/0xEF/0xFF
-  unchanged). Step exit observation: pci scan logs every
-  device's MSI-X presence + table size. No new sentinel.
-  ~150 LOC pci.rs + ~50 LOC idt.rs + ~10 LOC main.rs. One
-  commit: `feat(kernel): PCIe MSI-X capability + dynamic
-  IDT vector allocation`. Use **go m1-1-0**.
+  **(M1-2-0) Workspace layout decision + ADR-0005 +
+  empty crate skeleton.** No shim code yet — pick the
+  crate organization (see trade-off below) and write
+  ADR-0005 documenting the structural decision, the
+  GPLv2/BSD-2 boundary, and the directory layout. The
+  ADR also names the inherited-driver vendoring discipline:
+  `vendor/linux-6.12/` mirrors the upstream Linux 6.12 LTS
+  source tree at file-path resolution (e.g.,
+  `vendor/linux-6.12/drivers/virtio/virtio_balloon.c` matches
+  upstream's path), header subset only (we vendor the .h
+  files transitively included by the .c files we host —
+  not the entire kernel header tree), every inherited
+  file's GPLv2 SPDX header preserved unchanged, no local
+  patches without a forked `vendor/linux-6.12-arsenal/`
+  shadow directory + diff documented inline. The empty
+  crate(s) build clean (cargo check passes) but contain
+  no shim code yet. ~200 LOC of Cargo / xtask glue + the
+  ADR itself + the empty crate src/lib.rs files. **No new
+  sentinel.** Two commits: `docs(adrs): ADR-0005, LinuxKPI
+  shim layout + GPL/BSD-2 boundary` and `feat(linuxkpi):
+  workspace skeleton`. Use **go m1-2-0** for the code,
+  **draft m1-2-0-adr** for the ADR. **Devlog cluster: shim
+  foundation.**
 
-  **(M1-1-1) NVMe device discovery + BAR mapping + register
-  primitives.** Adds `arsenal-kernel/src/nvme.rs`. Scans for
-  the NVMe controller (class code 0x01:0x08:0x02 — mass
-  storage / NVMe / NVMe I/O); BAR0 (64-bit MMIO) is mapped
-  via `paging::map_mmio` to 0x4000 bytes (covers the
-  controller registers + first 31 sets of queue doorbells —
-  doorbell stride DSTRD from CAP.DSTRD widens this if needed
-  at 1-2). Defines the spec-required register offsets (CAP
-  0x00 64-bit, VS 0x08 32-bit, CC 0x14 32-bit, CSTS 0x1C
-  32-bit, AQA 0x24 32-bit, ASQ 0x28 64-bit, ACQ 0x30 64-bit,
-  doorbell base 0x1000) and read/write helpers. Reads
-  + logs CAP (MQES = max queue entries supported, DSTRD =
-  doorbell stride, CSS = command set support, MPSMIN /
-  MPSMAX = page size support range) and VS (NVMe spec
-  version — expect 1.4 from QEMU's default). Asserts
-  MPSMIN ≤ 12 (so 4-KiB host pages are supported) and CSS
-  bit 0 set (NVM command set supported). No queues built
-  yet. ~200 LOC. One commit: `feat(kernel): NVMe device
-  discovery + BAR mapping`. Use **go m1-1-1**.
+  **(M1-2-1) Foundational types + headers — the
+  load-bearing 30 APIs.** Implement the shim API surface
+  every inherited driver needs: C-FFI integer typedefs
+  (`__u8`/`__u16`/`__u32`/`__u64`/`__s*` matching Linux's
+  `<linux/types.h>` shape, `gfp_t` as a u32 newtype,
+  `dma_addr_t` as u64, `size_t`/`loff_t`/`ssize_t` via
+  `core::ffi`); printk + the pr_* family routed to our
+  serial::println! (with KERN_* level prefix preserved);
+  kmalloc / kzalloc / kfree / krealloc routed to
+  `alloc::alloc::Global` honoring the GFP_KERNEL /
+  GFP_ATOMIC distinction (atomic = "must not sleep,"
+  enforced by IrqGuard scope at the call site); mutex_init
+  / mutex_lock / mutex_unlock + spin_lock / spin_unlock +
+  raw_spinlock + atomic_t / atomic_inc / atomic_dec /
+  atomic_read over our spin::Mutex + core::sync::atomic;
+  container_of (Rust macro_rules), BUG_ON / WARN_ON /
+  WARN_ONCE (panic! / serial-warn respectively); jiffies +
+  msleep + udelay over our LAPIC TICKS counter (jiffies =
+  HZ-rate counter, msleep is sleep-not-busy-wait when a
+  scheduler is available — at M1 cooperative-only, msleep
+  busy-waits with a yield); copy_from_user / copy_to_user
+  stubs that BUG_ON for now (no userspace at M1; the shim
+  exposes the symbol so inherited drivers link, but any
+  call panics — a cleaner failure mode than silent data
+  corruption). Self-test fires from kernel main:
+  ARSENAL_LINUXKPI_OK on a small "shim talks to itself"
+  routine that touches printk + kmalloc + mutex + atomic
+  in sequence. ~600-800 LOC of shim Rust + ~80 LOC of
+  shim_c.h declarations (the C side sees `extern void
+  *kmalloc(size_t, gfp_t);` etc.). **Sentinel:
+  ARSENAL_LINUXKPI_OK** (or absent per chosen granularity).
+  One commit: `feat(linuxkpi): foundational types + printk
+  + slab + locks + atomics`. Use **go m1-2-1**. **Devlog
+  cluster: shim foundation.**
 
-  **(M1-1-2) Controller reset + admin queue + Identify.**
-  Disables the controller (CC.EN = 0; spin on CSTS.RDY → 0),
-  allocates two physically-contiguous 4-KiB pages from the
-  frame allocator for the admin submission queue (64 entries
-  × 64 bytes) and admin completion queue (64 entries × 16
-  bytes), writes ASQ + ACQ + AQA (queue sizes, both 63 in
-  the zero-based queue-depth fields), configures CC
-  (IOSQES = 6 → 64-byte SQ entries, IOCQES = 4 → 16-byte CQ
-  entries, MPS = 0 → 4-KiB pages, CSS = 0 → NVM command set,
-  AMS = 0 → round-robin arbitration), enables (CC.EN = 1;
-  spin on CSTS.RDY → 1). Then submits Identify Controller
-  (CNS = 1) and Identify Namespace (CNS = 0, NSID = 1) via
-  the admin queue using polled completion (the I/O queue
-  IRQ wiring is at 1-4; admin queue completion polling
-  is fine at this stage — admin commands are rare and
-  blocking). Logs the disk serial, model, FR (firmware
-  revision), NN (namespace count), and the namespace 1's
-  NSZE (size in logical blocks) + LBADS (LBA data size,
-  typically 9 for 512-byte sectors). ~300 LOC. One commit:
-  `feat(kernel): NVMe controller reset + admin queue +
-  Identify`. Use **go m1-1-2**.
+  **(M1-2-2) PCI bus adapter + IRQ bridge.** Implement the
+  Linux PCI driver registration model over our pci.rs
+  enumerator: pci_register_driver(struct pci_driver *) /
+  pci_unregister_driver iterates the registered driver
+  table on every pci::scan() result, matches by
+  vendor/device ID against the driver's id_table, calls
+  the driver's .probe(struct pci_dev *) callback with a
+  struct pci_dev whose fields wrap our (Bdf, BAR map);
+  pci_resource_start(dev, bar) / pci_resource_len(dev, bar)
+  expose our pci::bar_address; pci_iomap(dev, bar, len)
+  calls paging::map_mmio + returns the HHDM-virtual
+  address; pci_set_master toggles the bus-master bit via
+  pci::config_write32; pci_enable_device toggles the
+  memory-space bit similarly; pci_alloc_irq_vectors +
+  pci_irq_vector + pci_free_irq_vectors wrap our
+  pci::msix_info + idt::register_vector + the MSI-X table
+  programming step 1 already exercises in nvme.rs;
+  request_irq(vector, handler, flags, name, dev) /
+  free_irq route directly through idt::register_vector +
+  the LAPIC EOI path; dma_alloc_coherent(dev, size, &handle,
+  gfp) wraps frames::FRAMES.alloc_frame (size rounded up
+  to 4-KiB pages); dma_map_single / dma_unmap_single /
+  dma_sync_single_for_device / dma_sync_single_for_cpu are
+  no-ops on x86_64 (cache-coherent DMA — comment cites the
+  spec section). Self-test: a no-op Linux-shaped pci_driver
+  that registers, sees pci::scan() devices fire .probe(),
+  records the vendor/device IDs, and unregisters. **Sentinel:
+  ARSENAL_LINUXKPI_PCI_OK** (or absent per chosen
+  granularity). ~600-800 LOC of shim Rust + ~120 LOC of
+  shim_c.h growth. One commit: `feat(linuxkpi): PCI bus
+  adapter + IRQ bridge + DMA coherent`. Use **go m1-2-2**.
+  **Devlog cluster: shim foundation.** **This sub-block
+  is the largest single piece of step 2 — budget 4-5
+  focused sessions.**
 
-  **(M1-1-3) I/O queue creation + first sector read (polled).**
-  Creates one I/O completion queue (CID = 1, size 64, IRQ
-  vector field zero — interrupts come at 1-4; this stage
-  uses polled completion) via the admin Create-I/O-CQ
-  command (opcode 0x05), then one I/O submission queue
-  (QID = 1, CQID = 1, size 64) via Create-I/O-SQ (opcode
-  0x01). Submits a Read command (opcode 0x02) on the I/O
-  queue with NSID = 1, SLBA = 0, NLB = 0 (one block, NLB
-  is zero-based), PRP1 = physical address of a 4-KiB
-  frame-allocated buffer. Polls the I/O completion queue
-  for the doorbell-updated phase tag flip, reads the
-  buffer, asserts the MBR signature 0xAA55 at byte offset
-  510 (same as 3C's virtio-blk smoke). Emits
-  ARSENAL_NVME_OK. ~250 LOC. One commit:
-  `feat(kernel): NVMe I/O queue + sector 0 read (polled)`.
-  Use **go m1-1-3**. **This is the sub-block that closes
-  the ARSENAL.md step-1 outcome ("first M1 driver works").**
-  1-4 / 1-5 are quality-of-implementation follow-ups.
+  **(M1-2-3) Virtio bus adapter.** Implement the Linux
+  virtio device + driver model over our virtio.rs:
+  virtio_register_driver(struct virtio_driver *) /
+  virtio_unregister_driver, struct virtio_device wrapping
+  our VirtioDevice, struct virtqueue + virtqueue_add_buf /
+  virtqueue_kick / virtqueue_get_buf wrapping our
+  VirtqDesc/Avail/Used layouts, virtio_get_features /
+  virtio_finalize_features over our common_cfg
+  feature-bit handshake, virtio_cread / virtio_cwrite over
+  the device_cfg pointer; virtio_pci_modern_probe enumerates
+  PCI devices with virtio's vendor ID 0x1AF4, dispatches
+  matching virtio_drivers' .probe via the driver table
+  (the same pattern the PCI bus adapter uses, narrowed to
+  virtio's PCI subsystem-ID space). Self-test: a no-op
+  virtio_driver registers, sees the existing virtio-blk +
+  virtio-net devices fire .probe(), unregisters cleanly.
+  ARSENAL_LINUXKPI_VIRTIO_OK (or absent per granularity).
+  ~400-500 LOC. One commit: `feat(linuxkpi): virtio bus
+  adapter`. Use **go m1-2-3**. **Devlog cluster: shim
+  foundation.**
 
-  **(M1-1-4) MSI-X interrupt wiring for the I/O queue.**
-  Converts the I/O queue's polled completion to MSI-X
-  interrupt-driven. Allocates one IDT vector via
-  `idt::register_vector` (from 1-0), writes the
-  corresponding MSI-X table entry (address = LAPIC fixed-
-  delivery address 0xFEE00000 with the BSP's APIC ID in
-  bits 12-19, data = vector + delivery mode 0 + level 0
-  + edge), unmasks the entry (clear bit 0 of vector
-  control), re-creates the I/O CQ with the vector field
-  set (the 1-3 path used vector=0 which is "no IRQ"; a
-  new Create-I/O-CQ command with the right vector is the
-  spec-clean reconfigure). Handler does the same work
-  the polled path did plus an apic::send_eoi at the end.
-  ~150 LOC. One commit: `feat(kernel): NVMe MSI-X
-  interrupts`. Use **go m1-1-4**.
+  **(M1-2-4) Vendor Linux 6.12 LTS subset + build
+  integration.** Vendor the inherited C subset:
+  `vendor/linux-6.12/include/linux/{types,printk,kernel,
+  gfp,slab,mutex,spinlock,atomic,err,list,kref,wait,
+  workqueue,interrupt,pci,virtio,virtio_config,
+  virtio_balloon}.h` (every header virtio_balloon.c
+  transitively includes — sourced verbatim from the Linux
+  6.12 LTS git tag, GPLv2 SPDX preserved unchanged) +
+  `vendor/linux-6.12/drivers/virtio/virtio_balloon.c`
+  itself. Build integration: a `linuxkpi-cc` build script
+  (or xtask subcommand — see trade-off below) compiles the
+  inherited .c files with `-target x86_64-unknown-none
+  -nostdinc -fno-stack-protector -mno-red-zone -mcmodel=
+  kernel -ffreestanding -I vendor/linux-6.12/include
+  -I linuxkpi/include` and links the resulting object
+  files into the kernel ELF. The shim's
+  `linuxkpi/include/shim_c.h` declares the Rust-side
+  symbols for C consumption (printk, kmalloc, mutex_lock,
+  pci_register_driver, etc.) so the inherited C compiles
+  + links. **No new sentinel.** ~150 LOC of build infra +
+  the vendored C tree (file count high, hand-written LOC
+  count zero — every line is upstream Linux). One commit:
+  `feat(linuxkpi): vendor Linux 6.12 LTS subset + build
+  integration` with a body that enumerates exactly which
+  files were vendored + at which upstream commit (the
+  Linux 6.12 LTS tag SHA) so future readers can audit the
+  GPL boundary. Use **go m1-2-4**. **Devlog cluster: GPL
+  boundary.**
 
-  **(M1-1-5) STATUS refresh + step 1 devlog + step 2
-  HANDOFF kickoff.** STATUS flips step 1 from "next" to
-  "complete," promotes step 2 (LinuxKPI shim foundation)
-  to "active," and writes the step 1 retrospective
-  sub-section (what NVMe quirks QEMU surfaced, what the
-  M0 → M1 pattern shifts looked like in practice, how
-  close the LOC came to ARSENAL.md's ~5K estimate).
-  Devlog at `docs/devlogs/2026-NN-arsenal-nvme.md` (NN =
-  whatever month the step actually exits) records the
-  controller-reset sequence's delicate moments (the
-  CSTS.RDY polling timing, the AQA / ASQ / ACQ write
-  ordering subtleties), the polled-vs-MSI-X trade-off
-  resolution (polled first at 1-3, MSI-X at 1-4 — the
-  HANDOFF's recommendation), the PCIe MSI-X capability
-  walk addition to pci.rs as a foundation step 3+ will
-  also consume, and the "this is what M1 step 1 looked
-  like" summary. Two commits: `docs(status): M1 step 1
-  complete, step 2 (LinuxKPI shim foundation) next` and
-  `docs(devlogs): Arsenal NVMe`. Use **go m1-1-5** for
-  STATUS, **draft m1-1-5-devlog** for the devlog.
+  **(M1-2-5) virtio-balloon comes online.** Fix the
+  inevitable shim API gaps (every shim has them; compile
+  errors from virtio_balloon.c's specific include set drive
+  the next batch of shim functions — typical gaps:
+  list_for_each_entry, sysfs_create_group, debugfs_create
+  stubs, kthread_run / kthread_stop scheduler-dependent
+  pieces, schedule_work / queue_work workqueue stubs over
+  our cooperative scheduler). Wire balloon's module_init
+  through linuxkpi::probe_drivers() called from kernel main;
+  on virtio-balloon-pci device discovery, the balloon's
+  .probe runs, the virtio config queue gets allocated, the
+  balloon device is registered with the inherited driver's
+  internal state; the smoke validates that the balloon
+  device is bound (the shim logs "virtio_balloon: probe
+  succeeded" via printk) and the virtio config space shows
+  the expected feature bits negotiated. Sentinel:
+  ARSENAL_VIRTIO_BALLOON_OK on successful probe completion.
+  ~300-500 LOC of shim API gap-filling Rust + 0 LOC of
+  inherited C (balloon stays unmodified — if it tries to
+  call something we haven't shimmed, the right answer is
+  to add the shim stub, not to patch the driver).
+  Smoke command line gains `-device virtio-balloon-pci`.
+  One commit: `feat(linuxkpi): virtio-balloon online`. Use
+  **go m1-2-5**. **Devlog cluster: first inherited driver.**
+  **This is the sub-block that closes the ARSENAL.md step-2
+  outcome ("first inherited driver runs through the shim").**
+
+  **(M1-2-6) STATUS refresh + step 2 devlog cluster +
+  step 3 (xHCI) HANDOFF kickoff.** STATUS flips step 2
+  from "active" to "complete," promotes step 3 (xHCI USB)
+  to "active," and writes the step 2 retrospective
+  (what the actual shim API surface count came out to,
+  which "load-bearing 30" guesses from the M1 milestone
+  HANDOFF were right + which were wrong, what gap-filling
+  at 2-5 surprised us, how close the LOC came to the
+  ~12-20-week estimate, the GPL/BSD-2 boundary in
+  practice). Three devlogs in
+  `docs/devlogs/2026-NN-arsenal-linuxkpi-foundation.md`,
+  `-linuxkpi-gpl-boundary.md`, `-linuxkpi-virtio-balloon.md`
+  per the milestone HANDOFF's cluster guidance. The
+  step-3 HANDOFF kickoff revisits the milestone-level
+  trade-off "xHCI shape — native Rust vs LinuxKPI port"
+  with the shim's actual shape now in evidence (if 2-2's
+  PCI + IRQ adapters cover xHCI's needs comfortably, the
+  LinuxKPI port becomes the preferred path; if the shim's
+  USB-bus surface is bare, native Rust wins). Three or
+  four commits depending on whether the step-3 HANDOFF
+  lands in this sub-block or its own follow-up:
+  `docs(status): M1 step 2 complete, step 3 (xHCI) next`,
+  `docs(devlogs): LinuxKPI shim foundation`,
+  `docs(devlogs): LinuxKPI GPL boundary`,
+  `docs(devlogs): LinuxKPI virtio-balloon`,
+  `docs(handoff): kick off M1 step 3 (xHCI)`. Use **go
+  m1-2-6** for STATUS, **draft m1-2-6-devlog-N** (N = 1, 2,
+  3) for the devlogs, **draft m1-3 HANDOFF** for the next
+  step-level kickoff. **Devlog cluster: step 2
+  retrospective.**
 
 Realistic session-count estimate. M1's cadence is week-
-scale, not day-scale (M1 milestone HANDOFF note #3). 1-0
-is half-a-week to a week (the MSI-X capability walk is
-mechanical against the spec but the dynamic IDT vector
-allocator is one of those "easy to get right and
-catastrophic to get wrong" pieces — get it reviewed before
-shipping). 1-1 is one focused session if the BAR mapping
-goes cleanly; two if NVMe's CAP register reads zero (a
-common bring-up bug — the BAR is 64-bit so the cap-read
-needs `lapic_read`-shaped 64-bit MMIO access, not 32-bit
-× 2 with the wrong byte order). 1-2 is the spec-rich
-session — most of the M1 step 1 code lands here. 1-3 is
-the cathartic session — first real NVMe I/O. 1-4 is one
-session (MSI-X is straightforward once 1-0's foundations
-are in). 1-5 is the milestone-style paper session. Calendar
-budget per the milestone HANDOFF: 4-6 weeks at part-time.
+scale, not day-scale (M1 milestone HANDOFF note #3); step 2
+explicitly slower than step 1 because the shim has no spec
+to lean on the way NVMe 1.4 § 7.6.1 leaned us through
+controller reset — the shim is "build the API the next
+inherited driver needs and no more" plus the discipline to
+not over-engineer. 2-0 is half a calendar week (the ADR
+demands more thought than code, and the empty crate is
+mostly Cargo.toml plumbing). 2-1 is 2-3 focused sessions
+of ~3 weeks calendar — type definitions are mechanical but
+need cross-checking against Linux's `<linux/types.h>` for
+ABI compatibility, and the printk format-string parser
+is the one piece that can absorb a session on its own
+("printk supports %pK %pS %pV with kernel-specific
+formatters; we shim the non-trivial ones to a serial-safe
+subset"). 2-2 is the longest single sub-block at 4-5
+sessions / 3-4 calendar weeks — the PCI driver model is
+where the shim earns its keep, and request_irq's
+interaction with our IDT discipline needs unhurried
+thought. 2-3 is 2-3 sessions / 2 weeks. 2-4 is 2-3
+sessions / 2 weeks (build-system work always takes longer
+than expected; the cross-compile flag set is a rabbit
+hole). 2-5 is unpredictable — 3-5 sessions / 3-4 calendar
+weeks — because every shim has surprise gaps and gap-
+filling is not budgetable in advance; the M1 milestone
+HANDOFF's three-sessions-then-step-away cue applies here
+specifically. 2-6 is the milestone-style paper session,
+1 calendar week. **Sum: ~14-17 calendar weeks at the
+ARSENAL.md ~15hr/week cadence.** Inside the 12-20 week
+budget; do not let post-pivot concentration-window
+optimism shrink it.
 
 Step-level trade-off pairs
 
-  **MSI-X first vs polled completion first.**
-  (i) **Polled completion at 1-3, MSI-X follow-up at 1-4.**
-  Smaller surface per sub-block; 1-3 is independently
-  smoke-verifiable (ARSENAL_NVME_OK fires off the polled
-  path); 1-4 converts to interrupt-driven without
-  rebuilding the queue from scratch (Create-I/O-CQ is
-  re-issuable per the NVMe spec). Bisect-rich.
-  (ii) **MSI-X from the start.** 1-3 lands the I/O queue
-  with MSI-X already wired; 1-4 doesn't exist; the step
-  becomes 5 sub-blocks instead of 6. Slightly less code
-  total but a larger 1-3 sub-block (combining queue setup +
-  IRQ wiring + sector read in one commit).
-  Recommend (i). Polled-first is the conventional NVMe
-  bring-up pattern; Linux's nvme-pci.c does the same in
-  its setup path. The bisect granularity from splitting
-  matters more than the small commit-count win from
-  combining.
+  **Crate layout.**
+  (i) **Single workspace member `linuxkpi/`** with
+  `linuxkpi/src/{types,log,slab,locks,pci,irq,dma,
+  virtio,...}.rs` + `linuxkpi/include/shim_c.h` + the
+  vendored Linux subset under `vendor/linux-6.12/`.
+  arsenal-kernel depends on linuxkpi as a regular crate.
+  Simple workspace topology; one Cargo.toml per shim
+  member.
+  (ii) **Subdirectory `arsenal-kernel/src/linuxkpi/`** with
+  the shim modules co-located with the kernel. No new
+  crate; shim Rust is just kernel code with a directory
+  fence. Smaller workspace; tighter coupling between
+  kernel + shim; uglier license-boundary story (the kernel
+  crate becomes a mixed BSD-2 / inherited-GPLv2 link
+  combined work, where (i) keeps the BSD-2 vs GPLv2
+  boundary at the crate edge).
+  (iii) **Three crates: `linuxkpi-headers` (shim_c.h + the
+  vendored .h subset, build-only), `linuxkpi-shim` (the
+  Rust adapters), `linuxkpi-drivers` (the vendored .c
+  files + per-driver Cargo features).** Maximally
+  separated; drm-kmod-shaped; over-organized at step 2
+  scale but the right shape by step 6 when amdgpu +
+  iwlwifi both pull from the shim.
+  Recommend (i) at step 2 with a documented intent to
+  evolve toward (iii) when the second inherited driver
+  arrives. The single-crate layout matches our M0 pattern
+  (one file per subsystem, one crate per major boundary);
+  splitting into three crates upfront optimizes for a
+  future we don't have yet. The license boundary is
+  preserved either way — what matters is the SPDX header
+  on each file and the build-system enforcement at 2-4.
 
-  **Number of I/O queue pairs.**
-  (i) **Single shared I/O queue.** One submission + one
-  completion queue, all CPUs submit through it. Single
-  MSI-X vector. Simple. M0/M1-scale workload doesn't
-  saturate; Linux's nvme-pci defaults to one queue per
-  online CPU but that's overkill until a workload needs
-  parallel disk I/O.
-  (ii) **One I/O queue per CPU.** SMP-friendly; matches
-  Linux's default. Requires per-CPU vector allocation,
-  per-CPU SQ tail tracking, per-CPU CQ phase tag bits.
-  Bigger surface; not justified at M1.
-  Recommend (i) at step 1. The HANDOFF for step 2+ can
-  revisit if amdgpu / iwlwifi's storage paths surface a
-  parallel-I/O demand. M2's Stage compositor will need
-  the per-CPU queues for graceful UI under load, but
-  that's M2.
+  **C compilation toolchain.**
+  (i) **`cc` crate as build-dep + linuxkpi/build.rs.**
+  The cc crate (MIT/Apache-2.0, mature, used by half the
+  Rust ecosystem) handles cross-compile flags, target
+  triple, output object file naming. Build dependency
+  only — does not affect the kernel's runtime profile.
+  (ii) **xtask subcommand `cargo xtask build-linuxkpi`.**
+  Custom Rust harness inside our existing xtask; full
+  control over the compile command line; no external
+  build-dep. More code to maintain; fully ours.
+  (iii) **Bind to a host Linux Kbuild invocation.** Use
+  the host's Linux kernel build system to produce the
+  inherited .o files; link them into our kernel ELF.
+  Maximum fidelity to upstream Linux's expected build
+  environment; biggest dependency footprint (the dev
+  machine needs a full Linux source tree); unworkable for
+  a CI runner that's not Linux.
+  Recommend (i). The cc crate is the lowest-friction path
+  with the smallest maintenance surface; xtask gets the
+  same flexibility for the small price of one build-dep.
+  (iii) is a non-starter because our CI runs on macOS-
+  hosted GitHub runners (the smoke harness's Python TLS
+  listener requirement) — binding to host Kbuild would
+  break that.
 
-  **DMA buffer source.**
-  (i) **Frame allocator** (page-aligned 4-KiB frames at
-  known physical addresses; HHDM-mapped virtual access
-  for the kernel side). Step 1's queues and sector-read
-  buffer all come from FRAMES.
-  (ii) **Heap-allocated** (variable size, alignment via
-  `core::alloc::Layout`). Sufficient for queues but the
-  NVMe spec requires page-aligned buffers for PRP1; heap
-  alignment would need explicit support.
-  Recommend (i). Frame allocator is the right primitive
-  for DMA — that's what frame allocators exist for. Heap
-  for everything else; frames for DMA / queues. Pattern
-  carries forward through every M1 driver.
+  **Header vendoring strategy.**
+  (i) **Minimal subset, hand-curated.** Vendor only the
+  .h files virtio_balloon.c transitively includes; expand
+  per-inherited-driver as new drivers arrive at steps 3,
+  5, 6. Smallest tree; clearest GPL boundary; one
+  read-of-the-#include-graph at every new-driver kickoff.
+  (ii) **Full Linux 6.12 LTS include/ tree mirrored.**
+  Vendor the entire `include/linux/` and `include/uapi/`
+  subdirectories of upstream Linux. Largest tree (~10K
+  header files); zero per-driver work to expand later;
+  noisy git history when we update the LTS pin.
+  (iii) **Lazy mirror via build-time fetch.** Cache the
+  Linux include tree in CI but don't check it into the
+  repo. Most surprising failure modes; don't.
+  Recommend (i). Minimal subset is the discipline that
+  keeps the GPL boundary visible at every PR; expanding
+  per-driver is the same shape as our existing per-
+  subsystem .rs file pattern. The cost is one
+  `find-include-graph.sh` script (or xtask subcommand)
+  invoked at each new-inherited-driver kickoff to
+  enumerate what to vendor.
 
-  **Driver file layout.**
-  (i) **Single nvme.rs file.** All step 1 code lives in
-  one file (~600-800 LOC at step exit). Easy to navigate.
-  (ii) **nvme/ module directory** with admin.rs, io.rs,
-  registers.rs. More organized; over-organized at the
-  M1-step-1 LOC scale.
-  Recommend (i). M0 pattern is one file per subsystem;
-  preserve until a file genuinely outgrows 1500-2000 LOC.
-  At M1 step 5 (amdgpu) and step 6 (iwlwifi) the
-  directory-per-driver shape will be appropriate.
+  **First inherited driver target (re-confirm).**
+  (i) **virtio-balloon** (M1 milestone HANDOFF
+  recommendation). ~600 LOC of inherited C; pure virtio-
+  bus interaction; no DMA descriptor rings; no firmware
+  loading; no hardware-quirk wrangling; QEMU emulates
+  cleanly.
+  (ii) **e1000** (Intel gigabit Ethernet). ~3000 LOC;
+  needs DMA descriptor rings, ethtool stubs, netdev
+  registration; better stress test of the shim. Pulls
+  Linux's full netdev infrastructure into the shim
+  earlier than necessary.
+  (iii) **Linux serial 8250.** Tiny but conflicts with
+  our existing serial.rs; the shim would have to suppress
+  the inherited driver's MMIO use to avoid stomping COM1.
+  Awkward.
+  (iv) **A trivial Linux test module** (e.g., `lib/
+  test_printf.c` or similar). Smallest possible shim
+  exercise; no hardware interaction at all; doesn't
+  validate the PCI / virtio / IRQ paths; pure printk +
+  slab + locks. Useful as a 2-1 self-test, not as the
+  step-exit driver.
+  Recommend (i) — re-confirm the milestone HANDOFF's
+  resolution. virtio-balloon is the smallest *useful*
+  inherited driver in the Linux tree that exercises the
+  shim's full vertical: PCI bus → virtio-pci modern
+  transport → virtio bus → device probe → IRQ wiring →
+  config queue. e1000 is the right step 3 candidate if
+  xHCI doesn't materialize as the chosen step-3 driver
+  (per milestone HANDOFF's "xHCI shape" deferred trade-
+  off).
 
   **Sentinel granularity.**
-  (a) **Single ARSENAL_NVME_OK** at 1-3 (polled sector
-  read completes). 1-4's MSI-X conversion uses the same
-  sentinel — same property asserted, different path.
-  (b) **Two sentinels**: ARSENAL_NVME_OK at 1-3 (polled),
-  ARSENAL_NVME_IRQ_OK at 1-4 (MSI-X). Per-sub-block
-  granularity in CI.
-  (c) **Three sentinels**: add ARSENAL_NVME_ADMIN_OK at
-  1-2 (admin queue + Identify complete).
-  Recommend (a). NVMe-as-a-whole has one observable
-  property at M1 step 1: "kernel can read sector 0 of an
-  emulated NVMe disk." That maps to one sentinel. 1-4's
-  conversion is a code-path change, not a new property —
-  the same sentinel firing through a different path is
-  equivalent evidence.
+  (a) **Single ARSENAL_VIRTIO_BALLOON_OK** at 2-5 (driver
+  online + probe succeeded). 2-1, 2-2, 2-3 each get a
+  step-internal log line but no sentinel. Smoke gains
+  exactly one new sentinel (15 total).
+  (b) **Per-shim-surface sentinels:**
+  ARSENAL_LINUXKPI_OK at 2-1, ARSENAL_LINUXKPI_PCI_OK
+  at 2-2, ARSENAL_LINUXKPI_VIRTIO_OK at 2-3,
+  ARSENAL_VIRTIO_BALLOON_OK at 2-5. Smoke gains four
+  sentinels (18 total). Per-sub-block bisect granularity.
+  (c) **Two sentinels:** ARSENAL_LINUXKPI_OK at 2-1
+  (shim self-test passes — covers types/log/slab/locks/
+  atomics in one), ARSENAL_VIRTIO_BALLOON_OK at 2-5
+  (driver online). Smoke gains two sentinels (16 total).
+  Compromise — one "shim infrastructure works" sentinel
+  + one "first user of the shim works" sentinel.
+  Recommend (c). The shim's user-visible property at
+  step 2 is "an inherited driver runs through it";
+  ARSENAL_VIRTIO_BALLOON_OK asserts that. ARSENAL_
+  LINUXKPI_OK at 2-1 asserts the foundational shim's
+  internal correctness without claiming the bus
+  adapters work — the latter only become observable
+  when 2-5 actually exercises them. (b)'s per-surface
+  sentinels are over-granular: PCI + virtio adapters
+  with no driver consuming them are testing the shim's
+  own self-test, not a real property.
 
-  **Replace virtio-blk in the smoke vs additive.**
-  (i) **Additive** — keep virtio-blk for boot + the BLK_OK
-  sentinel; add NVMe alongside. Smoke command line grows.
-  (ii) **Replace** — drop virtio-blk, NVMe handles both the
-  driver demonstration and (eventually) the boot path.
-  Need to remove the BLK_OK sentinel + virtio_blk::smoke
-  call site.
-  Recommend (i) at step 1. virtio-blk works; removing it
-  is unmotivated at this point. Real-hardware Framework 13
-  AMD doesn't have virtio-blk, so step 7 (real-iron boot)
-  is the natural deletion point — but step 7 also needs
-  the install-medium boot path which Limine handles, not
-  virtio-blk. Defer the virtio-blk deletion to a polish
-  commit post-step-1, not blocking on it.
+  **Module init/exit semantics.**
+  (i) **Synchronous at boot.** linuxkpi::probe_drivers()
+  is called explicitly from kernel main after pci::scan
+  (and after nvme::smoke); registered drivers' module_init
+  fires, then their probe runs against discovered devices.
+  Linear control flow; matches our M0/M1 cooperative-only
+  scheduler shape.
+  (ii) **Deferred / event-driven.** module_init runs
+  in a kthread spawned at boot; probe runs from the
+  PCI hotplug event channel (which doesn't exist yet at
+  M1; would need kthread + workqueue infrastructure in
+  the shim). More Linux-faithful; bigger 2-2 surface.
+  (iii) **Hybrid.** Synchronous at boot for the M1
+  inherited-driver set; deferred path stubbed but not
+  exercised until M2 when Stage's UI thread needs
+  background drivers.
+  Recommend (i). The shim should serve M1's needs first;
+  deferred init is real work that doesn't ship value
+  until at least M2. Keep the shim's scheduler dependency
+  explicit (msleep + workqueue stubs panic-on-call) so
+  any inherited driver that needs the deferred path
+  fails loudly rather than silently misbehaving.
 
-  **NVMe spec version target.**
-  (i) **1.4** — broadly supported in commodity hardware
-  (2019-spec, every current consumer NVMe SSD shipped in
-  the last 5+ years implements 1.4 or later). QEMU
-  emulates 1.4 by default. Most spec features M1 step 1
-  needs are 1.0-era; 1.4 brings only features we don't
-  consume (Persistent Event Log, Sanitize, etc.).
-  (ii) **2.0** — newer spec; some additions M2+ might
-  want (Zoned Namespaces, Endurance Groups). Adds parser
-  complexity for an M1 step that doesn't need it.
-  Recommend (i). Target 1.4 explicitly; fall back to 1.0
-  patterns if QEMU's emulated controller reports an older
-  version. M1 step 1 reads the VS register and asserts
-  ≥ 1.0; no behavior change based on version.
+  **Symbol exposure direction.**
+  (i) **Rust-calls-C-only.** The shim is a one-way
+  bridge: Rust kernel code calls C inherited drivers
+  through C-FFI shim functions; the inherited C never
+  calls back into Rust. Cleaner mental model; impossible
+  for any non-trivial Linux driver (every driver calls
+  printk, kmalloc, request_irq — all of which are
+  shim-implemented Rust functions exposed to C).
+  (ii) **Bidirectional.** The shim exposes Rust functions
+  to C via `extern "C"` + a hand-written shim_c.h header
+  (or cbindgen-generated). The inherited C calls printk
+  (Rust), pci_register_driver (Rust), etc.; Rust calls
+  the inherited driver's exported probe / module_init
+  symbols. This is the necessary path; the only question
+  is whether shim_c.h is hand-written or generated.
+  Recommend (ii) with a hand-written shim_c.h. cbindgen
+  is excellent but adds an MPL-2.0 build-dep that needs
+  CLAUDE.md §3 attention; the shim_c.h header is small
+  enough (~200-400 lines at step 2 exit) to maintain by
+  hand without much cost. cbindgen joins later if the
+  shim's C surface grows past the maintainability threshold
+  (recommend revisit at step 5 when amdgpu's surface
+  arrives).
 
   **Sub-block granularity.**
-  (a) **Six-commit shape** above (MSI-X foundation + IDT
-  vector / device + BAR / reset + admin / I/O queue read /
-  MSI-X conversion / STATUS+devlog). Bisect-rich.
-  (b) **Five-commit shape** combining 1-0 with 1-1 (MSI-X
-  + IDT-vector tooling + NVMe device discovery in one
-  commit). Smaller history; harder to bisect if MSI-X
-  parsing has a subtle bug that surfaces at step 3 (xHCI)
-  three weeks later.
-  (c) **Four-commit shape** also combining 1-3 with 1-4
-  (single commit ships polled + MSI-X). Saves a commit
-  but loses the "polled smoke green before MSI-X
-  conversion" bisect point.
-  Recommend (a). MSI-X capability parsing in pci.rs is a
-  foundation step 3+ also consumes; making it a standalone
-  commit lets future bisection isolate "did the MSI-X
-  walker change?" cleanly. The 1-3 / 1-4 split similarly
-  protects the "polled NVMe works" property as a
-  standalone milestone.
+  (a) **Seven-block shape** above (ADR / types / PCI /
+  virtio / vendor / balloon / paper). Bisect-rich; one
+  PR-equivalent per shim surface; six green smoke runs
+  along the way.
+  (b) **Five-block shape** combining 2-1 with 2-2 (types
+  + PCI + IRQ in one commit) and 2-3 with 2-4 (virtio +
+  vendor in one commit). Saves two commits; loses the
+  bisect granularity that protects against "the shim PCI
+  adapter regressed three weeks ago and we just noticed."
+  (c) **Four-block shape** also combining 2-4 with 2-5
+  (vendor + balloon online in one commit). Fastest visible
+  progress; biggest single sub-block at 2-4-merged-2-5
+  (~600+ LOC of gap-filling on top of 150 LOC build infra).
+  Hardest to debug if balloon's probe fails — is it a
+  shim bug, a vendoring bug, or a balloon-specific quirk?
+  Recommend (a). The shim's per-surface bisect granularity
+  is the discipline that keeps the 12-20-week budget
+  visible week-over-week (M1 milestone HANDOFF note #1's
+  morale-load-bearing requirement). Each green sub-block
+  is a checkpoint: "the shim's PCI adapter works"
+  shipped + smoke-validated independently of "the shim's
+  virtio adapter works," and 2-5's balloon failure modes
+  isolate cleanly to "balloon-specific quirk" since the
+  shim surfaces all individually green.
 
 Sanity check before kicking off
 
     git tag --list | grep arsenal             # arsenal-M0-complete
-    git log --oneline -10                     # 9df4682 (HEAD),
-                                              # 9793487, b535195,
-                                              # e2057de, 6a69383,
-                                              # 78b38e2, b6b3785,
-                                              # b70f0f2, f3f431e,
-                                              # 8b20132
+    git log --oneline -10                     # 298d9ba (HEAD),
+                                              # e08b7d2, dcd9ed1,
+                                              # a75541c, 061e3cb,
+                                              # bc6ddac, dd9f4a6,
+                                              # 00e39fe, 077961d,
+                                              # 9df4682
     git status --short                        # ?? HANDOFF.md (only,
                                               # while drafting this)
                                               # or clean once committed
     cargo build -p arsenal-kernel --target x86_64-unknown-none --release
-                                              # clean, ~1.52 MB ELF
+                                              # clean, ~1.55-1.60 MB ELF
     cargo clippy -p arsenal-kernel --target x86_64-unknown-none --release -- -D warnings
                                               # clean
     cargo xtask iso                           # arsenal.iso ~19.3 MB
-    ci/qemu-smoke.sh                          # ==> PASS (13 sentinels)
+    ci/qemu-smoke.sh                          # ==> PASS (14 sentinels)
 
-Expected: HEAD as above; smoke PASSes with 13 sentinels;
-boot→prompt around 100 ms.
+Expected: HEAD as above; smoke PASSes with 14 sentinels;
+boot→prompt around 96-110 ms; ARSENAL_NVME_OK fires.
 
-If 1-1 or 1-2 fails to make progress (controller doesn't go
-from disabled to ready), the likely culprits are:
+If 2-2 or 2-5 fails to make progress, the likely culprits
+are:
 
-  (a) **CAP register read returns 0.** NVMe's CAP at offset
-  0x00 is 64-bit. If we read it as two 32-bit halves with
-  the wrong endianness or with the lapic_read-style 32-bit
-  helper that doesn't span 64-bit reads cleanly, the result
-  comes out garbage. The MMIO BAR for NVMe is mapped at the
-  HHDM offset like every other MMIO; the read pattern is
-  `core::ptr::read_volatile::<u64>` against the HHDM-virtual
-  base.
+  (a) **PCI driver match never fires.** The shim's
+  pci_register_driver iterates the registered driver
+  table on every pci::scan() result; if the iteration
+  happens *before* pci::scan() runs (boot-order bug) or
+  if the id_table comparison treats Linux's PCI_VENDOR_ID
+  + PCI_DEVICE_ID layout differently than our (Bdf,
+  vendor, device) tuple, no .probe ever fires. Log every
+  pci::scan() result + every registered driver's id_table
+  entry at boot to surface the mismatch.
 
-  (b) **CC.EN write doesn't take effect.** CC at offset 0x14
-  is 32-bit; the EN bit (bit 0) is the controller's
-  enable / disable signal. Writing CC.EN = 1 while CC.EN was
-  already 1 (residual from firmware) is undefined per the
-  spec — must explicitly disable first (CC.EN = 0; spin
-  CSTS.RDY → 0; configure; CC.EN = 1; spin CSTS.RDY → 1).
-  The CSTS.RDY → 0 spin has no real-world timeout (QEMU
-  ~1ms, real hardware ~tens of ms); a `while_until_with_
-  bound` loop with a generous 1-second cap surfaces a wedged
-  controller before the smoke times out.
+  (b) **request_irq vector leak.** The shim's request_irq
+  must call idt::register_vector; the vector returned is
+  the IDT vector to program in the MSI-X table (or the
+  IOAPIC RTE for legacy IRQs). If the shim allocates a
+  vector but never wires it (forgets the MSI-X table
+  write), the inherited driver's IRQ handler is never
+  called and the driver wedges waiting for a completion
+  that never arrives. Log the vector + the MSI-X table
+  programming at every request_irq.
 
-  (c) **AQA / ASQ / ACQ written after CC.EN = 1.** Spec is
-  explicit: AQA, ASQ, ACQ must be programmed *before* CC.EN
-  flips to 1. The bring-up sequence is fixed: disable →
-  program admin queue → enable.
+  (c) **GFP_ATOMIC honored too liberally.** The
+  GFP_KERNEL / GFP_ATOMIC distinction means GFP_ATOMIC
+  must not sleep (i.e., must not yield to the scheduler).
+  Our shim's kmalloc routes both to alloc::Global which
+  doesn't sleep — but if a future shim function (mutex_
+  lock, msleep) is called from a path the inherited driver
+  passed GFP_ATOMIC into, the implicit "must not sleep"
+  invariant is broken silently. The shim's mutex_lock
+  needs an IrqGuard scope check ("am I in IRQ context?")
+  and a BUG_ON if so; the shim's msleep needs the same.
 
-  (d) **Admin queue physical address misaligned.** ASQ
-  must point at a 4-KiB-aligned physical address; same for
-  ACQ. The frame allocator hands out 4-KiB-aligned frames
-  by definition, so just pass `frames::FRAMES.alloc_frame
-  ().start_address().as_u64()` straight through — no
-  manual alignment.
+  (d) **DMA addresses confused with HHDM-virtual
+  addresses.** dma_alloc_coherent returns *both* a
+  CPU-side virtual address (the HHDM-mapped virt addr)
+  *and* a DMA-side handle (the physical address); the
+  inherited driver is required to use the DMA handle for
+  any device-facing register write. If the shim returns
+  the same address for both (because HHDM-virt and phys
+  differ only by a constant offset), QEMU works (the
+  IOMMU is permissive) but real hardware will fail
+  silently with the controller reading from the wrong
+  physical address. Compute + return the correct phys
+  addr at the dma_alloc_coherent boundary; the regression
+  surfaces only on real iron at step 7.
 
-  (e) **Doorbell write missing on submission.** SQ tail
-  doorbell at offset 0x1000 + 2 * SQID * (4 << DSTRD) must
-  be written after staging a command in the SQ — that's the
-  "tell the controller new work is available" signal. The
-  classic bring-up bug: stage the command, never doorbell,
-  controller idles forever. Polled completion checks the
-  CQ head doorbell shape, *not* whether the controller
-  noticed the SQ update.
+  (e) **container_of misalignment.** The Linux idiom
+  `container_of(ptr, struct, member)` recovers the outer
+  struct pointer from a member pointer using offset
+  subtraction. Rust's `core::mem::offset_of!` macro
+  gives the right offset; getting the offset_of! macro
+  signature wrong (e.g., comparing repr(Rust) against
+  repr(C) layouts) silently corrupts the pointer. Every
+  shim type the inherited C inspects via container_of
+  must be `#[repr(C)]`; verify with a static_assert at
+  the type definition.
 
-  (f) **CQ phase tag flip not handled.** Each I/O completion
-  flips a "phase" bit so the driver can tell new completions
-  from stale buffer contents. Initial phase is 1; first
-  completion sets phase to 1 (queue zero-initialized);
-  subsequent wrap-arounds flip phase to 0, 1, 0, etc. The
-  polled completion loop must track the expected phase per
-  queue and compare against the CQ entry's phase field.
+  (f) **module_init never called.** The Linux module_init
+  macro registers a function in a special ELF section;
+  Linux's loader iterates the section to call each
+  module_init at boot. Our shim has no module loader;
+  the inherited driver's module_init is a regular
+  function we call directly from linuxkpi::probe_drivers().
+  The shim's module_init macro must expose the function
+  name (e.g., as a public extern symbol) so our probe path
+  can call it; the inherited driver's module_init function
+  becomes a regular `pub extern "C" fn virtio_balloon_init`
+  in C, and the shim calls it explicitly. Document the
+  pattern in 2-1's shim_c.h header comment so future
+  inherited drivers follow it.
 
-  (g) **MSI-X table BAR confusion.** MSI-X tables live in
-  one of the device's BARs (NVMe usually puts them in BAR0
-  with an offset). The capability structure encodes which
-  BAR + what offset; 1-0's parser must extract both, not
-  assume BAR0+0. Step 1 logs the BAR + offset at 1-0 so
-  any mismatch surfaces in the boot log.
+  (g) **printk format-string parsing.** Linux's printk
+  supports format specifiers our serial::println! doesn't
+  (%pK, %pS, %pV, %pa, %pdt, dozens more). The shim's
+  printk should route to a vprintk implementation that
+  parses the Linux format-string subset and dispatches to
+  a serial-safe printer; format strings the shim doesn't
+  support should print as `<unsupported %p%c>` rather
+  than crash. The inherited drivers print a *lot*; a
+  printk that crashes on an unrecognized specifier wedges
+  the boot at the first non-trivial driver message.
 
-Out of scope for step 1 specifically
+Out of scope for step 2 specifically
 
-  - **Write paths.** Step 1 reads sector 0 only. Write
-    (opcode 0x01) and Flush (opcode 0x00) aren't needed
-    until step 7 (real-hardware install medium); add then.
-  - **Multi-namespace support.** Step 1 hardcodes NSID = 1.
-    NVMe spec allows up to 2^32 - 1 namespaces; commodity
-    consumer SSDs typically expose 1.
-  - **Multiple controllers.** Step 1 finds the first NVMe
-    PCI device and uses it; additional NVMe controllers
-    (multi-disk systems, NVMe-of-fabrics) are post-M1.
-  - **PCIe Hotplug.** Step 1 enumerates at boot only.
-  - **NVMe Set Features / Get Features past the bring-up
-    set.** Step 1 uses the default arbitration, default
-    power state, no power management. PM at M1 step 7+ or
-    M2 when power matters.
-  - **Asynchronous Event Notifications.** AEN polling is
-    Linux's monitor for SMART warnings, error log entries,
-    namespace attach/detach. Post-M1.
-  - **NVMe-MI** (Management Interface). BMC / out-of-band
-    management. Not consumer-hardware territory; permanently
-    out of scope.
-  - **NVMe-oF** (over Fabrics). Network NVMe. Not commodity
-    hardware; permanently out of scope.
-  - **Filesystem on the NVMe device.** Step 1 reads raw
-    sector 0. A filesystem driver (FAT32 read, ext2 read)
-    is M1 step 7 territory at the earliest, more likely
-    v0.5.
+  - **Real-hardware boot.** Step 2 validates the shim
+    + first inherited driver in QEMU only. Real-iron
+    boot is step 7; shim correctness on real hardware
+    will surface failure modes QEMU's permissive virtio
+    + IOMMU don't expose.
+  - **More than one inherited driver.** Step 2 lands
+    virtio-balloon. xHCI at step 3 (whether native Rust
+    or LinuxKPI port — re-evaluated at step 3 kickoff
+    with the shim's actual shape in evidence); amdgpu
+    at step 5; iwlwifi at step 6.
+  - **Workqueue infrastructure.** Linux drivers heavily
+    use workqueues for deferred work; balloon doesn't
+    (its work runs in the probe + IRQ paths only).
+    Step 2's workqueue stubs panic-on-call; subsequent
+    inherited drivers that need workqueues bring the
+    real implementation along.
+  - **kthread scheduler integration.** Balloon doesn't
+    spawn kthreads. amdgpu / iwlwifi will; that work
+    arrives at step 5 / 6.
+  - **sysfs / debugfs / procfs.** Balloon publishes some
+    sysfs nodes; the shim's sysfs_create_group is a
+    no-op stub. User-visible introspection of inherited
+    drivers waits for M2 when Inspector overlay arrives.
+  - **CONFIG_* feature gates.** Linux's kernel-config
+    system gates entire subsystems on Kconfig options.
+    Our shim hardcodes the config: every inherited
+    driver compiles as if the kernel were configured with
+    the minimal CONFIG_ set virtio_balloon needs. The
+    inherited .c source is unmodified; we change the
+    config view, not the source.
+  - **Module reloading / unloading.** Linux supports
+    loading + unloading kernel modules at runtime; our
+    shim doesn't. module_exit is exposed as a symbol
+    but never called.
+  - **Power management hooks (suspend / resume / pm_ops).**
+    Out of scope per ARSENAL.md M1's "no S3/S4" note;
+    the shim's pm_ops stubs are no-ops.
 
 Permanently out of scope (do not propose)
 
-  - Any unsafe block without a // SAFETY: comment naming the
-    invariant the caller must uphold. CLAUDE.md hard rule.
-  - Reverting any M0 commit. M0 closed and tagged.
+  - Any unsafe block without a // SAFETY: comment naming
+    the invariant the caller must uphold. CLAUDE.md hard
+    rule. The shim is heavy on unsafe (FFI boundary, raw
+    pointer wrangling, container_of, MMIO reads); every
+    unsafe block needs the SAFETY comment.
+  - Modifying inherited Linux .c source without forking
+    into vendor/linux-6.12-arsenal/ + documenting the
+    diff. CLAUDE.md §3 GPLv2 preservation rule.
+  - Reverting any M0 or M1-step-1 commit. Both closed +
+    tagged (M0) or merged (M1-1).
   - Force-pushing to origin. Branch is in sync; preserve
     history.
-  - Dropping BSD-2-Clause license header from any new file.
-    nvme.rs is BSD-2; nvme spec is openly available with
-    no copyright on protocol details.
-  - Pulling a GPL crate into the kernel base for NVMe. Linux
-    drivers via LinuxKPI is the only GPL path; NVMe is
-    native Rust per ARSENAL.md.
+  - Dropping BSD-2-Clause SPDX header from any new
+    Arsenal-base file. Inherited .c retains its original
+    GPLv2 SPDX.
+  - Pulling a GPL Rust crate into the kernel base or the
+    shim crate. The GPL boundary is exactly + only the
+    inherited Linux .c source under vendor/linux-6.12/;
+    the shim's Rust source is BSD-2 with no GPL crates.
   - Religious framing. CLAUDE.md hard rule.
   - Reintroducing HolyC. ADR-0004's discard is final.
   - Going back to stable Rust.
-  - Skipping the build + smoke loop on a feat(kernel)
-    commit.
+  - Skipping the build + smoke loop on a feat(linuxkpi)
+    or feat(kernel) commit.
 
 Three notes worth flagging before you go
 
-  1. **NVMe's controller-reset sequence is the most
-     spec-fragile piece of step 1.** The order of writes
-     (disable, program admin queue, enable) and the polling
-     of CSTS.RDY across the transitions has half a dozen
-     subtle wrong-order failure modes. Read the M1 step 1
-     HANDOFF's failure-mode list above before kicking off
-     1-2; better still, sketch the sequence as inline ASCII
-     in nvme.rs's `init` function before writing any code.
-     The NVMe 1.4 spec § 7.6.1 (Controller Initialization)
-     is the canonical reference; § 3.5.1 (Memory-Based
-     Transport Model Initialization) and § 5.21.1.7 (Feature
-     Identifier 11 — Arbitration) are secondary. Half-
-     spec'd implementations work on QEMU and fail on real
-     hardware where timing matters; full-spec implementations
-     work on both. M1 step 7's real-hardware bring-up will
-     reward over-specification at step 1.
+  1. **The shim is morale-load-bearing.** The M1 milestone
+     HANDOFF underlines this; it bears repeating at step
+     kickoff. Nothing user-visible ships from step 2 alone
+     — the user-visible payoff arrives at step 5 (amdgpu
+     KMS) when the framebuffer Stage will eventually run
+     on. Step 2's discipline is one shim surface lands +
+     compiles + has a smoke checkpoint + ships, then the
+     next. Resist the temptation to "just finish the PCI
+     adapter and the virtio adapter together" — six
+     small green sub-blocks across 14-17 calendar weeks
+     keeps the work visible to future-you in a way one
+     monolithic four-month commit does not. CLAUDE.md
+     cue: "This has been the active issue for three
+     sessions. Want to write up what we've tried and step
+     away for a day?" applies *especially* to 2-2 (PCI
+     adapter, longest single sub-block) and 2-5 (gap-
+     filling, least predictable). Use the cue
+     proactively, not reactively.
 
-  2. **MSI-X programming is the moment the IRQ model evolves
-     past M0's IDT.** The M0 IDT is `spin::Lazy<...>` —
-     initialized once, used forever. M1 step 1 introduces
-     `idt::register_vector(handler)` for dynamic allocation.
-     The Lazy initializer at idt.rs runs ONCE; subsequent
-     `register_vector` calls must mutate the IDT after the
-     initial load. The x86_64 crate's `InterruptDescriptor
-     Table` is mutable through `&mut`, but our IDT lives
-     behind Lazy which only exposes `&IDT`. The natural
-     refactor: replace Lazy with a `Mutex<Option<Inter
-     ruptDescriptorTable>>` + a `register_vector(handler)`
-     that locks, updates, and re-loads IDTR via `LIDT`.
-     This is one of those "easy to get subtly wrong" pieces;
-     the step 1-0 HANDOFF or commit body should document
-     the locking discipline explicitly.
+  2. **The GPL/BSD-2 boundary is not a comment — it is a
+     directory.** ADR-0005 at 2-0 names the discipline:
+     `linuxkpi/src/` + every Arsenal Rust file is BSD-2
+     (with the SPDX-License-Identifier: BSD-2-Clause
+     header), `vendor/linux-6.12/` + every inherited C
+     file is GPLv2 (with the file's original SPDX header
+     preserved unchanged), the `cc`-built object files
+     produced from `vendor/linux-6.12/` link into the
+     kernel ELF as a *combined work* per the LinuxKPI
+     precedent (FreeBSD drm-kmod's decade-deep
+     justification). Future-me reading the source tree
+     six months from now should be able to tell which
+     license applies to any file by which directory it
+     lives in. Inherited .c files NEVER live under
+     `linuxkpi/`; shim .rs files NEVER live under
+     `vendor/`. The build system (2-4) enforces this by
+     refusing to compile anything that crosses the line.
 
-  3. **Step 1 is M1's velocity-establishment sub-step.** The
-     M0 step 4 cadence (six sub-blocks in one calendar day)
-     does not apply. M1 step 1 lands in 4-6 calendar weeks.
-     If 1-2 (controller reset + admin queue) takes more
-     than two sessions of grinding, that's the moment to
-     pause, write up what's been tried, and step away for
-     a day (CLAUDE.md cue: "This has been the active issue
-     for three sessions. Want to write up what we've tried
-     and step away for a day?"). Don't drive through. NVMe
-     controller-reset failures have a stubborn habit of
-     yielding to a fresh look after rest, and they rarely
-     yield to grinding.
+  3. **2-5 is when the M1 milestone HANDOFF's "step away
+     for a day" cue earns its keep.** Every shim's first
+     inherited-driver bring-up surfaces gaps the API
+     audit at 2-1/2-2/2-3 missed; gap-filling is the
+     hardest-to-budget engineering work in the M1
+     surface. Plan for 3-5 sessions; budget for the
+     possibility of doubling that. If the third session
+     of 2-5 ends with virtio-balloon's probe still not
+     reaching its config-queue allocation, do not push
+     into a fourth session the same week. Write up what
+     was tried (gap inventory, what shim functions
+     needed adding, what the failing call chain looked
+     like in serial output), commit the partial work as
+     a `wip(linuxkpi):` commit on a branch, step away for
+     2-3 days. Balloon probe failures have a stubborn
+     habit of yielding to a fresh look after rest, much
+     like NVMe controller resets did at step 1.
 
 Wait for the pick. Do not pick silently. The natural first
-split is 1-0 as a standalone session (MSI-X capability +
-IDT vector tooling — foundational infrastructure with no
-NVMe content yet), 1-1 in one focused session (NVMe device
-discovery + BAR + register primitives), 1-2 as the longest
-single sub-block of step 1 (controller reset + admin queue +
-Identify, the spec-rich piece), 1-3 in one session that ends
-with ARSENAL_NVME_OK firing, 1-4 as a short follow-up
-(MSI-X conversion), 1-5 as the paper session. Use **go
-m1-1-0** to start. Happy to combine 1-3 + 1-4 if you want
-the "interrupt-driven NVMe" milestone in one push, or to
-defer 1-0 and let 1-1 use a hand-coded MSI-X parser inline
-in nvme.rs — the latter would couple MSI-X to NVMe though,
-which 1-0's recommendation is specifically against. Your
-call.
+split is 2-0 as a standalone session (the ADR + the empty
+crate skeleton — pure structural decision-making, no shim
+code yet), 2-1 in 2-3 sessions (foundational shim API), 2-2
+as the longest single sub-block (PCI + IRQ + DMA shim, 4-5
+sessions), 2-3 in 2-3 sessions (virtio bus shim), 2-4 in
+2-3 sessions (vendor + build integration), 2-5 in 3-5
+sessions ending with ARSENAL_VIRTIO_BALLOON_OK firing, 2-6
+as the milestone-style three-devlog paper session. Use
+**draft m1-2-0-adr** to start with the ADR-0005 draft (the
+crate-layout decision wants thought before code), or **go
+m1-2-0** if the layout decision is made (recommend single
+workspace member `linuxkpi/` per the trade-off above) and
+you want the empty skeleton landed first. Happy to combine
+2-0 with 2-1 if you want the ADR + the foundational shim
+in one push, or to defer 2-3 (virtio bus) and let 2-5
+discover the virtio-bus-API surface organically as balloon
+needs it — the latter would mean 2-2 + 2-4 + 2-5 in one
+chain with virtio bus extraction post-hoc, which couples
+tightly but compresses the schedule. Your call.
