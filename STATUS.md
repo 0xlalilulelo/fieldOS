@@ -189,24 +189,73 @@ counter: i32 }` had no interior-mutability marker; first
 now writable. Worth-recording trap for future Rust types
 intended for `static` use.
 
-**Next sub-commit: M1-2-2 IRQ bridge.** request_irq +
-free_irq + IRQF_* + pci_alloc_irq_vectors + pci_irq_vector
-+ pci_free_irq_vectors. The 16-slot dispatcher pool
-design: pre-generate 16 `extern "x86-interrupt"` fn
-dispatchers at compile time (each indexes a static slot
-table); `request_irq` populates the slot with the
-Linux-shaped `(irq_handler_t, dev_id)` pair; the dispatcher
-calls the registered handler then sends LAPIC EOI.
-`pci_alloc_irq_vectors` allocates a contiguous range of
-slots, programs the MSI-X table (LAPIC fixed-delivery
-address + the dispatcher's IDT vector), unmasks. New
-bridge fns: linuxkpi_lapic_eoi + linuxkpi_pci_msix_info.
-Estimated ~250-350 LOC. HANDOFF failure mode (b)
-"request_irq vector leak" applies most. Splits M1-2-2
-into two commits per the bisect-rich seam between
-register-and-resource (commit A) and IRQ wiring (this
-commit). Combined commit-A + IRQ + DMA brings M1-2-2 to
-its full HANDOFF scope.
+**M1-2-2 IRQ bridge landed (2026-05-15, `911518f`).**
+~666 LOC across 8 files: 251 LOC `linuxkpi/src/irq.rs`
+(new) + 248 LOC pci.rs growth + 64 LOC bridge growth +
+35 LOC shim_c.h growth + 57 LOC lib.rs (self_test) +
+22 LOC main.rs (dispatcher init wiring).
+
+The 16-slot dispatcher pool: pre-generated
+`dispatch_0..dispatch_15` via a `gen_dispatcher!` macro,
+each `extern "x86-interrupt" fn(InterruptStackFrame)` that
+calls a common dispatch path indexing a static slot table.
+`linuxkpi::irq::register_dispatchers(idt::register_vector)`
+called early in arsenal-kernel/src/main.rs installs all 16
+in the IDT and records the (slot → IDT vector) mapping in
+`SLOT_TO_IDT_VEC`. `request_irq(irq, handler, ...)`
+populates `SLOTS[irq]`; the dispatcher invokes the
+registered Linux handler then sends LAPIC EOI via the new
+`linuxkpi_lapic_eoi` bridge fn. `pci_alloc_irq_vectors`
+allocates a contiguous slot range, reads MSI-X capability
+via the new `linuxkpi_pci_msix_info` bridge fn, programs
+each MSI-X table entry (LAPIC fixed-delivery 0xFEE00000 +
+APIC ID 0 destination, Message Data = the slot's IDT
+vector, Vector Control = unmasked), enables MSI-X in the
+cap's Message Control register. `pci_free_irq_vectors`
+clears slots + disables MSI-X. struct pci_dev grew
+`msix_first_slot` + `msix_vector_count` fields.
+
+**M1-2-2 closed in ~2 sessions (HANDOFF estimate: 4-5).**
+Combined with f61c1a0 (PCI+DMA), the full HANDOFF surface
+for M1-2-2 (PCI bus adapter + IRQ bridge + DMA coherent)
+is complete. Post-pivot concentration window still open;
+M1 milestone budget unchanged; variance now concentrated
+in M1-2-3 (virtio bus, ~2-3 sessions), M1-2-4 (build
+integration / cc-crate cross-compile flag plumbing,
+~2-3 sessions), M1-2-5 (gap-filling, ~3-5 sessions of
+unpredictability — the "step away for a day" cue moment
+per HANDOFF note #1).
+
+Five lints addressed during iteration worth recording
+for future sub-blocks: `doc_lazy_continuation` (continuation
+lines need indent), missing `#![feature(abi_x86_interrupt)]`
+on linuxkpi crate root once the IRQ pool added it, missing
+`c_uint` import in pci.rs after the new public API needed
+it, `non_camel_case_types` allow on `irq_handler_t` (Linux-
+ABI name preserved), one missing `# Safety` on the new
+no-op extern fn.
+
+**Next sub-block: M1-2-3** — virtio bus adapter. Linux
+`struct virtio_driver` / `struct virtio_device` / `struct
+virtqueue` shims over arsenal-kernel's `virtio.rs`
+primitives (find_device, the VirtqDesc/Avail/Used
+layouts). `virtqueue_add_buf` / `virtqueue_kick` /
+`virtqueue_get_buf` wrapping the descriptor-ring layout;
+`virtio_get_features` / `virtio_finalize_features` over
+the common_cfg feature-bit handshake; `virtio_cread` /
+`virtio_cwrite` over device_cfg; `virtio_pci_modern_probe`
+enumerates PCI devices with virtio's vendor ID 0x1AF4 and
+dispatches the matching virtio_driver's `.probe` (same
+pattern as PCI bus adapter at M1-2-2, narrowed to
+virtio's PCI subsystem-ID space). Self-test: a no-op
+virtio_driver registers, sees the existing virtio-blk +
+virtio-net devices fire `.probe`, unregisters cleanly.
+~400-500 LOC + ~80 LOC `shim_c.h` growth. **HANDOFF
+estimate: 2-3 focused sessions / ~2 calendar weeks.**
+After M1-2-3 lands, the "shim foundation" devlog cluster
+(2-1 + 2-2 + 2-3) is structurally complete and the work
+shifts to GPL-boundary territory (M1-2-4: vendor Linux
+6.12 LTS subset + cc-crate build integration).
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
