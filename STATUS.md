@@ -160,24 +160,53 @@ ASCII '6'); strip_kern_level fell through silently and the
 `[INFO]` tag never appeared. HANDOFF failure mode (g)
 material; fixed before commit.
 
-**Next sub-block: M1-2-2** — PCI bus adapter + IRQ bridge
-+ DMA coherent. Linux PCI driver registration model
-(struct pci_driver / pci_register_driver / .probe dispatch
-over our pci::scan); pci_resource_start / pci_iomap /
-pci_set_master / pci_enable_device wrapping pci.rs +
-paging::map_mmio; pci_alloc_irq_vectors + request_irq /
-free_irq routing through idt::register_vector + the MSI-X
-table programming step 1 exercises in nvme.rs;
-dma_alloc_coherent over frames::FRAMES.alloc_frame +
-hhdm_offset; dma_map/unmap_single as no-ops on x86_64
-cache-coherent. Self-test: a no-op pci_driver registers,
-sees pci::scan() devices fire .probe, unregisters.
-~600-800 LOC shim + ~120 LOC `shim_c.h` growth. **HANDOFF
-estimate: 4-5 focused sessions / 3-4 calendar weeks — the
-longest single sub-block of M1 step 2.** Seven failure
-modes flagged in the HANDOFF; the (a) PCI driver match
-never fires + (b) request_irq vector leak + (d) DMA vs
-HHDM-virt confusion are the bring-up-tape-record items.
+**M1-2-2 partial — PCI bus adapter + DMA coherent
+landed (2026-05-15, `f61c1a0`).** ~700 LOC shim Rust +
+~70 LOC `shim_c.h` + 118 LOC `arsenal-kernel/src/
+linuxkpi_bridge.rs` (the new pattern for kernel-side
+primitives linuxkpi consumes via `extern "C"` since the
+crate dep is one-way). Surfaces: struct pci_device_id /
+pci_dev / pci_driver matching Linux <linux/pci.h>;
+pci_register_driver walking every (bus, dev, func) +
+matching against NULL-sentinel id_table (PCI_ANY_ID +
+class_mask honored) + .probe dispatch with cached BAR
+addresses + lengths (BAR-sizing dance per PCI Local Bus
+Spec 3.0 § 6.2.5.1); pci_resource_start / pci_resource_len
+/ pci_iomap / pci_iounmap / pci_set_master /
+pci_enable_device; dma_alloc_coherent / dma_free_coherent
+/ dma_map_single / dma_unmap_single / dma_sync_* (no-ops
+on x86_64 per Intel SDM Vol. 3A § 11.3 cache-coherent DMA).
+Self-test extension: pci walk found 9 present functions +
+no-op pci_driver matches every one + dma_alloc_coherent
+round-trip with page-aligned dma_handle assertion.
+
+Bug caught + fixed in-session: static `AtomicInt`
+declarations landed in `.rodata` because `atomic_t {
+counter: i32 }` had no interior-mutability marker; first
+.inc() page-faulted on a kernel-text address. Fix:
+`counter: UnsafeCell<i32>` — layout invariant preserved
+(repr(transparent)), C ABI intact (`int counter`), statics
+now writable. Worth-recording trap for future Rust types
+intended for `static` use.
+
+**Next sub-commit: M1-2-2 IRQ bridge.** request_irq +
+free_irq + IRQF_* + pci_alloc_irq_vectors + pci_irq_vector
++ pci_free_irq_vectors. The 16-slot dispatcher pool
+design: pre-generate 16 `extern "x86-interrupt"` fn
+dispatchers at compile time (each indexes a static slot
+table); `request_irq` populates the slot with the
+Linux-shaped `(irq_handler_t, dev_id)` pair; the dispatcher
+calls the registered handler then sends LAPIC EOI.
+`pci_alloc_irq_vectors` allocates a contiguous range of
+slots, programs the MSI-X table (LAPIC fixed-delivery
+address + the dispatcher's IDT vector), unmasks. New
+bridge fns: linuxkpi_lapic_eoi + linuxkpi_pci_msix_info.
+Estimated ~250-350 LOC. HANDOFF failure mode (b)
+"request_irq vector leak" applies most. Splits M1-2-2
+into two commits per the bisect-rich seam between
+register-and-resource (commit A) and IRQ wiring (this
+commit). Combined commit-A + IRQ + DMA brings M1-2-2 to
+its full HANDOFF scope.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
