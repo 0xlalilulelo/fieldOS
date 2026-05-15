@@ -27,6 +27,7 @@ mod idt;
 mod ioapic;
 mod irq;
 mod kbd;
+mod linuxkpi_bridge;
 mod net;
 mod nvme;
 mod paging;

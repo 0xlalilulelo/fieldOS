@@ -19,6 +19,7 @@
 //! C-side declarations exposing only the size + alignment so
 //! drivers can declare instances.
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, Ordering};
 use spin::Mutex as SpinMutex;
 
@@ -27,17 +28,27 @@ use spin::Mutex as SpinMutex;
 // =====================================================================
 
 /// C-ABI-compatible atomic integer. Layout matches Linux's
-/// `typedef struct { int counter; } atomic_t`.
+/// `typedef struct { int counter; } atomic_t` — `UnsafeCell<i32>`
+/// is `#[repr(transparent)]` over `i32`, so C sees the same `int`
+/// either way. The `UnsafeCell` is what tells Rust this type is
+/// interior-mutable: without it, `static` instances of `atomic_t`
+/// land in `.rodata` and atomic writes through `&atomic_t` page-
+/// fault on the protection violation.
 #[repr(C)]
 pub struct atomic_t {
-    pub counter: i32,
+    pub counter: UnsafeCell<i32>,
 }
 
 impl atomic_t {
     pub const fn new(v: i32) -> Self {
-        Self { counter: v }
+        Self { counter: UnsafeCell::new(v) }
     }
 }
+
+// SAFETY: counter is only ever accessed via SeqCst atomic ops on
+// the AtomicI32 view; concurrent access from multiple cores is
+// sound under that discipline.
+unsafe impl Sync for atomic_t {}
 
 /// Atomically increment `*v` by 1.
 ///
@@ -45,12 +56,14 @@ impl atomic_t {
 /// `v` must point to a valid `atomic_t` for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atomic_inc(v: *mut atomic_t) {
-    // SAFETY: caller's contract — v is valid. counter has the same
-    // layout, alignment, and bit validity as i32, which AtomicI32
-    // also matches per Rust's atomic-type guarantees.
+    // SAFETY: caller's contract — v is valid. UnsafeCell<i32> is
+    // repr(transparent) over i32, which AtomicI32 also matches per
+    // Rust's atomic-type guarantees; UnsafeCell::get returns the
+    // *mut i32 we pass to AtomicI32::from_ptr.
     unsafe {
-        let ptr = core::ptr::addr_of_mut!((*v).counter);
-        AtomicI32::from_ptr(ptr).fetch_add(1, Ordering::SeqCst);
+        let cell_ptr = core::ptr::addr_of_mut!((*v).counter);
+        let int_ptr = (*cell_ptr).get();
+        AtomicI32::from_ptr(int_ptr).fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -62,8 +75,9 @@ pub unsafe extern "C" fn atomic_inc(v: *mut atomic_t) {
 pub unsafe extern "C" fn atomic_dec(v: *mut atomic_t) {
     // SAFETY: see atomic_inc.
     unsafe {
-        let ptr = core::ptr::addr_of_mut!((*v).counter);
-        AtomicI32::from_ptr(ptr).fetch_sub(1, Ordering::SeqCst);
+        let cell_ptr = core::ptr::addr_of_mut!((*v).counter);
+        let int_ptr = (*cell_ptr).get();
+        AtomicI32::from_ptr(int_ptr).fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -73,11 +87,13 @@ pub unsafe extern "C" fn atomic_dec(v: *mut atomic_t) {
 /// `v` must point to a valid `atomic_t` for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atomic_read(v: *const atomic_t) -> i32 {
-    // SAFETY: see atomic_inc; load is read-only so a const ptr
-    // cast to mut is sound under AtomicI32's guarantees.
+    // SAFETY: see atomic_inc; UnsafeCell::get returns *mut i32
+    // even from a *const reference (interior mutability), and
+    // AtomicI32::load is read-only.
     unsafe {
-        let ptr = core::ptr::addr_of!((*v).counter) as *mut i32;
-        AtomicI32::from_ptr(ptr).load(Ordering::SeqCst)
+        let cell_ptr = core::ptr::addr_of!((*v).counter);
+        let int_ptr = (*cell_ptr).get();
+        AtomicI32::from_ptr(int_ptr).load(Ordering::SeqCst)
     }
 }
 
@@ -89,8 +105,9 @@ pub unsafe extern "C" fn atomic_read(v: *const atomic_t) -> i32 {
 pub unsafe extern "C" fn atomic_set(v: *mut atomic_t, i: i32) {
     // SAFETY: see atomic_inc.
     unsafe {
-        let ptr = core::ptr::addr_of_mut!((*v).counter);
-        AtomicI32::from_ptr(ptr).store(i, Ordering::SeqCst);
+        let cell_ptr = core::ptr::addr_of_mut!((*v).counter);
+        let int_ptr = (*cell_ptr).get();
+        AtomicI32::from_ptr(int_ptr).store(i, Ordering::SeqCst);
     }
 }
 

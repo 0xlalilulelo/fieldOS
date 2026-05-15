@@ -7,7 +7,10 @@
  * bidirectional-FFI rationale and the hand-written-header decision.
  *
  * M1-2-1 surface: types + printk + slab + locks + atomics.
- *   - PCI bus + request_irq + DMA arrives at M1-2-2.
+ * M1-2-2 surface: PCI bus adapter (pci_driver registration model)
+ *   + DMA coherent.
+ *   - IRQ bridge (request_irq + pci_alloc_irq_vectors) is the
+ *     next M1-2-2 follow-up.
  *   - virtio bus arrives at M1-2-3.
  *   - cc-driven compilation of inherited C against this header
  *     lands at M1-2-4 — until then this header is consumed only
@@ -108,5 +111,76 @@ extern void mutex_unlock(struct mutex *m);
 extern void spin_lock_init(struct spinlock *s);
 extern void spin_lock(struct spinlock *s);
 extern void spin_unlock(struct spinlock *s);
+
+/* ---- <linux/pci.h> + <linux/mod_devicetable.h> ---- */
+
+#define PCI_ANY_ID  0xFFFFFFFFU
+
+typedef unsigned long kernel_ulong_t;
+
+struct pci_device_id {
+    __u32 vendor;
+    __u32 device;
+    __u32 subvendor;
+    __u32 subdevice;
+    __u32 class;
+    __u32 class_mask;
+    kernel_ulong_t driver_data;
+};
+
+struct pci_dev {
+    __u16 vendor;
+    __u16 device;
+    __u16 subsystem_vendor;
+    __u16 subsystem_device;
+    __u32 class;
+    __u8  bus_number;
+    __u8  devfn;            /* (dev << 3) | func */
+    __u64 bar_addr[6];      /* cached at probe-dispatch time */
+    __u64 bar_len[6];
+    void *driver_data;      /* opaque to shim; pci_set_drvdata */
+};
+
+struct pci_driver {
+    const char *name;
+    const struct pci_device_id *id_table;
+    int  (*probe)(struct pci_dev *dev, const struct pci_device_id *id);
+    void (*remove)(struct pci_dev *dev);
+};
+
+extern int  pci_register_driver(struct pci_driver *drv);
+extern void pci_unregister_driver(struct pci_driver *drv);
+extern __u64 pci_resource_start(const struct pci_dev *dev, int bar);
+extern __u64 pci_resource_len(const struct pci_dev *dev, int bar);
+extern void *pci_iomap(const struct pci_dev *dev, int bar, __u64 max_len);
+extern void  pci_iounmap(const struct pci_dev *dev, void *addr);
+extern void  pci_set_master(struct pci_dev *dev);
+extern int   pci_enable_device(struct pci_dev *dev);
+
+/* ---- <linux/dma-mapping.h> + <linux/dma-direction.h> ---- */
+
+struct device { unsigned char _opaque[8]; };
+
+#define DMA_BIDIRECTIONAL  0
+#define DMA_TO_DEVICE      1
+#define DMA_FROM_DEVICE    2
+#define DMA_NONE           3
+
+extern void *dma_alloc_coherent(struct device *dev, size_t size,
+                                dma_addr_t *dma_handle, gfp_t flags);
+extern void  dma_free_coherent(struct device *dev, size_t size,
+                               void *cpu_addr, dma_addr_t dma_handle);
+extern dma_addr_t dma_map_single(struct device *dev, void *cpu_addr,
+                                 size_t size, int dir);
+extern void  dma_unmap_single(struct device *dev, dma_addr_t dma_handle,
+                              size_t size, int dir);
+extern void  dma_sync_single_for_device(struct device *dev,
+                                        dma_addr_t dma_handle,
+                                        size_t size, int dir);
+extern void  dma_sync_single_for_cpu(struct device *dev,
+                                     dma_addr_t dma_handle,
+                                     size_t size, int dir);
+extern int   dma_set_mask(struct device *dev, __u64 mask);
+extern int   dma_set_coherent_mask(struct device *dev, __u64 mask);
 
 #endif /* ARSENAL_LINUXKPI_SHIM_C_H */
