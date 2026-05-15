@@ -11,7 +11,11 @@
  *   + DMA coherent + IRQ bridge (request_irq + free_irq +
  *   pci_alloc_irq_vectors + pci_irq_vector +
  *   pci_free_irq_vectors).
- *   - virtio bus arrives at M1-2-3.
+ * M1-2-3 surface: virtio bus adapter (virtio_driver registration
+ *   model + virtio_cread / virtio_cwrite + virtqueue type with
+ *   panic-on-call stubs for find_vqs / virtqueue_add_* /
+ *   virtqueue_kick / virtqueue_get_buf — real impls at M1-2-5).
+ *   Closes the "shim foundation" devlog cluster (2-1+2-2+2-3).
  *   - cc-driven compilation of inherited C against this header
  *     lands at M1-2-4 — until then this header is consumed only
  *     by the Rust shim's own type-shape declarations.
@@ -211,5 +215,76 @@ extern void  dma_sync_single_for_cpu(struct device *dev,
                                      size_t size, int dir);
 extern int   dma_set_mask(struct device *dev, __u64 mask);
 extern int   dma_set_coherent_mask(struct device *dev, __u64 mask);
+
+/* ---- <linux/virtio.h> + <uapi/linux/virtio_ids.h> +
+ *      <linux/mod_devicetable.h> ---- */
+
+#define VIRTIO_DEV_ANY_ID  0xFFFFFFFFU
+
+#define VIRTIO_ID_NET      1
+#define VIRTIO_ID_BLOCK    2
+#define VIRTIO_ID_CONSOLE  3
+#define VIRTIO_ID_RNG      4
+#define VIRTIO_ID_BALLOON  5
+
+struct virtio_device_id {
+    __u32 device;
+    __u32 vendor;
+};
+
+/* Trimmed virtio_device. Fields are the ones balloon (and the M1
+ * inherited driver fleet) actually reach for. Layout matches
+ * linuxkpi/src/virtio.rs's `pub struct virtio_device`. */
+struct virtio_device {
+    __u32 id_device;
+    __u32 id_vendor;
+    void *priv;
+    __u8  bus;
+    __u8  dev;
+    __u8  func;
+    __u8  _pad;
+    void *common_cfg;
+    void *notify_base;
+    __u32 notify_off_multiplier;
+    void *isr;
+    void *device_cfg;
+};
+
+/* Trimmed virtio_driver. M1-2-4 / 2-5 will surface missing fields
+ * (feature_table, validate, scan, config_changed) when balloon's
+ * compile demands them; we add then. */
+struct virtio_driver {
+    const char *name;
+    const struct virtio_device_id *id_table;
+    int  (*probe)(struct virtio_device *dev);
+    void (*remove)(struct virtio_device *dev);
+};
+
+extern int  register_virtio_driver(struct virtio_driver *drv);
+extern void unregister_virtio_driver(struct virtio_driver *drv);
+
+extern __u8  virtio_cread8(const struct virtio_device *vdev, unsigned int offset);
+extern __u16 virtio_cread16(const struct virtio_device *vdev, unsigned int offset);
+extern __u32 virtio_cread32(const struct virtio_device *vdev, unsigned int offset);
+extern void  virtio_cwrite8(struct virtio_device *vdev, unsigned int offset, __u8 val);
+extern void  virtio_cwrite16(struct virtio_device *vdev, unsigned int offset, __u16 val);
+extern void  virtio_cwrite32(struct virtio_device *vdev, unsigned int offset, __u32 val);
+
+/* Virtqueue surface — opaque type + entry-point declarations.
+ * M1-2-3 ships these as panic-on-call stubs; real virtqueue
+ * machinery lands at M1-2-5 when virtio-balloon online demands
+ * them (the gap-filling sub-block per HANDOFF). */
+struct virtqueue { unsigned char _opaque[16]; };
+
+extern int  find_vqs(struct virtio_device *vdev, unsigned int nvqs,
+                     struct virtqueue **vqs, const char *const *names);
+extern int  virtqueue_add_outbuf(struct virtqueue *vq, const void *sg,
+                                 unsigned int num, void *data,
+                                 unsigned int gfp);
+extern int  virtqueue_add_inbuf(struct virtqueue *vq, const void *sg,
+                                unsigned int num, void *data,
+                                unsigned int gfp);
+extern int  virtqueue_kick(struct virtqueue *vq);
+extern void *virtqueue_get_buf(struct virtqueue *vq, unsigned int *len);
 
 #endif /* ARSENAL_LINUXKPI_SHIM_C_H */

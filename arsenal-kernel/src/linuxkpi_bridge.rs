@@ -19,7 +19,7 @@
 //!   3. Document the safety contract on both sides — they must
 //!      match.
 
-use crate::{apic, frames, paging, pci};
+use crate::{apic, frames, paging, pci, virtio};
 use x86_64::PhysAddr;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
 
@@ -35,6 +35,26 @@ pub struct LinuxkpiMsixInfo {
     pub table_size: u32,
     pub table_bar: u32,
     pub table_offset: u32,
+}
+
+/// Flat C-shaped virtio-modern transport descriptor for
+/// `linuxkpi_virtio_resolve`. Mirrors `virtio::VirtioDevice`'s
+/// shape with raw u64 pointer values so linuxkpi can declare
+/// the same `#[repr(C)]` struct without dragging in
+/// arsenal-kernel types.
+#[repr(C)]
+pub struct LinuxkpiVirtioDev {
+    /// 1 if the function at (bus, dev, func) is a virtio device
+    /// with valid modern transport caps; 0 otherwise.
+    pub present: u32,
+    pub device_id: u16,
+    pub _pad0: u16,
+    pub common_cfg: u64,
+    pub notify_base: u64,
+    pub notify_off_multiplier: u32,
+    pub _pad1: u32,
+    pub isr: u64,
+    pub device_cfg: u64,
 }
 
 /// PCI config-space dword read. Delegates to `pci::config_read32`.
@@ -136,6 +156,50 @@ pub unsafe extern "C" fn linuxkpi_frames_free_frame(phys: u64) {
 #[unsafe(no_mangle)]
 pub extern "C" fn linuxkpi_lapic_eoi() {
     apic::send_eoi();
+}
+
+/// Resolve the virtio-modern transport at `(bus, dev, func)`
+/// into `*out`. Sets `out.present = 0` when the function is not
+/// a virtio device or lacks the modern capability set; sets
+/// `present = 1` and populates the rest when present. Mirrors
+/// `virtio::try_resolve` semantics — `want` is the PCI device_id
+/// to match (the caller has already filtered by virtio vendor).
+///
+/// # Safety
+/// `out` must point to writable storage of size + alignment
+/// matching `LinuxkpiVirtioDev`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtio_resolve(
+    bus: u8,
+    dev: u8,
+    func: u8,
+    want_device_id: u16,
+    out: *mut LinuxkpiVirtioDev,
+) {
+    if out.is_null() {
+        return;
+    }
+    match virtio::try_resolve(bus, dev, func, want_device_id) {
+        Some(d) => {
+            // SAFETY: out is non-null per the check; caller's
+            // contract ensures correct alignment + size.
+            unsafe {
+                (*out).present = 1;
+                (*out).device_id = d.device_id;
+                (*out)._pad0 = 0;
+                (*out).common_cfg = d.common_cfg as u64;
+                (*out).notify_base = d.notify_base as u64;
+                (*out).notify_off_multiplier = d.notify_off_multiplier;
+                (*out)._pad1 = 0;
+                (*out).isr = d.isr as u64;
+                (*out).device_cfg = d.device_cfg as u64;
+            }
+        }
+        None => {
+            // SAFETY: see above.
+            unsafe { (*out).present = 0 }
+        }
+    }
 }
 
 /// Read the MSI-X capability of `(bus, dev, func)` into `*out`.

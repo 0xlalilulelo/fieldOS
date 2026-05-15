@@ -86,7 +86,7 @@ pub fn find_device(device_id: u16) -> Option<VirtioDevice> {
     None
 }
 
-fn try_resolve(bus: u8, dev: u8, func: u8, want: u16) -> Option<VirtioDevice> {
+pub fn try_resolve(bus: u8, dev: u8, func: u8, want: u16) -> Option<VirtioDevice> {
     // SAFETY: standard PCI dword reads at dword-aligned offsets.
     let id = unsafe { pci::config_read32(bus, dev, func, 0x00) };
     if (id & 0xFFFF) as u16 != VIRTIO_VENDOR {

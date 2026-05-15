@@ -23,6 +23,15 @@
 //! frame allocator + no-op `dma_map_*` / `dma_sync_*` reflecting
 //! x86_64's cache-coherent DMA model.
 //!
+//! Added at M1-2-3: virtio bus adapter (`virtio`) — `struct
+//! virtio_driver` registration + .probe dispatch over the
+//! virtio-modern transport in arsenal-kernel; virtio_cread /
+//! virtio_cwrite typed accessors over device_cfg; virtqueue
+//! type + find_vqs / virtqueue_add_outbuf / virtqueue_kick /
+//! virtqueue_get_buf as panic-on-call stubs (real impls land
+//! at M1-2-5 when virtio-balloon's first call demands them).
+//! Closes the "shim foundation" devlog cluster.
+//!
 //! Surfaces deferred to later sub-blocks:
 //! - virtio bus adapter: M1-2-3.
 //! - `cc`-driven build of inherited C + first `vendor/linux-6.12/`
@@ -42,6 +51,7 @@ pub mod log;
 pub mod pci;
 pub mod slab;
 pub mod types;
+pub mod virtio;
 
 /// Self-test exercising the foundational shim primitives. Called
 /// from `arsenal-kernel/src/main.rs` during boot. Touches `printk`
@@ -252,6 +262,62 @@ pub fn self_test() {
         let v = core::ptr::read_volatile(p);
         assert_eq!(v, 0xDEAD_BEEF, "dma_alloc_coherent buffer is not coherent CPU<->CPU");
         dma::dma_free_coherent(core::ptr::null_mut(), 512, cpu_addr, handle);
+    }
+
+    // M1-2-3: virtio bus walk + no-op virtio_driver self-test.
+    // QEMU's smoke command line has virtio-blk + virtio-net +
+    // virtio-rng (3 functions); a no-op virtio_driver claiming
+    // VIRTIO_DEV_ANY_ID should see .probe fire 3 times.
+    let virtio_count = virtio::count_present();
+    log::pr(b"linuxkpi: virtio walk found ");
+    log_decimal(virtio_count);
+    log::pr(b" present devices\n");
+    assert!(
+        virtio_count >= 3,
+        "linuxkpi: expected >= 3 virtio devices (blk + net + rng); got {virtio_count}"
+    );
+
+    {
+        static VIRTIO_MATCH_COUNT: locks::AtomicInt = locks::AtomicInt::new(0);
+        unsafe extern "C" fn noop_virtio_probe(
+            _vdev: *mut virtio::virtio_device,
+        ) -> types::c_int {
+            VIRTIO_MATCH_COUNT.inc();
+            -1 // signal "did not bind" (Linux convention: negative
+               // probe return means the driver declined)
+        }
+        static VIRTIO_ID_TABLE: [virtio::virtio_device_id; 2] = [
+            virtio::virtio_device_id {
+                device: virtio::VIRTIO_DEV_ANY_ID,
+                vendor: virtio::VIRTIO_DEV_ANY_ID,
+            },
+            virtio::virtio_device_id { device: 0, vendor: 0 },
+        ];
+        let mut driver = virtio::virtio_driver {
+            name: c"linuxkpi-virtio-self-test".as_ptr(),
+            id_table: VIRTIO_ID_TABLE.as_ptr(),
+            probe: Some(noop_virtio_probe),
+            remove: None,
+        };
+        // SAFETY: driver lives on this stack for the registration
+        // window; register_virtio_driver dispatches probe
+        // synchronously and unregister clears the registry entry
+        // before the stack frame ends.
+        unsafe {
+            let rc = virtio::register_virtio_driver(
+                &mut driver as *mut virtio::virtio_driver,
+            );
+            assert_eq!(rc, 0, "register_virtio_driver returned non-zero");
+        }
+        let matches = VIRTIO_MATCH_COUNT.read() as usize;
+        assert_eq!(
+            matches, virtio_count,
+            "no-op virtio_driver should match every present device (got {matches}, expected {virtio_count})"
+        );
+        // SAFETY: pairs with the register above.
+        unsafe {
+            virtio::unregister_virtio_driver(&mut driver as *mut virtio::virtio_driver);
+        }
     }
 
     log::pr(b"ARSENAL_LINUXKPI_OK\n");
