@@ -1,0 +1,26 @@
+[package]
+name = "linuxkpi"
+version = "0.0.0"
+edition = "2024"
+license = "BSD-2-Clause"
+publish = false
+
+# LinuxKPI shim — Rust adapters presenting a Linux-kernel-shaped API
+# surface to inherited Linux 6.12 LTS drivers vendored under
+# vendor/linux-6.12/. Structural layout + GPL/BSD-2 boundary
+# discipline: docs/adrs/0005-linuxkpi-shim-layout.md.
+#
+# At M1-2-0 the crate is an empty no_std skeleton — `cargo check`
+# accepts it but no shim API surface exists yet. The foundational
+# surface (printk, slab, locks, atomics) lands at M1-2-1; the
+# PCI / IRQ / DMA bridge at M1-2-2; the virtio bus adapter at
+# M1-2-3; the cc-driven build of inherited C at M1-2-4; the
+# first inherited driver (virtio-balloon) coming online at M1-2-5.
+
+[lib]
+name = "linuxkpi"
+path = "src/lib.rs"
+test = false
+bench = false
+
+[dependencies]

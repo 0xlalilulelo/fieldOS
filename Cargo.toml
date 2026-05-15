@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["arsenal-kernel", "xtask"]
+members = ["arsenal-kernel", "linuxkpi", "xtask"]
 
 [profile.release]
 panic = "abort"
