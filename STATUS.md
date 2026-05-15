@@ -111,20 +111,51 @@ Posture changes carrying to M1 step 2:
 ### Active work
 
 **M1 step 2 — LinuxKPI shim foundation + first inherited
-driver.** No sub-block yet; next session writes the step-2
-HANDOFF. The shim is ARSENAL.md's "single largest
-engineering task" of M1 — 12-20 part-time weeks budgeted,
-and morale-load-bearing because the shim doesn't ship
-anything user-visible on its own. Step-2 HANDOFF should
-include explicit intermediate milestones ("one shim API
-surface lands + compiles + has a smoke test, repeat") so
-progress is visible week-over-week.
+driver.** Step-2 HANDOFF landed at `5fb0382` with a 7-sub-
+block decomposition; **M1-2-0 complete** (2026-05-14, four
+commits: HANDOFF + ADR-0005 + empty `linuxkpi/` workspace
+member skeleton + lockfile). The shim is ARSENAL.md's
+"single largest engineering task" of M1 — 12-20 part-time
+weeks budgeted, ~14-17 weeks projected per the step
+HANDOFF's calendar arithmetic, morale-load-bearing because
+the shim doesn't ship anything user-visible on its own.
+Step-2 HANDOFF discipline: one shim API surface lands +
+compiles + has a smoke test, repeat — bisect-rich
+checkpoints week-over-week.
 
-First inherited driver target (decided at step-2 HANDOFF
-kickoff): virtio-balloon (~600 LOC inherited C, pure
-virtio-bus interaction) is the milestone-HANDOFF
-recommendation. e1000 (~3000 LOC, more shim surface tested
-early) is the alternative.
+M1-2-0 structural picks (ADR-0005):
+- Single Cargo workspace member `linuxkpi/` (peer to
+  arsenal-kernel + xtask). Three-crate split deferred to a
+  successor ADR when amdgpu confirms it.
+- `cc` build-dep crate compiles inherited C from
+  `linuxkpi/build.rs` at M1-2-4. Host Linux Kbuild rejected
+  on macOS-CI grounds.
+- Minimal hand-curated header subset under
+  `vendor/linux-6.12/`; per-driver expansion at each step
+  kickoff via `find-include-graph` audit.
+- Directory-based GPL/BSD-2 boundary, build-system
+  enforced. `linuxkpi/*` = BSD-2; `vendor/linux-6.12/*` =
+  upstream Linux SPDX preserved.
+- Bidirectional FFI; hand-written `linuxkpi/include/
+  shim_c.h`. cbindgen deferred (MPL-2.0 attention; revisit
+  at ~1500 lines or M1 step 5).
+- Synchronous module init at M1; deferred-path stubs
+  (schedule_work, queue_work, kthread_run) panic-on-call.
+
+**Next sub-block: M1-2-1** — foundational shim API surface.
+C-FFI integer typedefs + printk + pr_* family + kmalloc /
+kfree honoring GFP_KERNEL/GFP_ATOMIC + mutex / spinlock /
+atomic_t + container_of / BUG_ON / WARN_ON + jiffies /
+msleep / udelay + copy_*_user stubs that BUG_ON. Self-test
+fires from kernel main, emits `ARSENAL_LINUXKPI_OK`.
+~600-800 LOC shim Rust + ~80 LOC `shim_c.h`. One commit:
+`feat(linuxkpi): foundational types + printk + slab + locks
++ atomics`. HANDOFF estimates 2-3 focused sessions / ~3
+calendar weeks.
+
+First inherited driver target (re-confirmed at step-2
+HANDOFF): virtio-balloon (~600 LOC inherited C, pure
+virtio-bus interaction). Lands at M1-2-5.
 
 Expected pace for M1 overall: substantially slower than
 M0 or M1 step 1. The ARSENAL.md month-9-to-month-24 budget
