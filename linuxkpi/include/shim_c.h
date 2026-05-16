@@ -287,4 +287,74 @@ extern int  virtqueue_add_inbuf(struct virtqueue *vq, const void *sg,
 extern int  virtqueue_kick(struct virtqueue *vq);
 extern void *virtqueue_get_buf(struct virtqueue *vq, unsigned int *len);
 
+/* ---- <linux/kernel.h> + <linux/bug.h> macros ---- */
+
+/* container_of — recover the containing struct pointer from a
+ * member pointer. Linux <linux/kernel.h> idiom. Requires GNU
+ * typeof() extension which clang supports under -x c. */
+#define container_of(ptr, type, member) \
+    ((type *)((char *)(ptr) - offsetof(type, member)))
+
+/* BUG_ON / WARN_ON dispatch through the Rust shim; the helper
+ * receives __FILE__ + __LINE__ + the stringified condition for
+ * diagnostic output. WARN_ON returns the predicate value so
+ * inherited C can `if (WARN_ON(cond)) return -EINVAL;`. */
+extern void linuxkpi_bug(const char *file, int line, const char *cond)
+    __attribute__((noreturn));
+extern void linuxkpi_warn(const char *file, int line, const char *cond);
+
+#define BUG_ON(cond) \
+    do { if (cond) linuxkpi_bug(__FILE__, __LINE__, #cond); } while (0)
+#define WARN_ON(cond) \
+    ((cond) ? (linuxkpi_warn(__FILE__, __LINE__, #cond), 1) : 0)
+/* M1: no once-tracking; degenerates to WARN_ON. */
+#define WARN_ON_ONCE(cond) WARN_ON(cond)
+#define WARN_ONCE(cond, ...) WARN_ON(cond)
+
+/* ---- <linux/err.h> ---- */
+
+#define MAX_ERRNO 4095
+
+extern void *ERR_PTR(long error);
+extern long  PTR_ERR(const void *ptr);
+extern int   IS_ERR(const void *ptr);
+extern int   IS_ERR_OR_NULL(const void *ptr);
+
+/* ---- <linux/list.h> ---- */
+
+struct list_head {
+    struct list_head *next, *prev;
+};
+
+#define LIST_HEAD_INIT(name) { &(name), &(name) }
+#define LIST_HEAD(name) struct list_head name = LIST_HEAD_INIT(name)
+
+extern void INIT_LIST_HEAD(struct list_head *list);
+extern void list_add(struct list_head *new_, struct list_head *head);
+extern void list_add_tail(struct list_head *new_, struct list_head *head);
+extern void list_del(struct list_head *entry);
+extern int  list_empty(const struct list_head *head);
+
+#define list_entry(ptr, type, member) container_of(ptr, type, member)
+#define list_for_each_entry(pos, head, member) \
+    for (pos = list_entry((head)->next, typeof(*pos), member); \
+         &pos->member != (head); \
+         pos = list_entry(pos->member.next, typeof(*pos), member))
+
+/* ---- <linux/jiffies.h> + <linux/delay.h> ---- */
+
+#define HZ 100UL  /* arsenal-kernel LAPIC calibration; see time.rs */
+
+extern unsigned long jiffies(void);
+extern void msleep(unsigned int msecs);
+extern void udelay(unsigned int usecs);
+extern void ndelay(unsigned int nsecs);
+
+/* ---- <linux/uaccess.h> ---- */
+
+#define __user  /* nothing — Linux annotation kept for source compat */
+
+extern unsigned long copy_to_user(void *to, const void *from, unsigned long n);
+extern unsigned long copy_from_user(void *to, const void *from, unsigned long n);
+
 #endif /* ARSENAL_LINUXKPI_SHIM_C_H */

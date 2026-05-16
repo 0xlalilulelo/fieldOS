@@ -20,6 +20,13 @@
 //!      match.
 
 use crate::{apic, frames, paging, pci, virtio};
+
+/// Read the global LAPIC tick counter. M1-2-5 Part A: backs
+/// linuxkpi's `jiffies` / `msleep` / `udelay` over apic::ticks().
+#[unsafe(no_mangle)]
+pub extern "C" fn linuxkpi_jiffies() -> u64 {
+    apic::ticks() as u64
+}
 use x86_64::PhysAddr;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
 

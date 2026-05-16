@@ -32,6 +32,26 @@
 //! at M1-2-5 when virtio-balloon's first call demands them).
 //! Closes the "shim foundation" devlog cluster.
 //!
+//! Added at M1-2-4: cc-build infrastructure (`build.rs`) +
+//! BSD-2 `linuxkpi/csrc/smoke.c` validating the Rust↔C↔Rust
+//! FFI loop end-to-end + GPLv2-fenced `vendor/linux-6.12/`
+//! directory.
+//!
+//! Added at M1-2-5 Part A: gap-filling shim primitives the
+//! HANDOFF M1-2-5 named for "when first inherited driver
+//! demands them": `macros` (`container_of!` + `BUG_ON` /
+//! `WARN_ON` shims), `err` (IS_ERR / ERR_PTR / PTR_ERR), `list`
+//! (intrusive doubly-linked list), `time` (jiffies + msleep +
+//! udelay over LAPIC TICKS), `userspace` (copy_*_user
+//! panic-on-call stubs — no userspace until M2). Translated
+//! from canonical kernel-docs descriptions without copying
+//! upstream Linux source verbatim.
+//!
+//! M1-2-5 Part B (deferred to a follow-up session): vendor
+//! upstream Linux 6.12 LTS subset (~20 headers + virtio_
+//! balloon.c) + first balloon compile + iteration on shim API
+//! gaps + ARSENAL_VIRTIO_BALLOON_OK sentinel.
+//!
 //! Surfaces deferred to later sub-blocks:
 //! - virtio bus adapter: M1-2-3.
 //! - `cc`-driven build of inherited C + first `vendor/linux-6.12/`
@@ -45,12 +65,17 @@
 #![feature(abi_x86_interrupt)]
 
 pub mod dma;
+pub mod err;
 pub mod irq;
+pub mod list;
 pub mod locks;
 pub mod log;
+pub mod macros;
 pub mod pci;
 pub mod slab;
+pub mod time;
 pub mod types;
+pub mod userspace;
 pub mod virtio;
 
 /// Self-test exercising the foundational shim primitives. Called
@@ -331,6 +356,81 @@ pub fn self_test() {
         // SAFETY: pairs with the register above.
         unsafe {
             virtio::unregister_virtio_driver(&mut driver as *mut virtio::virtio_driver);
+        }
+    }
+
+    // M1-2-5 Part A: gap-filling primitives validation. Each
+    // primitive gets a small round-trip assertion; future
+    // inherited-driver compile failures should never trip these
+    // (they're independently smoke-validated).
+
+    // err: ERR_PTR(-12) round-trips through PTR_ERR; IS_ERR
+    // returns 1 for the encoded ptr, 0 for NULL.
+    unsafe {
+        let p = err::ERR_PTR(-12);
+        assert_eq!(err::IS_ERR(p), 1, "IS_ERR should fire on ERR_PTR(-12)");
+        assert_eq!(err::PTR_ERR(p), -12, "PTR_ERR should round-trip -12");
+        assert_eq!(err::IS_ERR(core::ptr::null()), 0, "IS_ERR(NULL) should be 0");
+        assert_eq!(err::IS_ERR_OR_NULL(core::ptr::null()), 1, "IS_ERR_OR_NULL(NULL) should be 1");
+    }
+
+    // list: build a 3-element list, count via the next pointers,
+    // remove the middle, count again, assert empty after deleting
+    // all.
+    {
+        let mut head = list::list_head::new();
+        let mut a = list::list_head::new();
+        let mut b = list::list_head::new();
+        let mut c = list::list_head::new();
+        // SAFETY: heads live on this stack frame for the test;
+        // pointers are valid until end of block.
+        unsafe {
+            list::INIT_LIST_HEAD(&mut head);
+            list::INIT_LIST_HEAD(&mut a);
+            list::INIT_LIST_HEAD(&mut b);
+            list::INIT_LIST_HEAD(&mut c);
+            list::list_add_tail(&mut a, &mut head);
+            list::list_add_tail(&mut b, &mut head);
+            list::list_add_tail(&mut c, &mut head);
+            assert_eq!(list::list_empty(&head), 0, "list with 3 entries should not be empty");
+            list::list_del(&mut b);
+            assert_eq!(list::list_empty(&b), 1, "deleted entry should self-link (list_empty == 1)");
+            list::list_del(&mut a);
+            list::list_del(&mut c);
+            assert_eq!(list::list_empty(&head), 1, "list with all entries removed should be empty");
+        }
+    }
+
+    // time: jiffies bridge is callable + returns. Cannot assert
+    // advancement here — linuxkpi::self_test runs before sched::run's
+    // sti at boot (main.rs:334 vs sched.rs:362 today), so the LAPIC
+    // timer interrupt has never fired and TICKS is still 0. msleep's
+    // busy-wait would spin forever for the same reason. Functional
+    // advance + msleep get exercised once an inherited driver
+    // (M1-2-5 Part B's virtio-balloon) calls them post-sti.
+    let _t = time::jiffies();
+
+    // container_of: standard pointer arithmetic round-trip.
+    {
+        #[repr(C)]
+        struct Outer {
+            a: u32,
+            inner: list::list_head,
+            b: u32,
+        }
+        let outer = Outer {
+            a: 0xCAFE,
+            inner: list::list_head::new(),
+            b: 0xBEEF,
+        };
+        let inner_ptr = &outer.inner as *const list::list_head;
+        let recovered: *const Outer = container_of!(inner_ptr, Outer, inner);
+        assert_eq!(recovered as *const _ as usize, &outer as *const _ as usize,
+            "container_of! should recover the outer struct pointer");
+        // SAFETY: recovered points to outer which is alive on this stack.
+        unsafe {
+            assert_eq!((*recovered).a, 0xCAFE);
+            assert_eq!((*recovered).b, 0xBEEF);
         }
     }
 
