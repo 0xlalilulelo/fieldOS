@@ -464,6 +464,47 @@ session-count optimism stops applying; treating it as
 3-5 sessions / ~3-4 calendar weeks remains the right
 posture even though ADR-0006 cleaned up the scope.
 
+**Sub-task 3 in flight — compile-error iteration underway.**
+Each round resolves one `#include` in balloon.c by adding a
+BSD-2 `linuxkpi/include/linux/*.h` proxy (+ shim_c.h / Rust
+shim growth as needed); balloon.c stays out of `build.rs`'s
+source manifest (probed via a direct `clang` invocation), and
+`main` is green at every commit per the build-loop-is-sacred
+discipline. Rounds landed so far:
+
+  - Rounds 1-3 (prior sessions, `3782bc8`..`25b8b48`): virtio.h,
+    types.h, virtio_config.h (+ `__le`/`__be` aliases), swap.h
+    (+ mm.rs stubs).
+  - Round 4 `9bb8fd3`: workqueue.h + workqueue.rs panic stubs.
+  - Round 5 `488fd10`: delay.h (over existing time.rs).
+  - Round 6 `ac43a2f`: slab.h + 4 GFP modifier flags.
+  - Round 7 `3396e8d`: module.h (no-op metadata + module_driver
+    shape; init-invocation mechanism deferred to the closing
+    commit).
+  - **ADR-0007 `8f35963`: struct page is a thin per-frame handle**
+    (not a mem_map array) — first-use decision forced by
+    balloon_compaction.h; foundational for every later mm-touching
+    driver. Took the 0007 slot; the three ADR-0006 provisional
+    reservations shifted up by one (three-crate → 0008, cbindgen
+    → 0009, deferred init → 0010).
+  - Round 8 `864aa62`: balloon_compaction.h + struct page in
+    shim_c.h + page.rs stubs. CONFIG_BALLOON_COMPACTION left
+    undefined collapses balloon's whole migration path, so the
+    header is minimal (3-field balloon_dev_info, no
+    migratepage/enum migrate_mode).
+
+balloon resolves 9 of its top-level includes; **4 remain**:
+`oom.h` (line 17, next — OOM-notifier / shrinker surface),
+`wait.h` (18), `mm.h` (19 — pulls page_to_pfn / page_address /
+alloc_pages / put_page over the ADR-0007 struct page),
+`page_reporting.h` (20). After the include set resolves, the
+deeper body errors begin (struct-field references, `virtio_
+cread_le`, the virtqueue panic-stubs balloon actually calls).
+The 2026-05-27 session ran 6 of these rounds + ADR-0007; the
+"step away for a day" cue is available — sub-task 3 is the
+unbudgetable arc and pacing against the 3-5-session estimate
+(not session-count optimism) is the right posture.
+
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
 virtio-bus interaction). Lands at M1-2-5.
