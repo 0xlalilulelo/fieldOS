@@ -34,4 +34,17 @@
 #define __iomem
 #endif
 
+/* Endian-tagged integer aliases. Linux defines these via the
+ * __bitwise sparse annotation; outside sparse, they're indistinguish-
+ * able from the underlying __uN. On x86_64 (Arsenal's M1 target),
+ * CPU order matches little-endian so __leN is a no-op alias and
+ * __beN needs explicit byteswap at every read/write site that
+ * cares — virtio's __leN fields are the common case. */
+typedef __u16 __bitwise __le16;
+typedef __u32 __bitwise __le32;
+typedef __u64 __bitwise __le64;
+typedef __u16 __bitwise __be16;
+typedef __u32 __bitwise __be32;
+typedef __u64 __bitwise __be64;
+
 #endif /* ARSENAL_LINUXKPI_LINUX_TYPES_H */

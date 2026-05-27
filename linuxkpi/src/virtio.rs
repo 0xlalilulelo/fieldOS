@@ -432,6 +432,63 @@ pub unsafe extern "C" fn virtqueue_get_buf(
 }
 
 // =====================================================================
+// virtio_config.h helpers — panic-on-call stubs landed during
+// M1-2-5 Part B sub-task 3's iteration arc. Real implementations
+// land in the M1-2-5-closing commit alongside balloon.c being
+// added to the build.rs manifest end-to-end. Per the established
+// shim discipline: declared symbols fail loudly at runtime rather
+// than silently returning bad values.
+// =====================================================================
+
+/// `virtio_has_feature` — test whether the negotiated feature
+/// set for `vdev` has the bit `fbit` set. Real impl needs a
+/// negotiated-features field on `struct virtio_device` (mirrored
+/// in shim_c.h); deferred to the M1-2-5-closing commit.
+///
+/// # Safety
+/// Calling this during M1-2-5 Part B iteration arc panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn virtio_has_feature(
+    _vdev: *const virtio_device,
+    _fbit: c_uint,
+) -> bool {
+    panic!("linuxkpi: virtio_has_feature not yet implemented (lands at M1-2-5 close)")
+}
+
+/// `virtio_device_ready` — set the DRIVER_OK status bit on
+/// `vdev`. Real impl writes to common_cfg.device_status.
+///
+/// # Safety
+/// Calling this during M1-2-5 Part B iteration arc panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn virtio_device_ready(_vdev: *mut virtio_device) {
+    panic!("linuxkpi: virtio_device_ready not yet implemented (lands at M1-2-5 close)")
+}
+
+/// `virtio_reset_device` — clear device status (status = 0).
+/// Real impl writes 0 to common_cfg.device_status and waits for
+/// the device to ack per virtio v1.2 § 2.1.2.
+///
+/// # Safety
+/// Calling this during M1-2-5 Part B iteration arc panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn virtio_reset_device(_vdev: *mut virtio_device) {
+    panic!("linuxkpi: virtio_reset_device not yet implemented (lands at M1-2-5 close)")
+}
+
+/// `virtio_clear_bit` — clear feature bit `fbit` on `vdev`'s
+/// driver-features set. Real impl clears the bit in the
+/// negotiated-features storage AND writes the updated word to
+/// common_cfg.driver_feature.
+///
+/// # Safety
+/// Calling this during M1-2-5 Part B iteration arc panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn virtio_clear_bit(_vdev: *mut virtio_device, _fbit: c_uint) {
+    panic!("linuxkpi: virtio_clear_bit not yet implemented (lands at M1-2-5 close)")
+}
+
+// =====================================================================
 // Internal helpers.
 // =====================================================================
 
