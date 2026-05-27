@@ -265,7 +265,11 @@ preserved in git history (`b2dd46f`) in case a future
   reservation shifts to **ADR-0007**; cbindgen adoption shifts to
   **ADR-0008**; deferred init via kthread+workqueue shifts to
   **ADR-0009**. (Recorded as a small inline edit to ADR-0005's
-  "Reserved successor ADRs" list in this same commit.)
+  "Reserved successor ADRs" list in this same commit.) *Superseded
+  by ADR-0007 (`struct page` thin handle), which took the 0007 slot
+  as a first-use decision forced earlier than these three; the
+  reservations shift up by one again — three-crate split → ADR-0008,
+  cbindgen → ADR-0009, deferred init → ADR-0010.*
 
 ## Consequences
 
@@ -402,7 +406,9 @@ preserved in git history (`b2dd46f`) in case a future
   inline edit in this commit): the provisional reservations
   shift up by one — ADR-0007 (three-crate split), ADR-0008
   (cbindgen adoption), ADR-0009 (deferred init via kthread +
-  workqueue).
+  workqueue). *(Shifted again by ADR-0007's first-use claim on
+  the 0007 slot: three-crate split → ADR-0008, cbindgen →
+  ADR-0009, deferred init → ADR-0010.)*
 
 - **ARSENAL.md does not need modification.** Per CLAUDE.md,
   the plan is not edited unless the deviation is structural.
