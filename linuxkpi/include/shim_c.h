@@ -380,6 +380,25 @@ struct page {
     void            *_private;
 };
 
+/* ---- <linux/notifier.h> ---- */
+
+/* Notifier-chain callback. Forward-declare struct notifier_block
+ * ahead of the typedef so the function-pointer parameter doesn't
+ * trip clang's -Wvisibility (cf. the workqueue.h fix). */
+struct notifier_block;
+typedef int (*notifier_fn_t)(struct notifier_block *nb,
+                             unsigned long action, void *data);
+
+struct notifier_block {
+    notifier_fn_t          notifier_call;
+    struct notifier_block *next;   /* chain linkage; managed by register */
+    int                    priority;
+};
+
+/* Notifier return codes — balloon's OOM callback returns NOTIFY_OK. */
+#define NOTIFY_DONE 0x0000
+#define NOTIFY_OK   0x0001
+
 /* ---- <linux/jiffies.h> + <linux/delay.h> ---- */
 
 #define HZ 100UL  /* arsenal-kernel LAPIC calibration; see time.rs */
