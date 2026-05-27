@@ -337,98 +337,132 @@ unchanged):
 | 2-3 virtio bus | 2-3 sessions | 1 session |
 | 2-4 cc-build infra | 2-3 sessions | 1 session |
 | 2-5 Part A gap-fill | (split) | 1 session |
-| **subtotal** | **~13-14 sessions** | **~6.5 sessions** |
+| 2-5 Part B sub-tasks 1+2 | (split) | 1 session (ADR-0006 triggered) |
+| **subtotal so far** | **~13-14 sessions** | **~7.5 sessions** |
 
 Smoke output at Part A exit: PASS, 15 sentinels in 1465 ms,
 boot→prompt 184 ms (well under BOOT_BUDGET_MS=3000).
-`ARSENAL_LINUXKPI_OK` now covers the new primitives.
+`ARSENAL_LINUXKPI_OK` now covers the new primitives. Smoke
+unchanged through Part B sub-tasks 1+2 (script + ADR, no
+kernel code).
 
-**Next sub-block: M1-2-5 Part B — vendoring + virtio-balloon
-online.** Pure-scoping read-only work has answered the M1-2-4
-scope question:
+**M1-2-5 Part B in flight — ADR-0006 reshaped the vendoring
+discipline.** Sub-task 1 (recursive vendor-fetch script,
+`1e6fba9` + the include-resolution / license-gate fix at
+`b2dd46f`) landed clean — 279 LOC bash: curls balloon.c,
+greps its `^#include <{linux,asm,asm-generic,uapi}/...>`
+references, BFS-recurses with cycle detection, deduplicates,
+writes under `vendor/linux-6.12/`, records the upstream SHA.
+Sub-task 2 ran the script against `torvalds/linux` v6.12 to
+materialize balloon's transitive closure; three falsifications
+of ADR-0005 § 3's assumptions surfaced in one session and
+triggered ADR-0006 (`16f6d4d`):
 
-  - **curl on raw.githubusercontent.com is the fetch path.**
-    Already confirmed in-session at M1-2-4; reconfirmed here
-    against `torvalds/linux/v6.12/drivers/virtio/virtio_
-    balloon.c`. WebFetch (the ToolSearch-deferred tool) is
-    not needed; a recursive include-scraper bash script
-    (curl + grep `^#include <linux/.*>` + cycle-detect)
-    can pull the closure mechanically in one pass.
+  1. **Closure size is qualitatively wrong.** virtio-balloon
+     — the simplest possible inherited driver — pulled 281
+     transitive headers before BFS halted on an unresolvable
+     include, and 281 is not even complete. ADR-0005 § 3's
+     "~20" estimate is off ~14×; the Part B scoping
+     `~80-150` guess in the prior STATUS revision was off
+     ~2-3×. Growth is super-linear in driver complexity:
+     amdgpu would pull thousands.
 
-  - **balloon.c is 1223 LOC** (vs the M1-2-2 HANDOFF
-    estimate of ~600). Surface area roughly 2× the
-    original projection. Still the cleanest first
-    inherited driver (pure virtio-bus, no device-MMIO
-    BAR work, no DMA scatter-gather, no hardware-quirk
-    workarounds).
+  2. **Some required headers don't exist in upstream as
+     files.** `<asm/hash.h>` (transitively pulled by
+     `<linux/hash.h>`) is synthesized at compile time by
+     Kbuild's `generic-y` / `mandatory-y` rules in
+     `arch/<arch>/include/asm/Kbuild` and
+     `include/asm-generic/Kbuild`. Verbatim vendoring
+     literally cannot capture this class of header.
 
-  - **Top-level #include count: 12** (virtio.h,
-    virtio_balloon.h, swap.h, workqueue.h, delay.h,
-    slab.h, module.h, balloon_compaction.h, oom.h,
-    wait.h, mm.h, page_reporting.h).
+  3. **Vendored Linux headers force inheriting
+     implementation details we already substitute for.**
+     `struct mm_struct`, `spinlock_t`, percpu allocator
+     slot layout, Linux scheduler classes, KASAN shadow
+     memory — each has an Arsenal-side Rust substitute
+     under `arsenal-kernel/src/`. The shim is *exactly*
+     the layer ADR-0005 was supposed to isolate this
+     duplication into.
 
-  - **Transitive closure is the real cost.** mm.h alone
-    `#include`s 33 other headers; swap.h 13; oom.h 6;
-    balloon_compaction.h 7. Realistic full closure
-    (resolving recursively, deduplicating, excluding
-    arch/x86 paths that the Rust kernel substitutes for):
-    ~80-150 headers. Each must be vendored verbatim with
-    SPDX preserved per ADR-0005 § 3 — the headers-are-
-    verbatim discipline applies regardless of whether
-    they declare types/fns the shim actually implements.
+**ADR-0006's pivot:** `linuxkpi/include/` IS the Linux
+header surface — BSD-2-licensed Arsenal-authored
+reimplementations matching just-enough Linux 6.12 LTS API
+for the inherited drivers we host. The FreeBSD drm-kmod
+precedent is the model: 10 years of proven operation,
+combined-work model legally clean (BSD-headers + GPL-.c-
+source). The shim's `shim_c.h` has been operating this way
+since M1-2-1; ADR-0006 codifies it and retires the
+"vendor headers verbatim" discipline ADR-0005 § 3
+committed to as an unforced parallel burden. Verbatim
+vendoring still holds for inherited `.c` source and a
+**narrow UAPI carve-out** (BSD-licensed protocol/ABI
+headers — for balloon: `virtio_balloon.h`, `virtio_ids.h`,
+`virtio_types.h`). `vendor/linux-6.12/` is currently
+`README.md` only — sub-task 2's partial 281-file tree was
+cleaned before commit per ADR-0006 § 4.
 
-Part B sub-tasks (in order — bisect-rich seams):
+Remaining Part B sub-tasks (post-ADR-0006 shape):
 
-  1. Write a recursive vendor-fetch script
-     (`xtask vendor-linux <driver>` or
-     `scripts/vendor-balloon.sh`) that curls balloon.c,
-     greps its top-level `<linux/*.h>` includes, recurses
-     into each, deduplicates, writes everything under
-     `vendor/linux-6.12/include/linux/*.h` +
-     `vendor/linux-6.12/drivers/virtio/virtio_balloon.c`.
-     Records the SHA the fetch was pulled at. ~50 LOC
-     bash. Bisect seam.
+  1. **Simplify `scripts/vendor-balloon.sh`** from 279
+     LOC (recursive closure-walker) to ~60-80 LOC (named-
+     file fetcher: balloon.c + the three BSD UAPI carve-
+     out headers; no recursion, no candidate resolution,
+     no Kbuild emulation). Recursive form preserved in
+     git history at `b2dd46f` for any future "audit-what-
+     the-full-closure-would-be" question. Bisect seam.
 
-  2. Run the script. Observe actual closure size and
-     surface anything ADR-0005 § 3's "minimal subset"
-     wording doesn't account for (arch/x86 includes,
-     uapi/, asm-generic/). If closure exceeds ~150
-     headers or pulls into uapi/asm-generic in surprising
-     ways, write an ADR-0005 amendment (ADR-0006?)
-     codifying the actual scope before vendoring more.
-     Bisect seam.
+  2. **Re-vendor under ADR-0006's discipline:**
+     `vendor/linux-6.12/drivers/virtio/virtio_balloon.c`
+     + `vendor/linux-6.12/include/uapi/linux/{virtio_
+     balloon,virtio_ids,virtio_types}.h`. Each UAPI
+     header carries its upstream BSD/dual-license SPDX
+     preserved; the vendoring commit body names the
+     (license, content, transcription-risk) triple per
+     ADR-0006 § 3 for each carve-out. Bisect seam.
 
-  3. Add `vendor/linux-6.12/drivers/virtio/virtio_balloon.c`
-     to `linuxkpi/build.rs`'s source manifest. Attempt
-     first compile. The error stream IS the work — each
-     missing type / undefined macro / unknown function
-     either extends `shim_c.h` (preprocessor macro or
-     extern decl) or extends a `linuxkpi/src/*.rs` module
-     (Rust implementation). Compile-error iteration is
-     the unbudget-able part — HANDOFF estimates 3-5
-     sessions worth.
+  3. **Add balloon.c to `linuxkpi/build.rs`'s source
+     manifest.** Attempt first compile. The error stream
+     IS the work — each missing type / undefined macro /
+     unknown function either extends a header under
+     `linuxkpi/include/linux/*.h` (reimplemented in BSD-2,
+     not vendored), grows `shim_c.h`, or extends a
+     `linuxkpi/src/*.rs` module. Compile-error iteration
+     is the unbudget-able part — HANDOFF estimate 3-5
+     sessions worth; ADR-0006 doesn't change that estimate
+     (the work moves from "vendor a header" to "write a
+     BSD-2 header declaring the same surface," net cost
+     similar). Bisect seam at each new header file or
+     shim module landed.
 
-  4. ARSENAL_VIRTIO_BALLOON_OK sentinel: balloon device
-     probe fires through linuxkpi::virtio's driver
-     registration, balloon's `init_vqs` succeeds against
-     a real virtqueue (which means M1-2-3's panic-on-call
+  4. **ARSENAL_VIRTIO_BALLOON_OK sentinel:** balloon
+     device probe fires through linuxkpi::virtio's
+     driver registration, balloon's `init_vqs` succeeds
+     against a real virtqueue (M1-2-3's panic-on-call
      virtqueue stubs get their first real implementation
-     swap-in, driven by what balloon actually calls), one
-     stats report round-trip lands on the host. Smoke
-     command line needs `-device virtio-balloon-pci`
-     added. Bisect seam.
+     swap-in, driven by what balloon actually calls),
+     one stats report round-trip lands on the host.
+     Smoke command line needs `-device virtio-balloon-
+     pci` added. Bisect seam.
 
-  5. M1-2-6 paper + retro close out M1 step 2.
+  5. M1-2-6 paper + retro close out M1 step 2. Three
+     devlogs per the HANDOFF cluster guidance: shim
+     foundation, GPL boundary, virtio-balloon. The
+     ADR-0006 finding goes in the GPL boundary devlog
+     and the step-2 retrospective — "the shim's
+     directional gravity has always been `shim_c.h` is
+     the surface" is one of the load-bearing observations
+     worth recording.
 
 **Per HANDOFF note #1: Part B is where the morale-
 load-bearing "step away for a day" cue applies most.**
-The cumulative M1-2 cadence (~6.5 sessions vs ~13-14
-HANDOFF estimate for 2-0 through 2-5 Part A) is still
-riding the post-pivot concentration window. Part B's
-deep transitive header graph + compile-error iteration
-is where session-count optimism stops applying;
-treating Part B as 3-5 sessions / ~3-4 calendar weeks
-remains the right posture.
+The cumulative M1-2 cadence (~7.5 sessions vs ~13-14
+HANDOFF estimate for 2-0 through 2-5 Part B sub-tasks
+1+2) is still riding the post-pivot concentration window,
+though the ADR-0006 detour absorbed one full session of
+the buffer. Sub-task 3's compile-error iteration is where
+session-count optimism stops applying; treating it as
+3-5 sessions / ~3-4 calendar weeks remains the right
+posture even though ADR-0006 cleaned up the scope.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
