@@ -47,6 +47,19 @@ typedef int64_t  loff_t;
 #define GFP_KERNEL  0x00000001U  /* may sleep; not from IRQ context */
 #define GFP_ATOMIC  0x00000002U  /* must not sleep */
 #define __GFP_ZERO  0x00000004U  /* zero-fill on alloc */
+/*
+ * Allocator modifier flags + GFP_NOWAIT. Arsenal-local bit values
+ * (not Linux's), distinct so OR'd combinations stay unambiguous;
+ * all advisory at M1 — slab.rs ignores the flags argument (the
+ * GFP_KERNEL-from-IRQ "may sleep" distinction is documented there
+ * and enforced at M2). balloon reaches these via slab.h: GFP_NOWAIT
+ * on a fill-balloon inbuf, the three __GFP_* in its free-page
+ * alloc-flag macro (virtio_balloon.c:33).
+ */
+#define __GFP_NORETRY    0x00000008U  /* don't retry / loop on failure */
+#define __GFP_NOWARN     0x00000010U  /* suppress allocation-failure warning */
+#define __GFP_NOMEMALLOC 0x00000020U  /* never dip into emergency reserves */
+#define GFP_NOWAIT       0x00000040U  /* atomic, no reclaim, no warn-on-fail */
 
 /* ---- <linux/printk.h> + <linux/kern_levels.h> ---- */
 
