@@ -353,6 +353,32 @@ extern int  list_empty(const struct list_head *head);
     for (pos = list_entry((head)->next, typeof(*pos), member); \
          &pos->member != (head); \
          pos = list_entry(pos->member.next, typeof(*pos), member))
+#define list_first_entry(ptr, type, member) \
+    list_entry((ptr)->next, type, member)
+/* list_first_entry_or_null — first entry, or NULL on an empty list.
+ * Evaluates `ptr` once (the statement-expression head__ binding).
+ * balloon_page_pop relies on this. */
+#define list_first_entry_or_null(ptr, type, member) ({ \
+    struct list_head *head__ = (ptr); \
+    struct list_head *first__ = head__->next; \
+    first__ != head__ ? list_entry(first__, type, member) : NULL; })
+
+/* ---- <linux/mm_types.h> ---- */
+
+/* struct page — thin per-frame handle per ADR-0007. NOT Linux's
+ * mem_map array element; a small descriptor allocated alongside the
+ * physical frame it represents. Inherited drivers touch only `lru`
+ * (via the list helpers above); the _-prefixed fields are shim-
+ * internal — _phys backs page_to_pfn / page_address, _refcount backs
+ * get_page / put_page, _private mirrors Linux's page.private. Filled
+ * by linuxkpi/src/page.rs; layout must stay in sync with the
+ * #[repr(C)] mirror there. */
+struct page {
+    struct list_head lru;
+    unsigned long    _phys;
+    int              _refcount;
+    void            *_private;
+};
 
 /* ---- <linux/jiffies.h> + <linux/delay.h> ---- */
 
