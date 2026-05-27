@@ -78,6 +78,7 @@ pub mod time;
 pub mod types;
 pub mod userspace;
 pub mod virtio;
+pub mod workqueue;
 
 /// Self-test exercising the foundational shim primitives. Called
 /// from `arsenal-kernel/src/main.rs` during boot. Touches `printk`
