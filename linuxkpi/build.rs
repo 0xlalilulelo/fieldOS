@@ -35,11 +35,17 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=csrc/smoke.c");
     println!("cargo:rerun-if-changed=include/shim_c.h");
+    println!("cargo:rerun-if-changed=include/linux");
+    println!("cargo:rerun-if-changed=../vendor/linux-6.12/include/uapi/linux");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Source manifest. M1-2-4: BSD-2 smoke only. M1-2-5 will
-    // append vendor/linux-6.12/drivers/virtio/virtio_balloon.c
-    // to this list once the upstream subset is vendored.
+    // Source manifest. M1-2-4: BSD-2 smoke only. The M1-2-5-
+    // closing commit appends vendor/linux-6.12/drivers/virtio/
+    // virtio_balloon.c alongside the linuxkpi/include/linux/*.h
+    // reimplementations + linuxkpi/src/*.rs additions needed to
+    // make it link green. Until then main stays green by leaving
+    // balloon.c out of the manifest; the iteration arc happens
+    // local-WIP per the build-loop-is-sacred discipline.
     let sources: &[&str] = &["csrc/smoke.c"];
 
     for path in sources {
@@ -99,8 +105,15 @@ fn main() {
                 "-Wno-unused-parameter",
                 "-Wno-unused-function",
                 "-O2",
+                // ADR-0006 § 1: linuxkpi/include/ provides the
+                // Linux API surface (BSD-2 reimplementations).
                 "-I", "include",
-                "-I", "../vendor/linux-6.12/include",
+                // ADR-0006 § 3: only the UAPI carve-out dir is
+                // exposed from vendor/, not the whole include/
+                // tree. <linux/virtio_balloon.h>,
+                // <linux/virtio_ids.h>, <linux/virtio_types.h>
+                // resolve here verbatim from upstream BSD-3.
+                "-I", "../vendor/linux-6.12/include/uapi",
                 "-c",
                 src,
                 "-o",
