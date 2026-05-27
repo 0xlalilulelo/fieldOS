@@ -71,6 +71,7 @@ pub mod list;
 pub mod locks;
 pub mod log;
 pub mod macros;
+pub mod mm;
 pub mod pci;
 pub mod slab;
 pub mod time;
