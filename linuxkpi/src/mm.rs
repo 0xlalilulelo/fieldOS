@@ -11,11 +11,13 @@
 //! cache; the unsupported metrics return zero in the eventual
 //! impl, not random kernel state.
 //!
-//! Also houses the <linux/oom.h> register/unregister entry points
-//! (added when balloon.c's #include <linux/oom.h> surfaced): Arsenal
-//! has no OOM-notifier subsystem at M1, so they are panic-on-call —
-//! balloon only reaches them under VIRTIO_BALLOON_F_DEFLATE_ON_OOM
-//! feature negotiation, which the M1 smoke device does not enable.
+//! Also houses the <linux/oom.h> and <linux/page_reporting.h>
+//! register/unregister entry points (added as balloon.c's #includes
+//! surfaced): Arsenal has neither an OOM-notifier nor a free-page-
+//! reporting subsystem at M1, so they are panic-on-call — balloon
+//! reaches them only under VIRTIO_BALLOON_F_DEFLATE_ON_OOM /
+//! VIRTIO_BALLOON_F_REPORTING feature negotiation, which the M1
+//! smoke device does not enable.
 
 use core::ffi::c_void;
 
@@ -80,4 +82,26 @@ pub unsafe extern "C" fn register_oom_notifier(_nb: *mut c_void) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unregister_oom_notifier(_nb: *mut c_void) -> c_int {
     panic!("linuxkpi: unregister_oom_notifier not yet implemented (no OOM subsystem at M1)")
+}
+
+/// `page_reporting_register` — register a free-page-reporting
+/// callback. Arsenal has no free-page-reporting subsystem at M1;
+/// panic-on-call. `prdev` is opaque (`struct page_reporting_dev_info
+/// *`) to this stub.
+///
+/// # Safety
+/// Calling this during M1 panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn page_reporting_register(_prdev: *mut c_void) -> c_int {
+    panic!("linuxkpi: page_reporting_register not yet implemented (no reporting subsystem at M1)")
+}
+
+/// `page_reporting_unregister` — remove a free-page-reporting
+/// callback (pairs with page_reporting_register). Panic-on-call.
+///
+/// # Safety
+/// Calling this during M1 panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn page_reporting_unregister(_prdev: *mut c_void) {
+    panic!("linuxkpi: page_reporting_unregister not yet implemented (no reporting subsystem at M1)")
 }
