@@ -112,8 +112,11 @@ one call in `arsenal-kernel/src/main.rs`.
   yet a problem — at M1 each driver's init is independent given
   device discovery has already run. The table is the right
   successor when the count or ordering forces it; that is the
-  ADR-0011 trigger ("deferred / event-driven module init"
-  successor — see References below).
+  ADR-0012 trigger ("initcall-style table for synchronous
+  inherited-driver init" successor — see References below).
+  *(Originally cited as the ADR-0011 trigger; ADR-0011's claim
+  on slot 0011 split this provisional and shifted the
+  initcall-table side to ADR-0012.)*
 
 - **Explicit Rust calls to `register_virtio_driver(&driver_var)`
   directly from `arsenal-kernel/src/main.rs`, bypassing the
@@ -171,7 +174,7 @@ one call in `arsenal-kernel/src/main.rs`.
   declaration and a call). The list is short by intent — M1
   expects to host single-digit inherited drivers — but it is
   hand-maintained and grows monotonically. **Mitigation:** the
-  count is bounded by the M1 milestone scope; the ADR-0011
+  count is bounded by the M1 milestone scope; the ADR-0012
   successor (initcall-style table) is pre-identified with a
   concrete trigger.
 - **Init ordering is encoded by source-line order in
@@ -211,17 +214,22 @@ one call in `arsenal-kernel/src/main.rs`.
 - [Linux 6.12 LTS `include/linux/module.h`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/linux/module.h?h=linux-6.12.y)
   — upstream `module_driver` macro this expansion mirrors
 - [Linux 6.12 LTS `include/linux/init.h`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/linux/init.h?h=linux-6.12.y)
-  — upstream `__initcall` machinery the ADR-0011 successor
+  — upstream `__initcall` machinery the ADR-0012 successor
   would adopt when triggered
-- **ADR-0011 (provisional):** "Deferred / event-driven module
-  init via kthread + workqueue, and initcall-style table for
-  synchronous init." Triggered when the inherited-driver count
-  passes the explicit-list maintainability threshold (heuristic:
-  5+ inherited drivers, or any cross-driver init-ordering
-  requirement) or when an inherited driver needs the
-  deferred-work path. The provisional reservation previously sat
-  at ADR-0010 (ADR-0005 § "Reserved successor ADRs", as shifted
-  by ADR-0006 and ADR-0007); this ADR's claim on slot 0008
-  shifts it to 0011.
+- [ADR-0011: Deferred-work via a cooperative workqueue runner](0011-deferred-work-cooperative-runner.md)
+  — resolved the deferred-work half of the previously-combined
+  ADR-0011 reservation; balloon's M1-2-5 probe triggered it
+  ahead of the inherited-driver-count side
+- **ADR-0012 (provisional):** "Initcall-style table for
+  synchronous inherited-driver init." The other half of the
+  previously-combined ADR-0011 reservation, surviving as a
+  separate provisional after ADR-0011's split. Triggered when
+  the inherited-driver count passes the explicit-list
+  maintainability threshold (heuristic: 5+ inherited drivers,
+  or any cross-driver init-ordering requirement). The
+  provisional reservation previously sat at ADR-0010 (ADR-0005
+  § "Reserved successor ADRs", as shifted by ADR-0006 and
+  ADR-0007), then at ADR-0011 (this ADR's claim on slot 0008);
+  ADR-0011's claim on slot 0011 shifts it to 0012.
 - Michael Nygard, "Documenting Architecture Decisions" (2011) —
   ADR template authority

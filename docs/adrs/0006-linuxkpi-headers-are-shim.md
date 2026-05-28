@@ -415,7 +415,14 @@ preserved in git history (`b2dd46f`) in case a future
   ADR-0009, deferred init → ADR-0010. Shifted again by ADR-0008
   (module-init by symbol name), which resolved ADR-0005 § 6's
   deferred design decision and took the 0008 slot: three-crate
-  split → ADR-0009, cbindgen → ADR-0010, deferred init → ADR-0011.)*
+  split → ADR-0009, cbindgen → ADR-0010, deferred init → ADR-0011.
+  Shifted again by ADR-0011 (deferred-work via a cooperative
+  workqueue runner), which resolved the deferred-work half of
+  ADR-0005 § 6 and claimed the 0011 slot — splitting the
+  previously-combined "deferred init + initcall-style table"
+  reservation. The initcall-style-table half stays provisional
+  at ADR-0012; per-workqueue runner / freezable semantics is
+  ADR-0013.)*
 
 - **ARSENAL.md does not need modification.** Per CLAUDE.md,
   the plan is not edited unless the deviation is structural.

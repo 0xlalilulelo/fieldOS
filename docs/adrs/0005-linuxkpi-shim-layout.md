@@ -383,19 +383,28 @@ forecast that work; the next ADR will.
   a first-use `struct page` decision that claimed the 0007 slot,
   then shifted again by [ADR-0008](0008-module-init-by-symbol-name.md),
   which resolved § 6's deferred design decision and claimed the
-  0008 slot):
+  0008 slot, then again by [ADR-0011](0011-deferred-work-cooperative-runner.md),
+  which resolved the deferred-work half of § 6 and claimed the
+  0011 slot — splitting the previously-combined ADR-0011
+  reservation):
   - **ADR-0009 (provisional):** "Evolve LinuxKPI to three-crate
     split when amdgpu lands." Triggered at M1 step 5 kickoff.
   - **ADR-0010 (provisional):** "Adopt cbindgen for `shim_c.h`
     generation." Triggered when `shim_c.h` exceeds ~1500 lines
     or when a third inherited driver's C-callable surface
     expansion crosses a maintainability threshold.
-  - **ADR-0011 (provisional):** "Deferred / event-driven module
-    init via kthread + workqueue, and initcall-style table for
-    synchronous init." Triggered when an inherited driver needs
-    the deferred-work path, or when the inherited-driver count
-    passes the explicit-list maintainability threshold per
-    [ADR-0008](0008-module-init-by-symbol-name.md).
+  - **ADR-0012 (provisional):** "Initcall-style table for
+    synchronous inherited-driver init." The other half of the
+    previously-combined ADR-0011 reservation; triggered per
+    [ADR-0008](0008-module-init-by-symbol-name.md) when the
+    inherited-driver count or cross-driver init-ordering need
+    crosses the explicit-list maintainability threshold.
+  - **ADR-0013 (provisional):** "Per-workqueue cooperative
+    runner + freezable semantics." Successor to
+    [ADR-0011](0011-deferred-work-cooperative-runner.md);
+    triggered by an observed starvation event between two
+    inherited drivers' work bodies or an inherited driver
+    dependent on freezable semantics for suspend/resume.
 
 ## References
 
