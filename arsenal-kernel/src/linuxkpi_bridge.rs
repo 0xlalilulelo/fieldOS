@@ -20,6 +20,7 @@
 //!      match.
 
 use crate::{apic, frames, paging, pci, virtio};
+use alloc::boxed::Box;
 
 /// Read the global LAPIC tick counter. M1-2-5 Part A: backs
 /// linuxkpi's `jiffies` / `msleep` / `udelay` over apic::ticks().
@@ -248,4 +249,250 @@ pub unsafe extern "C" fn linuxkpi_pci_msix_info(
             }
         }
     }
+}
+
+// =====================================================================
+// Virtqueue + virtio-transport bridge (M1-2-5 closing-commit work).
+// Wraps the arsenal-kernel split-virtqueue machinery (Virtqueue +
+// init_transport / activate_queue / set_driver_ok / notify) so the
+// linuxkpi shim's virtqueue_add_* / kick / get_buf / find_vqs panic-
+// stubs can drive real I/O without reimplementing the vring.
+// =====================================================================
+
+use crate::virtio::{
+    Virtqueue, VirtioDevice, activate_queue, set_driver_ok,
+    notify as virtio_notify, cc_read16, cc_write16, CC_QUEUE_SELECT, CC_QUEUE_SIZE,
+};
+
+/// Ring-physical-address descriptor for `linuxkpi_virtqueue_info`,
+/// the values the linuxkpi shim hands to `activate_queue` and the
+/// queue-size cap it negotiated.
+#[repr(C)]
+pub struct LinuxkpiVqInfo {
+    pub size: u16,
+    pub _pad: [u8; 6],
+    pub desc_phys: u64,
+    pub avail_phys: u64,
+    pub used_phys: u64,
+}
+
+/// Flat C-shaped chain segment for `linuxkpi_virtqueue_push_chain`.
+#[repr(C)]
+pub struct LinuxkpiVqChainPart {
+    pub addr: u64,
+    pub len: u32,
+    pub flags: u16,
+    pub _pad: u16,
+}
+
+/// Allocate a Virtqueue of `size` descriptors and return a leaked
+/// Box pointer. Caller stores it in the shim's `struct virtqueue.priv`
+/// and pairs with `linuxkpi_virtqueue_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn linuxkpi_virtqueue_new(size: u16) -> *mut core::ffi::c_void {
+    Box::into_raw(Box::new(Virtqueue::new(size))) as *mut core::ffi::c_void
+}
+
+/// Release a Virtqueue previously returned by `linuxkpi_virtqueue_new`.
+///
+/// # Safety
+/// `handle` must be a pointer returned by `linuxkpi_virtqueue_new`
+/// and must not have been freed already.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtqueue_free(handle: *mut core::ffi::c_void) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: forwarded caller contract.
+    drop(unsafe { Box::from_raw(handle as *mut Virtqueue) });
+}
+
+/// Read a Virtqueue's size + ring physical addresses into `out`
+/// (the values `activate_queue` will write into COMMON_CFG).
+///
+/// # Safety
+/// `handle` must be a live `linuxkpi_virtqueue_new` pointer; `out`
+/// must point to a writable `LinuxkpiVqInfo`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtqueue_info(
+    handle: *const core::ffi::c_void,
+    out: *mut LinuxkpiVqInfo,
+) {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        let vq = &*(handle as *const Virtqueue);
+        (*out).size = vq.size;
+        (*out).desc_phys = vq.desc_phys;
+        (*out).avail_phys = vq.avail_phys;
+        (*out).used_phys = vq.used_phys;
+    }
+}
+
+/// Push one descriptor onto a Virtqueue. Returns the descriptor index
+/// (≥ 0), or -1 if the queue is full.
+///
+/// # Safety
+/// `handle` must be a live `linuxkpi_virtqueue_new` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtqueue_push_descriptor(
+    handle: *mut core::ffi::c_void,
+    addr: u64,
+    len: u32,
+    flags: u16,
+) -> i32 {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        match (*(handle as *mut Virtqueue)).push_descriptor(addr, len, flags) {
+            Some(idx) => idx as i32,
+            None => -1,
+        }
+    }
+}
+
+/// Push 1..=8 chained descriptors via `parts[0..nparts]`. Returns
+/// the head descriptor index (≥ 0), or -1 on too-many / empty / full.
+/// arsenal-kernel's `push_chain` caps the chain at 8.
+///
+/// # Safety
+/// `handle` is a live Virtqueue pointer; `parts` points to `nparts`
+/// readable `LinuxkpiVqChainPart` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtqueue_push_chain(
+    handle: *mut core::ffi::c_void,
+    parts: *const LinuxkpiVqChainPart,
+    nparts: u32,
+) -> i32 {
+    if nparts == 0 || nparts > 8 || parts.is_null() {
+        return -1;
+    }
+    let mut buf: [(u64, u32, u16); 8] = [(0, 0, 0); 8];
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        for i in 0..nparts as usize {
+            let p = &*parts.add(i);
+            buf[i] = (p.addr, p.len, p.flags);
+        }
+        let slice = &buf[..nparts as usize];
+        match (*(handle as *mut Virtqueue)).push_chain(slice) {
+            Some(idx) => idx as i32,
+            None => -1,
+        }
+    }
+}
+
+/// Pop one used buffer from a Virtqueue. Returns `true` if one was
+/// dequeued (writes the descriptor head index to `*out_id` and the
+/// device-reported bytes-used to `*out_len`); `false` if the used
+/// ring is empty.
+///
+/// # Safety
+/// `handle` is a live Virtqueue pointer; `out_id` + `out_len` are
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtqueue_pop_used(
+    handle: *mut core::ffi::c_void,
+    out_id: *mut u32,
+    out_len: *mut u32,
+) -> bool {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        match (*(handle as *mut Virtqueue)).pop_used() {
+            Some(elem) => {
+                *out_id = elem.id;
+                *out_len = elem.len;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Read the device-reported max queue size for queue `idx` (the value
+/// at CC_QUEUE_SIZE after CC_QUEUE_SELECT = idx). 0 means the device
+/// doesn't implement that queue.
+///
+/// # Safety
+/// `common_cfg` must be the mapped COMMON_CFG region for a live virtio
+/// device.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtio_read_queue_size(
+    common_cfg: *mut u8,
+    idx: u16,
+) -> u16 {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        cc_write16(common_cfg, CC_QUEUE_SELECT, idx);
+        cc_read16(common_cfg, CC_QUEUE_SIZE)
+    }
+}
+
+/// Activate `queue_idx` on the device: write select / size / ring
+/// physical addresses / ENABLE = 1, then return the notify-doorbell
+/// pointer the linuxkpi shim uses for subsequent `kick` calls.
+///
+/// # Safety
+/// All pointer arguments must be live MMIO; `queue_handle` is a live
+/// Virtqueue.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtio_activate_queue(
+    common_cfg: *mut u8,
+    notify_base: *mut u8,
+    notify_off_multiplier: u32,
+    queue_idx: u16,
+    queue_handle: *const core::ffi::c_void,
+) -> *mut core::ffi::c_void {
+    // arsenal-kernel's activate_queue takes a &VirtioDevice for the
+    // (common_cfg, notify_base, notify_off_multiplier) tuple; the
+    // other fields aren't read. Construct a thin shim VirtioDevice
+    // for the call.
+    let vdev = VirtioDevice {
+        bus: 0,
+        dev: 0,
+        func: 0,
+        device_id: 0,
+        common_cfg,
+        notify_base,
+        notify_off_multiplier,
+        isr: core::ptr::null_mut(),
+        device_cfg: core::ptr::null_mut(),
+    };
+    // SAFETY: forwarded caller contract.
+    let queue = unsafe { &*(queue_handle as *const Virtqueue) };
+    activate_queue(&vdev, queue_idx, queue) as *mut core::ffi::c_void
+}
+
+/// Set DEVICE_STATUS to ACK | DRIVER | FEATURES_OK | DRIVER_OK,
+/// bringing the device live for I/O after all queues are activated.
+///
+/// # Safety
+/// `common_cfg` is the mapped COMMON_CFG region for a live virtio
+/// device whose feature negotiation already completed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtio_set_driver_ok(common_cfg: *mut u8) {
+    let vdev = VirtioDevice {
+        bus: 0,
+        dev: 0,
+        func: 0,
+        device_id: 0,
+        common_cfg,
+        notify_base: core::ptr::null_mut(),
+        notify_off_multiplier: 0,
+        isr: core::ptr::null_mut(),
+        device_cfg: core::ptr::null_mut(),
+    };
+    set_driver_ok(&vdev);
+}
+
+/// Notify the device that queue `queue_idx` has new available
+/// descriptors. `notify_ptr` is the pointer returned by
+/// `linuxkpi_virtio_activate_queue`.
+///
+/// # Safety
+/// `notify_ptr` is a live notify-region pointer for `queue_idx`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtio_notify(
+    notify_ptr: *mut core::ffi::c_void,
+    queue_idx: u16,
+) {
+    virtio_notify(notify_ptr as *mut u16, queue_idx);
 }

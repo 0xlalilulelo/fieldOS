@@ -30,6 +30,8 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 use spin::Mutex;
@@ -45,6 +47,103 @@ unsafe extern "C" {
         want_device_id: u16,
         out: *mut VirtioDevRaw,
     );
+
+    // Virtqueue + transport bridge (M1-2-5 closing-commit work).
+    // `linuxkpi_virtqueue_free` + `linuxkpi_virtqueue_info` +
+    // `linuxkpi_virtio_set_driver_ok` are declared now but consumed
+    // in the next round (del_vqs + virtio_device_ready wiring);
+    // keeping them in the same bridge-extern block as the rest keeps
+    // the bridge surface adjacent.
+    fn linuxkpi_virtqueue_new(size: u16) -> *mut c_void;
+    #[allow(dead_code)]
+    fn linuxkpi_virtqueue_free(handle: *mut c_void);
+    #[allow(dead_code)]
+    fn linuxkpi_virtqueue_info(handle: *const c_void, out: *mut LinuxkpiVqInfo);
+    fn linuxkpi_virtqueue_push_descriptor(
+        handle: *mut c_void,
+        addr: u64,
+        len: u32,
+        flags: u16,
+    ) -> i32;
+    fn linuxkpi_virtqueue_push_chain(
+        handle: *mut c_void,
+        parts: *const LinuxkpiVqChainPart,
+        nparts: u32,
+    ) -> i32;
+    fn linuxkpi_virtqueue_pop_used(
+        handle: *mut c_void,
+        out_id: *mut u32,
+        out_len: *mut u32,
+    ) -> bool;
+    fn linuxkpi_virtio_read_queue_size(common_cfg: *mut u8, idx: u16) -> u16;
+    fn linuxkpi_virtio_activate_queue(
+        common_cfg: *mut u8,
+        notify_base: *mut u8,
+        notify_off_multiplier: u32,
+        queue_idx: u16,
+        queue_handle: *const c_void,
+    ) -> *mut c_void;
+    #[allow(dead_code)]
+    fn linuxkpi_virtio_set_driver_ok(common_cfg: *mut u8);
+    fn linuxkpi_virtio_notify(notify_ptr: *mut c_void, queue_idx: u16);
+}
+
+/// Mirror of arsenal-kernel's `LinuxkpiVqInfo` (linuxkpi_bridge.rs).
+/// Read by the round-21 del_vqs path (paired with the matching
+/// allow(dead_code) on the linuxkpi_virtqueue_info extern above).
+#[allow(dead_code)]
+#[repr(C)]
+struct LinuxkpiVqInfo {
+    size: u16,
+    _pad: [u8; 6],
+    desc_phys: u64,
+    avail_phys: u64,
+    used_phys: u64,
+}
+
+/// Mirror of arsenal-kernel's `LinuxkpiVqChainPart`.
+#[repr(C)]
+struct LinuxkpiVqChainPart {
+    addr: u64,
+    len: u32,
+    flags: u16,
+    _pad: u16,
+}
+
+/// Mirror of <linux/virtio_config.h>'s `struct virtqueue_info` (the
+/// per-vq setup descriptor balloon passes to virtio_find_vqs).
+#[repr(C)]
+struct VirtqueueInfoC {
+    name: *const c_char,
+    callback: *const c_void, // vq_callback_t* — stored opaquely; not invoked at M1
+    ctx: bool,
+}
+
+/// VIRTQ descriptor flags (subset). Linux's <linux/virtio_ring.h>
+/// + virtio v1.2 §2.6.13.1. F_WRITE = "device writes" (inbuf).
+const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+/// Per-virtqueue shim state. The shim's `struct virtqueue.priv_`
+/// stores a `Box::into_raw`'d pointer to one of these. Each entry
+/// tracks the underlying arsenal-kernel Virtqueue handle, the
+/// per-descriptor token balloon passed to `virtqueue_add_*` (so
+/// `virtqueue_get_buf` can return it), the notify pointer activate_
+/// queue handed back, and the queue index.
+struct ShimVirtqueueState {
+    bridge_handle: *mut c_void,
+    tokens: Box<[*mut c_void]>,
+    notify_ptr: *mut c_void,
+    queue_idx: u16,
+    size: u16,
+}
+
+/// Largest power-of-two ≤ `n` (capped at our 128 max). 0 if n is 0.
+fn pow2_at_most(n: u16) -> u16 {
+    if n == 0 {
+        return 0;
+    }
+    let capped = n.min(128);
+    1u16 << (15 - capped.leading_zeros() as u16)
 }
 
 /// Mirror of `arsenal_kernel::linuxkpi_bridge::LinuxkpiVirtioDev`.
@@ -393,31 +492,126 @@ pub struct virtqueue {
 /// `virtio_find_vqs` — discover and configure `nvqs` virtqueues for
 /// `vdev` per the `vqs_info` descriptors, storing the results in
 /// `vqs`. Linux 6.12 shape (replaced the older names-array find_vqs).
-/// Stubbed; the real vring setup lands at the M1-2-5-closing commit.
-/// `vqs_info` (`struct virtqueue_info *`) and `desc` are opaque here.
+///
+/// For each requested queue with a non-null `vqs_info[i].name`,
+/// allocates a Virtqueue via the bridge (capped at the largest
+/// power-of-two ≤ device max, ≤ 128), activates it on the device
+/// (writes queue_select / size / ring physical addresses / enable),
+/// boxes a shim `struct virtqueue` carrying the bridge handle in
+/// `priv_`, and stores its pointer in `vqs[i]`. Per Linux semantics
+/// NULL-named entries are skipped (vqs[i] = NULL) — balloon uses
+/// this to leave optional vqs unallocated.
+///
+/// **Does NOT call set_driver_ok** — balloon's probe finalizes the
+/// device via `virtio_device_ready` (the bridge for set_driver_ok)
+/// after configuring the rest of its state. The device must already
+/// be in DRIVER + FEATURES_OK status (init_transport done by the
+/// shim's bus-side lifecycle, M1-2-5 next round).
 ///
 /// # Safety
-/// Calling this during the M1-2-5 Part B iteration arc panics.
+/// `vdev` is a live `virtio_device` whose transport pointers
+/// (common_cfg / notify_base / notify_off_multiplier) resolve to
+/// mapped MMIO. `vqs` points to `nvqs` writable `*mut virtqueue`
+/// slots. `vqs_info` is an array of `nvqs` `struct virtqueue_info`.
+/// `desc` (irq_affinity) is ignored at M1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_find_vqs(
-    _vdev: *mut virtio_device,
-    _nvqs: c_uint,
-    _vqs: *mut *mut virtqueue,
-    _vqs_info: *mut c_void,
+    vdev: *mut virtio_device,
+    nvqs: c_uint,
+    vqs: *mut *mut virtqueue,
+    vqs_info: *mut c_void,
     _desc: *mut c_void,
 ) -> c_int {
-    panic!("linuxkpi: virtio_find_vqs not yet implemented (lands at M1-2-5 close)")
+    if vdev.is_null() || vqs.is_null() || vqs_info.is_null() || nvqs == 0 {
+        return -1;
+    }
+    // SAFETY: caller guarantees vdev is live.
+    let (common_cfg, notify_base, multiplier) = unsafe {
+        (
+            (*vdev).common_cfg,
+            (*vdev).notify_base,
+            (*vdev).notify_off_multiplier,
+        )
+    };
+    let info_arr = vqs_info as *const VirtqueueInfoC;
+
+    for i in 0..nvqs {
+        // SAFETY: vqs_info[i] is in bounds per the caller's contract.
+        let info = unsafe { &*info_arr.add(i as usize) };
+        // Linux convention: NULL name → skip this slot (balloon uses
+        // it to leave optional vqs unallocated).
+        if info.name.is_null() {
+            // SAFETY: vqs[i] is in bounds per the caller.
+            unsafe {
+                *vqs.add(i as usize) = core::ptr::null_mut();
+            }
+            continue;
+        }
+        // SAFETY: bridge fn — common_cfg is live MMIO.
+        let max = unsafe { linuxkpi_virtio_read_queue_size(common_cfg, i as u16) };
+        let size = pow2_at_most(max);
+        if size == 0 {
+            return -1;
+        }
+        // SAFETY: bridge fn.
+        let handle = unsafe { linuxkpi_virtqueue_new(size) };
+        if handle.is_null() {
+            return -1;
+        }
+        // SAFETY: bridge fn — writes COMMON_CFG queue_* + returns
+        // the notify-doorbell pointer.
+        let notify_ptr = unsafe {
+            linuxkpi_virtio_activate_queue(
+                common_cfg,
+                notify_base,
+                multiplier,
+                i as u16,
+                handle,
+            )
+        };
+        let tokens: Vec<*mut c_void> = vec![core::ptr::null_mut(); size as usize];
+        let state = Box::new(ShimVirtqueueState {
+            bridge_handle: handle,
+            tokens: tokens.into_boxed_slice(),
+            notify_ptr,
+            queue_idx: i as u16,
+            size,
+        });
+        let state_ptr = Box::into_raw(state);
+
+        let vq = Box::new(virtqueue {
+            vdev,
+            num_free: size as c_uint,
+            priv_: state_ptr as *mut c_void,
+        });
+        // SAFETY: vqs[i] is in bounds; the Box leak is paired with
+        // the closing commit's del_vqs.
+        unsafe {
+            *vqs.add(i as usize) = Box::into_raw(vq);
+        }
+    }
+    0
 }
 
 /// `virtqueue_get_vring_size` — number of descriptor slots in `vq`'s
 /// vring. balloon reads it to size its free-page-reporting batches.
-/// Stubbed until the M1-2-5-closing virtqueue impl.
 ///
 /// # Safety
-/// Calling this during the M1-2-5 Part B iteration arc panics.
+/// `vq` must be a live virtqueue returned by virtio_find_vqs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn virtqueue_get_vring_size(_vq: *const virtqueue) -> c_uint {
-    panic!("linuxkpi: virtqueue_get_vring_size not yet implemented (lands at M1-2-5 close)")
+pub unsafe extern "C" fn virtqueue_get_vring_size(vq: *const virtqueue) -> c_uint {
+    if vq.is_null() {
+        return 0;
+    }
+    // SAFETY: vq is non-null per the check + caller's contract; priv_
+    // points to a ShimVirtqueueState set up in virtio_find_vqs.
+    unsafe {
+        let state = (*vq).priv_ as *const ShimVirtqueueState;
+        if state.is_null() {
+            return 0;
+        }
+        (*state).size as c_uint
+    }
 }
 
 /// `__virtio_clear_bit` — clear driver-side feature bit `fbit` on
@@ -431,59 +625,177 @@ pub unsafe extern "C" fn __virtio_clear_bit(_vdev: *mut virtio_device, _fbit: c_
     panic!("linuxkpi: __virtio_clear_bit not yet implemented (lands at M1-2-5 close)")
 }
 
-/// `virtqueue_add_outbuf` — submit an outbound buffer to a vq.
-/// Stubbed at M1-2-3.
+/// Shared body for virtqueue_add_outbuf / _inbuf. `sg_flags` is 0
+/// for outbuf (host reads) and `VIRTQ_DESC_F_WRITE` for inbuf (host
+/// writes). Reads `num` scatterlist entries' (dma_address,
+/// dma_length), pushes a single descriptor (num=1) or a chain
+/// (num=2..=8) via the bridge, records `data` as the token at the
+/// head descriptor index, and decrements `num_free` accordingly.
+///
+/// Returns 0 on success, a negative errno-ish on failure.
 ///
 /// # Safety
-/// Calling this at M1-2-3 panics.
+/// `vq` is a live shim virtqueue from virtio_find_vqs; `sg` points
+/// to `num` scatterlist entries; `data` is the token balloon will
+/// reclaim through virtqueue_get_buf.
+unsafe fn vq_add(
+    vq: *mut virtqueue,
+    sg: *const scatterlist,
+    num: c_uint,
+    data: *mut c_void,
+    sg_flags: u16,
+) -> c_int {
+    if vq.is_null() || sg.is_null() || num == 0 || num > 8 {
+        return -1;
+    }
+    // SAFETY: vq is non-null + caller's contract.
+    let state = unsafe { (*vq).priv_ as *mut ShimVirtqueueState };
+    if state.is_null() {
+        return -1;
+    }
+    // SAFETY: bridge call routes to arsenal-kernel's push_descriptor /
+    // push_chain; sg array is read-only.
+    let head_idx = unsafe {
+        if num == 1 {
+            let entry = &*sg;
+            linuxkpi_virtqueue_push_descriptor(
+                (*state).bridge_handle,
+                entry.dma_address,
+                entry.dma_length,
+                sg_flags,
+            )
+        } else {
+            let mut parts: [LinuxkpiVqChainPart; 8] = core::array::from_fn(|_| {
+                LinuxkpiVqChainPart {
+                    addr: 0,
+                    len: 0,
+                    flags: 0,
+                    _pad: 0,
+                }
+            });
+            let sg_slice = core::slice::from_raw_parts(sg, num as usize);
+            for (part, e) in parts.iter_mut().zip(sg_slice.iter()) {
+                *part = LinuxkpiVqChainPart {
+                    addr: e.dma_address,
+                    len: e.dma_length,
+                    flags: sg_flags,
+                    _pad: 0,
+                };
+            }
+            linuxkpi_virtqueue_push_chain(
+                (*state).bridge_handle,
+                parts.as_ptr(),
+                num,
+            )
+        }
+    };
+    if head_idx < 0 {
+        return -1;
+    }
+    // SAFETY: head_idx is in [0, size); tokens is sized to .size.
+    unsafe {
+        (*state).tokens[head_idx as usize] = data;
+        (*vq).num_free = (*vq).num_free.saturating_sub(num);
+    }
+    0
+}
+
+/// `virtqueue_add_outbuf` — submit one or more outbound (host-read)
+/// scatterlist entries on `vq`. `data` is the token returned later
+/// via virtqueue_get_buf.
+///
+/// # Safety
+/// See `vq_add`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtqueue_add_outbuf(
-    _vq: *mut virtqueue,
-    _sg: *const c_void,
-    _num: c_uint,
-    _data: *mut c_void,
+    vq: *mut virtqueue,
+    sg: *const c_void,
+    num: c_uint,
+    data: *mut c_void,
     _gfp: u32,
 ) -> c_int {
-    panic!("linuxkpi: virtqueue_add_outbuf not yet implemented (lands at M1-2-5)")
+    // SAFETY: forwarded.
+    unsafe { vq_add(vq, sg as *const scatterlist, num, data, 0) }
 }
 
-/// `virtqueue_add_inbuf` — submit an inbound buffer to a vq.
-/// Stubbed at M1-2-3.
+/// `virtqueue_add_inbuf` — submit one or more inbound (host-write)
+/// scatterlist entries on `vq`. Flags each descriptor with F_WRITE.
 ///
 /// # Safety
-/// Calling this at M1-2-3 panics.
+/// See `vq_add`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtqueue_add_inbuf(
-    _vq: *mut virtqueue,
-    _sg: *const c_void,
-    _num: c_uint,
-    _data: *mut c_void,
+    vq: *mut virtqueue,
+    sg: *const c_void,
+    num: c_uint,
+    data: *mut c_void,
     _gfp: u32,
 ) -> c_int {
-    panic!("linuxkpi: virtqueue_add_inbuf not yet implemented (lands at M1-2-5)")
+    // SAFETY: forwarded.
+    unsafe { vq_add(vq, sg as *const scatterlist, num, data, VIRTQ_DESC_F_WRITE) }
 }
 
-/// `virtqueue_kick` — notify the device that buffers are
-/// available. Stubbed at M1-2-3.
+/// `virtqueue_kick` — notify the device that buffers are available.
+/// Writes the queue index to the queue's notify-doorbell pointer.
 ///
 /// # Safety
-/// Calling this at M1-2-3 panics.
+/// `vq` is a live shim virtqueue from virtio_find_vqs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn virtqueue_kick(_vq: *mut virtqueue) -> c_int {
-    panic!("linuxkpi: virtqueue_kick not yet implemented (lands at M1-2-5)")
+pub unsafe extern "C" fn virtqueue_kick(vq: *mut virtqueue) -> c_int {
+    if vq.is_null() {
+        return -1;
+    }
+    // SAFETY: caller's contract; priv_ set by virtio_find_vqs.
+    unsafe {
+        let state = (*vq).priv_ as *const ShimVirtqueueState;
+        if state.is_null() {
+            return -1;
+        }
+        linuxkpi_virtio_notify((*state).notify_ptr, (*state).queue_idx);
+    }
+    1
 }
 
-/// `virtqueue_get_buf` — drain one completed buffer from a vq.
-/// Stubbed at M1-2-3.
+/// `virtqueue_get_buf` — drain one completed buffer from `vq`.
+/// Returns the original `data` token (NULL if the used ring is
+/// empty) and writes the device-reported bytes-used to `*len` on
+/// success. Restores `num_free` by 1 (chain reclaim is handled
+/// inside arsenal-kernel's pop_used, which walks F_NEXT — but we
+/// only know the head index, not the chain length, so the
+/// num_free accounting here is approximate at M1 and will be
+/// tightened when arsenal-kernel's pop_used reports the chain
+/// length back through the bridge).
 ///
 /// # Safety
-/// Calling this at M1-2-3 panics.
+/// `vq` is a live shim virtqueue from virtio_find_vqs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtqueue_get_buf(
-    _vq: *mut virtqueue,
-    _len: *mut c_uint,
+    vq: *mut virtqueue,
+    len: *mut c_uint,
 ) -> *mut c_void {
-    panic!("linuxkpi: virtqueue_get_buf not yet implemented (lands at M1-2-5)")
+    if vq.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: caller's contract.
+    unsafe {
+        let state = (*vq).priv_ as *mut ShimVirtqueueState;
+        if state.is_null() {
+            return core::ptr::null_mut();
+        }
+        let mut out_id: u32 = 0;
+        let mut out_len: u32 = 0;
+        if !linuxkpi_virtqueue_pop_used((*state).bridge_handle, &mut out_id, &mut out_len) {
+            return core::ptr::null_mut();
+        }
+        if !len.is_null() {
+            *len = out_len as c_uint;
+        }
+        let token = (*state).tokens[out_id as usize];
+        (*state).tokens[out_id as usize] = core::ptr::null_mut();
+        // See fn doc — chain length not reported back; bump by 1.
+        (*vq).num_free = (*vq).num_free.saturating_add(1);
+        token
+    }
 }
 
 /// Mirror of <linux/scatterlist.h>'s `struct scatterlist`. Layout +
