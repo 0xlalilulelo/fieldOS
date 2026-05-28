@@ -510,33 +510,57 @@ discipline. Rounds landed so far:
     documented), PM wakeup no-ops (pm_stay_awake / pm_relax /
     device_set_wakeup_capable).
 
-**All 12 top-level includes resolve; the compile is now in the
-body-error phase** — the deeper, broader work the HANDOFF predicted
-(no longer one-include-per-round; now clusters of missing
-types/macros/functions per probe). Remaining body-error waves seen
-at round 13's probe, for the next session's resume:
-  - `struct virtqueue` needs a `->vdev` field (balloon reads
-    `vq->vdev`); touches the M1-2-3 virtqueue surface.
-  - `struct scatterlist` full definition + sg_init_one /
-    sg_init_table / sg_set_buf (<linux/scatterlist.h>).
-  - `cpu_to_virtio16/32/64` (+ virtioNN_to_cpu) endian helpers and
-    `virtio_cread_le` (<linux/virtio_config.h> growth).
-  - `min` / `ARRAY_SIZE` / `list_for_each_entry_safe` kernel macros.
-  - `dev_info` / `dev_err` / `dev_warn` / `dev_info_ratelimited`
-    device-print macros (→ printk or no-op).
-  - `global_node_page_state` + `NR_FILE_PAGES` VM stats (→ 0 at M1).
-  - `system_freezable_wq` / `system_wq` global workqueue pointers.
-  - then the virtqueue panic-stubs balloon actually calls
-    (virtqueue_add_outbuf / _inbuf / kick / get_buf / get_vring_size),
-    whose real implementations are the M1-2-5-closing work.
+  - Round 14 `02718fa`: kernel core surface — errno constants,
+    min/max/ARRAY_SIZE/ALIGN/round_up, likely/unlikely, memset/
+    memcpy/memmove, list_for_each_entry_safe, MAX_PAGE_ORDER, +
+    test_and_set/clear_bit stubs (bitops.rs). KBUILD_MODNAME handled
+    as a per-TU build define (-DKBUILD_MODNAME), not a shim symbol.
+  - Rounds 15-16 `e0568da`: mechanical body-error surface — dev_*
+    print no-ops, vmstat (global_node_page_state→0), page-poison
+    no-ops, PAGE_REPORTING_CAPACITY; scatterlist + sg_init_one
+    stub; shrinker (struct + alloc/free/register stubs); workqueue
+    globals (cancel_work_sync + system_freezable_wq NULL symbol).
+  - Round 17 `99e2959`: virtio-core surface — **balloon.c COMPILES**.
+    struct virtio_driver reshaped to Linux's embedded device_driver
+    (.driver.name) + feature_table/validate/config_changed;
+    virtio_device gains `config` (virtio_config_ops with get/del_vqs)
+    and renames the PCI `dev`→`pci_dev` to free `dev` for Linux's
+    embedded `struct device dev` (a real collision: balloon takes
+    &vdev->dev in 7 places); virtqueue gains vdev/num_free; endian
+    helpers; virtio_find_vqs reshaped to the 6.12 struct
+    virtqueue_info form. The virtio self-test still passes after the
+    reshape. shim_c.h now includes <stdbool.h> (order-independent).
 
-The 2026-05-27 session ran rounds 4-13 + ADR-0007 (the include set
-fully closed). The "step away for a day" cue is squarely in play —
-sub-task 3 is the unbudgetable arc; pace against the 3-5-session
-estimate, not session-count optimism. The body-error phase is where
-the closing-commit work (real virtqueue + real struct page
-lifecycle + the init-invocation mechanism + ARSENAL_VIRTIO_BALLOON_OK)
-comes into view.
+**MILESTONE: virtio_balloon.c compiles against the BSD-2 shim**
+(clang exit 0; only 3 residual upstream -Wpointer-sign warnings in
+balloon's own int-vs-unsigned get_buf calls, to be suppressed via
+-Wno-pointer-sign on balloon.c's eventual manifest entry). Every
+#include resolves and every body symbol balloon references is
+declared. The compile phase of sub-task 3 is DONE.
+
+**What remains is the M1-2-5-closing commit — LINK + RUNTIME, not
+compile:**
+  - Swap the panic-on-call stubs for real implementations: the
+    virtqueue machinery (virtqueue_add_outbuf/_inbuf/kick/get_buf,
+    virtio_find_vqs, virtqueue_get_vring_size) — the largest piece;
+    the struct page lifecycle (alloc_pages/free_pages/put_page/
+    page_address/balloon_page_alloc/_enqueue/_dequeue); sg_init_one;
+    test_and_set/clear_bit; the virtio_config_ops table + populating
+    virtio_device.config; the module_init invocation mechanism
+    (ADR-0007's deferred design decision: explicit call vs initcall
+    table).
+  - Add balloon.c to build.rs's source manifest with
+    -DKBUILD_MODNAME='"virtio_balloon"' + -Wno-pointer-sign.
+  - Wire QEMU's `-device virtio-balloon-pci` into the smoke cmdline.
+  - Light ARSENAL_VIRTIO_BALLOON_OK (one stats round-trip / inflate-
+    deflate cycle on the host).
+
+The 2026-05-27 session ran rounds 4-17 + ADR-0007 — the entire
+header + compile arc of sub-task 3, from balloon's first missing
+include to a clean compile. This is a strong milestone boundary;
+the closing commit (real virtqueue + page lifecycle + init
+mechanism) is a fresh, substantial chunk best started rested. The
+"step away for a day" cue applies — this was a long arc.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
