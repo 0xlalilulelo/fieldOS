@@ -553,20 +553,35 @@ declared. The compile phase of sub-task 3 is DONE.
 
 **What remains for ARSENAL_VIRTIO_BALLOON_OK — virtqueue bridge +
 final wiring:**
-  - The virtqueue bridge — wrap arsenal-kernel's existing Virtqueue
-    (push_descriptor / push_chain / pop_used in
-    arsenal-kernel/src/virtio.rs) + init_transport / activate_queue /
-    set_driver_ok / notify via new linuxkpi_* bridge functions; route
-    the shim's virtqueue_add_outbuf/_inbuf/kick/get_buf/get_vring_size
-    /virtio_find_vqs panic-stubs to them. The shim's
-    `struct virtqueue.priv` carries the bridge-side handle. **This is
-    the largest remaining piece**; validation comes only when balloon
-    runs (no isolated self-test makes sense for it).
-  - virtio_config_ops table + populating virtio_device.config (so
-    balloon's vdev->config->get / del_vqs / etc. resolve to real
-    shim ops). Also wire virtio_has_feature / virtio_device_ready /
-    virtio_reset_device / virtio_clear_bit / __virtio_clear_bit to
-    bridge into arsenal-kernel's transport state machine.
+  - Round 20 `b291b95`: virtqueue bridge — 10 bridge fns in
+    linuxkpi_bridge.rs wrap arsenal-kernel's Virtqueue
+    (push_descriptor / push_chain / pop_used) + activate_queue +
+    notify + set_driver_ok; the shim's virtqueue_add_outbuf/_inbuf/
+    kick/get_buf/get_vring_size/virtio_find_vqs panic-stubs swap to
+    real implementations routing through them, with shim-side
+    per-queue ShimVirtqueueState (Box-leaked) tracking the bridge
+    handle, tokens array (size = queue cap), notify ptr, queue idx.
+    NULL-named vqs_info entries skipped per Linux convention.
+    set_driver_ok deferred — balloon drives it explicitly via
+    virtio_device_ready (round 21). Validation deferred to balloon
+    runtime; existing smoke unaffected (the lifecycle that triggers
+    these paths lands round 21).
+  - **Round 21 (next session) — the lifecycle round, also
+    substantial:** struct virtio_device gains a `features: u64`
+    field; init_transport bridge wraps arsenal-kernel's transport
+    state machine (reset → ACK → DRIVER → feature negotiation →
+    FEATURES_OK); register_virtio_driver upgrades to call
+    init_transport before probe (the existing self-test will need an
+    id_table change to avoid running the lifecycle against virtio-blk/
+    net which run smoke after); virtio_has_feature / _device_ready /
+    _reset_device / _clear_bit / __virtio_clear_bit panic-stubs go
+    real over `vdev.features` + the bridge; the virtio_config_ops
+    vtable (with .get + .del_vqs) is populated into vdev->config;
+    and the module-init invocation mechanism (ADR-0007's deferred
+    design decision) — leaning toward explicit call by symbol name,
+    requires dropping `static __init` from module.h's module_driver
+    expansion so arsenal-kernel/main.rs can call
+    `virtio_balloon_driver_init()` after linuxkpi self-test.
   - The module-init invocation mechanism (ADR-0007's deferred design
     decision: explicit call by symbol name vs initcall-style table).
   - Add balloon.c to build.rs's source manifest with
