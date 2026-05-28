@@ -444,6 +444,29 @@ pub fn self_test() {
         }
     }
 
+    // bitops: test_and_set_bit returns the old bit then leaves it set;
+    // test_and_clear_bit returns the old bit then leaves it clear.
+    // Exercise a bit in word 0 and one past the 64-bit word boundary
+    // (bit 70 → word 1, bit 6) to cover the word-index math.
+    {
+        let mut bitmap: [u64; 2] = [0, 0];
+        let addr = bitmap.as_mut_ptr() as *mut core::ffi::c_void;
+        // SAFETY: bitmap has 2 words (128 bits); bits 3 and 70 are in
+        // bounds and the storage outlives these calls.
+        unsafe {
+            assert_eq!(bitops::test_and_set_bit(3, addr), 0, "bit 3 starts clear");
+            assert_eq!(bitops::test_and_set_bit(3, addr), 1, "bit 3 now set");
+            assert_eq!(bitmap[0] & (1 << 3), 1 << 3, "bit 3 set in word 0");
+            assert_eq!(bitops::test_and_clear_bit(3, addr), 1, "bit 3 was set");
+            assert_eq!(bitops::test_and_clear_bit(3, addr), 0, "bit 3 now clear");
+            // Bit 70 = word 1, bit 6 — validates the word-index split.
+            assert_eq!(bitops::test_and_set_bit(70, addr), 0, "bit 70 starts clear");
+            assert_eq!(bitmap[1] & (1 << 6), 1 << 6, "bit 70 lands in word 1 bit 6");
+            assert_eq!(bitmap[0], 0, "word 0 untouched by bit 70");
+            assert_eq!(bitops::test_and_clear_bit(70, addr), 1, "bit 70 was set");
+        }
+    }
+
     log::pr(b"ARSENAL_LINUXKPI_OK\n");
 }
 
