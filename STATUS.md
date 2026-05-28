@@ -538,7 +538,11 @@ balloon's own int-vs-unsigned get_buf calls, to be suppressed via
 #include resolves and every body symbol balloon references is
 declared. The compile phase of sub-task 3 is DONE.
 
-**Closing-commit work in flight — incremental, self-tested pieces:**
+**Closing-commit work — incremental, self-tested pieces.
+Rounds 18 through 22a complete (2026-05-28); ARSENAL_VIRTIO_-
+BALLOON_OK lights at 22a's third commit. First inherited
+Linux driver online in Arsenal:**
+
   - Round 18 `16070ec`: real atomic test_and_set_bit /
     test_and_clear_bit (LOCK-prefixed AtomicU64::fetch_or /
     fetch_and over the unsigned-long bitmap word) + self-test.
@@ -546,56 +550,98 @@ declared. The compile phase of sub-task 3 is DONE.
     (order 0) + put_page + page_address over the frame allocator +
     HHDM bridge; balloon_page_alloc / _enqueue / _dequeue with a
     Rust mirror of struct balloon_dev_info; sg_init_one (buf - hhdm
-    → dma_address); adjust_managed_page_count is intentionally a
+    → dma_address); adjust_managed_page_count intentionally a
     no-op (balloon hot-path, M1 has no managed-page accounting).
     Self-test covers all three round-trips. free_pages stays panic
     (free-page-hint feature path, gated off at M1).
-
-**What remains for ARSENAL_VIRTIO_BALLOON_OK — virtqueue bridge +
-final wiring:**
   - Round 20 `b291b95`: virtqueue bridge — 10 bridge fns in
     linuxkpi_bridge.rs wrap arsenal-kernel's Virtqueue
     (push_descriptor / push_chain / pop_used) + activate_queue +
     notify + set_driver_ok; the shim's virtqueue_add_outbuf/_inbuf/
     kick/get_buf/get_vring_size/virtio_find_vqs panic-stubs swap to
     real implementations routing through them, with shim-side
-    per-queue ShimVirtqueueState (Box-leaked) tracking the bridge
-    handle, tokens array (size = queue cap), notify ptr, queue idx.
-    NULL-named vqs_info entries skipped per Linux convention.
-    set_driver_ok deferred — balloon drives it explicitly via
-    virtio_device_ready (round 21). Validation deferred to balloon
-    runtime; existing smoke unaffected (the lifecycle that triggers
-    these paths lands round 21).
-  - **Round 21 (next session) — the lifecycle round, also
-    substantial:** struct virtio_device gains a `features: u64`
-    field; init_transport bridge wraps arsenal-kernel's transport
-    state machine (reset → ACK → DRIVER → feature negotiation →
-    FEATURES_OK); register_virtio_driver upgrades to call
-    init_transport before probe (the existing self-test will need an
-    id_table change to avoid running the lifecycle against virtio-blk/
-    net which run smoke after); virtio_has_feature / _device_ready /
-    _reset_device / _clear_bit / __virtio_clear_bit panic-stubs go
-    real over `vdev.features` + the bridge; the virtio_config_ops
-    vtable (with .get + .del_vqs) is populated into vdev->config;
-    and the module-init invocation mechanism (ADR-0007's deferred
-    design decision) — leaning toward explicit call by symbol name,
-    requires dropping `static __init` from module.h's module_driver
-    expansion so arsenal-kernel/main.rs can call
-    `virtio_balloon_driver_init()` after linuxkpi self-test.
-  - The module-init invocation mechanism (ADR-0007's deferred design
-    decision: explicit call by symbol name vs initcall-style table).
-  - Add balloon.c to build.rs's source manifest with
-    -DKBUILD_MODNAME='"virtio_balloon"' + -Wno-pointer-sign.
-  - Wire QEMU's `-device virtio-balloon-pci` into the smoke cmdline.
-  - Light ARSENAL_VIRTIO_BALLOON_OK (one stats round-trip / inflate-
-    deflate cycle on the host).
+    per-queue ShimVirtqueueState (Box-leaked).
+  - Round 21a `1deb3f1`: struct virtio_device gains a
+    `features: u64` field; virtio_has_feature /
+    __virtio_clear_bit / virtio_clear_bit panic-stubs go real
+    over it. Self-test covers the bit-op state machine on a
+    stack-allocated vdev.
+  - Round 21d `06bbf85`: drops `static __init` from
+    `module_driver`'s expansion so the
+    `<driver_var>_init` wrapper symbol is externally callable.
+    Lands [ADR-0008](docs/adrs/0008-module-init-by-symbol-name.md)
+    documenting the "explicit call by symbol name" decision
+    (vs initcall-style table); bumps the provisional-
+    reservation list in ADR-0005 / 0006 down by one.
+  - Round 21b `1382919`: register_virtio_driver drives the
+    init_transport lifecycle. New linuxkpi_virtio_init_transport
+    bridge does the v1.2 § 3.1.1 dance with **bus-side feature
+    intersection** (read device_features, AND with driver's
+    feature_table → u64 mask, write back, FEATURES_OK).
+    virtio_device_ready / virtio_reset_device go real; per
+    matched device the path is init_transport → validate (if
+    non-null) → probe; on probe-decline the device is reset so
+    a later driver (or virtio_blk::smoke / virtio_net::smoke)
+    can re-init it from RESET.
+  - Round 21c `eba56c6`: static virtio_config_ops table —
+    .get is a panic-stub fn pointer (balloon's validate
+    null-checks but doesn't call it during init); .del_vqs is
+    a no-op (single balloon init, bounded leak at M1).
+    register_virtio_driver installs &CONFIG_OPS on vdev.config
+    before validate / probe.
+  - Round 22a-step1 `c2b9760`: [ADR-0011](docs/adrs/0011-deferred-work-cooperative-runner.md)
+    accepted. Resolves the deferred-work half of ADR-0005 § 6's
+    panic-on-call state. Splits ADR-0008's previously-combined
+    ADR-0011 reservation; initcall-table side stays provisional
+    as ADR-0012, per-workqueue / freezable successor becomes
+    provisional ADR-0013.
+  - Round 22a-step2 `0e18ffb`: real workqueue — cooperative
+    single-runner. linuxkpi_work_init + queue_work + cancel_-
+    work + cancel_work_sync + alloc_workqueue + destroy_-
+    workqueue + system_freezable_wq (non-null sentinel) +
+    drain_one (runner-side primitive). arsenal-kernel spawns
+    `workqueue_runner` cooperatively before sched::init.
+    Self-test covers INIT_WORK + queue_work + drain_one +
+    duplicate-queue idempotency + empty-queue → false +
+    re-queue after idle.
+  - Round 22a-step3 `b1043fc`: light virtio-balloon at boot.
+    virtio_balloon.c into linuxkpi/build.rs's manifest with
+    -DKBUILD_MODNAME='"virtio_balloon"' + -Wno-pointer-sign;
+    Linux Kbuild's standard `-mno-sse -mno-mmx -mno-avx
+    -msoft-float` added (clang -O2 emitted xorps in stack-
+    zero-init and #UD'd at first instruction since CR4 has
+    SSE off at M1). `extern "C" fn virtio_balloon_driver_init`
+    called from arsenal-kernel/src/main.rs after self_test;
+    `-device virtio-balloon-pci` in ci/qemu-smoke.sh;
+    ARSENAL_VIRTIO_BALLOON_OK in REQUIRED_SENTINELS. **First
+    inherited Linux driver online in Arsenal.**
 
-The 2026-05-27 session ran rounds 4-17 + ADR-0007 — the entire
-header + compile arc of sub-task 3, from balloon's first missing
-include to a clean compile. This is a strong milestone boundary;
-the closing commit (real virtqueue + page lifecycle + init
-mechanism) is a fresh, substantial chunk best started rested. The
-"step away for a day" cue applies — this was a long arc.
+Final smoke: 16/16 sentinels in ~1.4 s. ARSENAL_LINUXKPI_OK
+asserts the shim self-test (now including the workqueue
+round-trip); ARSENAL_VIRTIO_BALLOON_OK asserts balloon's
+probe returned 0 against the real QEMU virtio-balloon-pci
+device through the full lifecycle (init_transport with
+feature intersection → validate → probe → INIT_WORK × 3 +
+virtqueue allocation + virtio_device_ready).
+
+**Round 22b (next session): QMP-driven inflate cycle.** The
+runner task is in the runqueue receiving CPU time but
+currently idle — balloon's queue_work paths fire on
+stats-callback (no host driver yet) and config-changed irq
+(no QMP driver yet). 22b adds:
+  - `-qmp tcp:127.0.0.1:N,server,nowait` to ci/qemu-smoke.sh
+    + a Python harness that connects post-boot and sends a
+    `{"execute":"balloon","arguments":{"value":<bytes>}}`
+    command to drive a host-side balloon size change.
+  - An observation hook somewhere on balloon's
+    update_balloon_size_func body (or in the virtqueue
+    completion path) that flips a new sentinel
+    (ARSENAL_VIRTIO_BALLOON_INFLATE_OK or similar) after one
+    inflate/deflate cycle observes pages moving.
+  - Scope decision before starting (per ADR-0011 §
+    Consequences "concurrent work is not supported at M1"):
+    does the QMP harness wait for the cycle synchronously, or
+    is it fire-and-yield? Probably the latter.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
