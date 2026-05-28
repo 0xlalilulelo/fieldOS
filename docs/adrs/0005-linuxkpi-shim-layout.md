@@ -380,16 +380,22 @@ forecast that work; the next ADR will.
 - Reserved successor ADRs (numbering shifted by [ADR-0006](0006-linuxkpi-headers-are-shim.md),
   which amended this ADR's § 3 and § 4 and claimed the 0006 slot,
   then shifted again by [ADR-0007](0007-struct-page-thin-handle.md),
-  a first-use `struct page` decision that claimed the 0007 slot):
-  - **ADR-0008 (provisional):** "Evolve LinuxKPI to three-crate
+  a first-use `struct page` decision that claimed the 0007 slot,
+  then shifted again by [ADR-0008](0008-module-init-by-symbol-name.md),
+  which resolved § 6's deferred design decision and claimed the
+  0008 slot):
+  - **ADR-0009 (provisional):** "Evolve LinuxKPI to three-crate
     split when amdgpu lands." Triggered at M1 step 5 kickoff.
-  - **ADR-0009 (provisional):** "Adopt cbindgen for `shim_c.h`
+  - **ADR-0010 (provisional):** "Adopt cbindgen for `shim_c.h`
     generation." Triggered when `shim_c.h` exceeds ~1500 lines
     or when a third inherited driver's C-callable surface
     expansion crosses a maintainability threshold.
-  - **ADR-0010 (provisional):** "Deferred / event-driven module
-    init via kthread + workqueue." Triggered when an inherited
-    driver actually needs the path (likely amdgpu or iwlwifi).
+  - **ADR-0011 (provisional):** "Deferred / event-driven module
+    init via kthread + workqueue, and initcall-style table for
+    synchronous init." Triggered when an inherited driver needs
+    the deferred-work path, or when the inherited-driver count
+    passes the explicit-list maintainability threshold per
+    [ADR-0008](0008-module-init-by-symbol-name.md).
 
 ## References
 

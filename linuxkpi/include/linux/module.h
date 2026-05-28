@@ -12,16 +12,19 @@
  * are empty (no .init.text discard at M1).
  *
  * module_init / module_exit are no-ops *here*: the module_driver /
- * module_virtio_driver chain still defines the standard static
+ * module_virtio_driver chain still defines the standard
  * <driver>_init / <driver>_exit wrapper functions (so the register
  * call's signature is validated at compile time and the eventual
- * init has a well-known shape), but nothing auto-invokes them yet.
+ * init has a well-known shape), but nothing in this header
+ * auto-invokes them.
  *
- * DEFERRED DESIGN DECISION (M1-2-5-closing commit): how the
- * synchronous boot actually reaches balloon's init — an explicit
- * call by symbol name from arsenal-kernel, or an initcall-style
- * table the kernel walks. That choice is what lights
- * ARSENAL_VIRTIO_BALLOON_OK; it is not made in this header.
+ * Per ADR-0008 the wrappers are EXTERNAL (no `static`), and
+ * arsenal-kernel's boot reaches them by an explicit `extern "C"`
+ * call to the well-known `<driver_var>_init` symbol — the simplest
+ * shape that lights ARSENAL_VIRTIO_BALLOON_OK at the M1 inherited-
+ * driver count. An initcall-style table is the provisional
+ * successor in ADR-0011, triggered when the explicit-list
+ * maintainability threshold is crossed.
  */
 
 #ifndef ARSENAL_LINUXKPI_LINUX_MODULE_H
@@ -48,24 +51,25 @@
 #define MODULE_ALIAS(alias)
 
 /* module_init / module_exit — no auto-invocation at M1. The wrapper
- * functions module_driver defines below are referenced only by the
- * closing-commit init mechanism (see the DEFERRED DESIGN DECISION
- * note above); marked here so -Wunused doesn't fire on them. */
+ * functions module_driver defines below are reached by an explicit
+ * extern "C" call from arsenal-kernel by symbol name (ADR-0008);
+ * the macros here are no-ops that reference the wrapper names only
+ * to suppress -Wunused. */
 #define module_init(initfn)
 #define module_exit(exitfn)
 
 /* module_driver(drv, register, unregister) — defines the standard
- * static <drv>_init / <drv>_exit wrappers that (un)register the
- * driver, then hands them to the no-op module_init / module_exit.
- * Mirrors Linux's macro shape so the wrapper names + signatures
- * match what the closing-commit init mechanism will look for. */
+ * <drv>_init / <drv>_exit wrappers that (un)register the driver,
+ * then hands them to the no-op module_init / module_exit. Mirrors
+ * Linux's macro shape; the wrappers are EXTERNAL (no `static`)
+ * per ADR-0008 so arsenal-kernel can call them by symbol name. */
 #define module_driver(__driver, __register, __unregister)            \
-    static int __init __driver##_init(void)                          \
+    int __driver##_init(void)                                        \
     {                                                                \
         return __register(&(__driver));                              \
     }                                                                \
     module_init(__driver##_init);                                    \
-    static void __exit __driver##_exit(void)                         \
+    void __driver##_exit(void)                                       \
     {                                                                \
         __unregister(&(__driver));                                   \
     }                                                                \
