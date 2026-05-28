@@ -492,18 +492,51 @@ discipline. Rounds landed so far:
     undefined collapses balloon's whole migration path, so the
     header is minimal (3-field balloon_dev_info, no
     migratepage/enum migrate_mode).
+  - Round 9 `533a07a`: oom.h + struct notifier_block (+ NOTIFY_OK)
+    in shim_c.h + register/unregister_oom_notifier stubs in mm.rs.
+  - Round 10 `bbed62d`: wait.h — busy-poll wait_event (cooperative
+    M1, mirrors time.rs's msleep posture), wait_queue_head_t,
+    cpu_relax, no-op init_waitqueue_head / wake_up.
+  - Round 11 `58b9002`: mm.h — page_to_pfn inline + page_address /
+    alloc_pages / free_pages / put_page / adjust_managed_page_count
+    over the ADR-0007 struct page (page.rs stubs); + PAGE_SHIFT /
+    PAGE_SIZE / ULONG_MAX / BUILD_BUG_ON in shim_c.h.
+  - Round 12 `6b2e4ef`: page_reporting.h (LAST top-level include) +
+    page_reporting_register/_unregister stubs. **Closes the include
+    set** — all 12 of balloon's top-level includes now resolve.
+  - Round 13 `8e46d58`: first body-error wave foundations —
+    u8..u64 / s8..s64 kernel scalar aliases, spinlock_t + the
+    irqsave/irq spinlock variants (M1 no-IRQ-disable simplification,
+    documented), PM wakeup no-ops (pm_stay_awake / pm_relax /
+    device_set_wakeup_capable).
 
-balloon resolves 9 of its top-level includes; **4 remain**:
-`oom.h` (line 17, next — OOM-notifier / shrinker surface),
-`wait.h` (18), `mm.h` (19 — pulls page_to_pfn / page_address /
-alloc_pages / put_page over the ADR-0007 struct page),
-`page_reporting.h` (20). After the include set resolves, the
-deeper body errors begin (struct-field references, `virtio_
-cread_le`, the virtqueue panic-stubs balloon actually calls).
-The 2026-05-27 session ran 6 of these rounds + ADR-0007; the
-"step away for a day" cue is available — sub-task 3 is the
-unbudgetable arc and pacing against the 3-5-session estimate
-(not session-count optimism) is the right posture.
+**All 12 top-level includes resolve; the compile is now in the
+body-error phase** — the deeper, broader work the HANDOFF predicted
+(no longer one-include-per-round; now clusters of missing
+types/macros/functions per probe). Remaining body-error waves seen
+at round 13's probe, for the next session's resume:
+  - `struct virtqueue` needs a `->vdev` field (balloon reads
+    `vq->vdev`); touches the M1-2-3 virtqueue surface.
+  - `struct scatterlist` full definition + sg_init_one /
+    sg_init_table / sg_set_buf (<linux/scatterlist.h>).
+  - `cpu_to_virtio16/32/64` (+ virtioNN_to_cpu) endian helpers and
+    `virtio_cread_le` (<linux/virtio_config.h> growth).
+  - `min` / `ARRAY_SIZE` / `list_for_each_entry_safe` kernel macros.
+  - `dev_info` / `dev_err` / `dev_warn` / `dev_info_ratelimited`
+    device-print macros (→ printk or no-op).
+  - `global_node_page_state` + `NR_FILE_PAGES` VM stats (→ 0 at M1).
+  - `system_freezable_wq` / `system_wq` global workqueue pointers.
+  - then the virtqueue panic-stubs balloon actually calls
+    (virtqueue_add_outbuf / _inbuf / kick / get_buf / get_vring_size),
+    whose real implementations are the M1-2-5-closing work.
+
+The 2026-05-27 session ran rounds 4-13 + ADR-0007 (the include set
+fully closed). The "step away for a day" cue is squarely in play —
+sub-task 3 is the unbudgetable arc; pace against the 3-5-session
+estimate, not session-count optimism. The body-error phase is where
+the closing-commit work (real virtqueue + real struct page
+lifecycle + the init-invocation mechanism + ARSENAL_VIRTIO_BALLOON_OK)
+comes into view.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
