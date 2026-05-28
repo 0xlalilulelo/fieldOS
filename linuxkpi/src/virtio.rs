@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use core::ptr::NonNull;
 use spin::Mutex;
 
-use crate::types::{c_char, c_int, c_uint, c_void};
+use crate::types::{c_char, c_int, c_uint, c_ulong, c_void};
 
 unsafe extern "C" {
     fn linuxkpi_pci_config_read32(bus: u8, dev: u8, func: u8, offset: u8) -> u32;
@@ -486,21 +486,64 @@ pub unsafe extern "C" fn virtqueue_get_buf(
     panic!("linuxkpi: virtqueue_get_buf not yet implemented (lands at M1-2-5)")
 }
 
-/// `sg_init_one` (<linux/scatterlist.h>) — initialize a single-entry
-/// scatterlist pointing at `buf` for `buflen` bytes. The scatterlist
-/// representation is settled at the M1-2-5-closing commit together
-/// with the real virtqueue_add_* that consumes it; panic-on-call
-/// until then. `sg` is opaque (`struct scatterlist *`) to this stub.
+/// Mirror of <linux/scatterlist.h>'s `struct scatterlist`. Layout +
+/// field types match shim_c.h exactly (the C side and inherited
+/// drivers see this shape). The shim's simplified DMA model uses
+/// `dma_address` as the physical address the virtqueue descriptor
+/// will carry; `page_link` / `offset` are unused at M1 (Linux uses
+/// page_link to encode struct page + flags, but Arsenal's DMA is
+/// HHDM-identity so the conversion happens in sg_init_one directly).
+#[repr(C)]
+pub struct scatterlist {
+    pub page_link: c_ulong,
+    pub offset: c_uint,
+    pub length: c_uint,
+    pub dma_address: u64,
+    pub dma_length: c_uint,
+}
+
+unsafe extern "C" {
+    fn linuxkpi_paging_hhdm_offset() -> u64;
+}
+
+/// `sg_init_one` (<linux/scatterlist.h>) — initialize `sg` as a
+/// single-entry scatterlist pointing at `buf` for `buflen` bytes.
+///
+/// M1 model: `buf` is a kernel virtual address in the HHDM mapping
+/// (everything the shim allocates — frames, kmalloc heap, page
+/// descriptors — lives there). The physical address the virtqueue
+/// descriptor needs is `buf - hhdm_offset()`, which we compute and
+/// stash into `dma_address` directly; the eventual virtqueue_add_*
+/// reads `dma_address` + `dma_length` from each sg entry. No
+/// separate `dma_map_sg` step is needed (Arsenal's DMA is
+/// cache-coherent + identity-mapped on x86_64).
 ///
 /// # Safety
-/// Calling this during the M1-2-5 Part B iteration arc panics.
+/// `sg` must point to a writable `struct scatterlist`; `buf` should
+/// be a kernel virtual address in the HHDM mapping.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sg_init_one(
-    _sg: *mut c_void,
-    _buf: *const c_void,
-    _buflen: c_uint,
+    sg: *mut scatterlist,
+    buf: *const c_void,
+    buflen: c_uint,
 ) {
-    panic!("linuxkpi: sg_init_one not yet implemented (lands at M1-2-5 close)")
+    if sg.is_null() {
+        return;
+    }
+    // SAFETY: bridge fn — read-only.
+    let hhdm = unsafe { linuxkpi_paging_hhdm_offset() };
+    let virt = buf as u64;
+    let phys = virt.wrapping_sub(hhdm);
+    // SAFETY: sg is non-null per the check; the writes are within
+    // the struct's bounds (no aliasing beyond what the caller already
+    // owns).
+    unsafe {
+        (*sg).page_link = 0;
+        (*sg).offset = 0;
+        (*sg).length = buflen;
+        (*sg).dma_address = phys;
+        (*sg).dma_length = buflen;
+    }
 }
 
 // =====================================================================

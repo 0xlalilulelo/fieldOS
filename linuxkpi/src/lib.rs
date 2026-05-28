@@ -467,6 +467,95 @@ pub fn self_test() {
         }
     }
 
+    // page lifecycle: alloc_pages(0,0) gives a struct page with
+    // refcount=1 and a page-aligned backing frame; page_address ==
+    // hhdm + _phys; writes via page_address round-trip; put_page
+    // returns the frame + descriptor to the allocator.
+    unsafe {
+        let p = page::alloc_pages(0, 0);
+        assert!(!p.is_null(), "alloc_pages(0,0) returned NULL");
+        assert_eq!((*p)._refcount, 1, "fresh page should have refcount 1");
+        assert!((*p)._phys != 0, "fresh page should have non-zero _phys");
+        assert_eq!((*p)._phys & 0xfff, 0, "_phys should be page-aligned");
+        // page_address round-trip: write a tag via the virtual
+        // pointer, read it back through the same accessor.
+        let va = page::page_address(p) as *mut u32;
+        assert!(!va.is_null(), "page_address(p) returned NULL");
+        core::ptr::write_volatile(va, 0xCAFE_F00D);
+        let va2 = page::page_address(p) as *const u32;
+        assert_eq!(core::ptr::read_volatile(va2), 0xCAFE_F00D);
+        // refcount drops to 0; put_page frees frame + descriptor.
+        page::put_page(p);
+    }
+
+    // balloon_compaction.h: balloon_page_alloc + balloon_page_enqueue
+    // + balloon_page_dequeue round-trip on a manually-initialized
+    // balloon_dev_info (balloon's C-side balloon_devinfo_init is
+    // unreachable from Rust; we replicate it by hand).
+    {
+        let mut bdi = page::balloon_dev_info {
+            isolated_pages: 0,
+            pages_lock: [0u64; 2],
+            pages: list::list_head::new(),
+        };
+        // SAFETY: bdi is on this stack frame; the field pointers are
+        // valid for the duration of the test.
+        unsafe {
+            locks::spin_lock_init(
+                &mut bdi.pages_lock as *mut [u64; 2] as *mut locks::spinlock,
+            );
+            list::INIT_LIST_HEAD(&mut bdi.pages);
+        }
+        // SAFETY: contract for each helper holds on bdi + the page.
+        unsafe {
+            let p1 = page::balloon_page_alloc();
+            assert!(!p1.is_null(), "balloon_page_alloc returned NULL");
+            let p2 = page::balloon_page_alloc();
+            assert!(!p2.is_null(), "second balloon_page_alloc returned NULL");
+            page::balloon_page_enqueue(&mut bdi, p1);
+            page::balloon_page_enqueue(&mut bdi, p2);
+            // FIFO: p1 enqueued first → dequeues first.
+            let d1 = page::balloon_page_dequeue(&mut bdi);
+            assert_eq!(d1, p1, "balloon_page_dequeue should return p1 first (FIFO)");
+            let d2 = page::balloon_page_dequeue(&mut bdi);
+            assert_eq!(d2, p2, "balloon_page_dequeue should return p2 next");
+            let d3 = page::balloon_page_dequeue(&mut bdi);
+            assert!(d3.is_null(), "balloon_page_dequeue on empty list should be NULL");
+            page::put_page(p1);
+            page::put_page(p2);
+        }
+    }
+
+    // sg_init_one: store buf - hhdm in dma_address; length echoes
+    // through to both `length` and `dma_length`.
+    {
+        let mut sg = virtio::scatterlist {
+            page_link: 0,
+            offset: 0,
+            length: 0,
+            dma_address: 0,
+            dma_length: 0,
+        };
+        let buf: u32 = 0xDEAD_BEEF;
+        // SAFETY: sg + buf are on this stack frame.
+        unsafe {
+            virtio::sg_init_one(
+                &mut sg,
+                &buf as *const u32 as *const types::c_void,
+                core::mem::size_of::<u32>() as types::c_uint,
+            );
+        }
+        unsafe extern "C" {
+            fn linuxkpi_paging_hhdm_offset() -> u64;
+        }
+        // SAFETY: bridge fn — read-only.
+        let hhdm = unsafe { linuxkpi_paging_hhdm_offset() };
+        let expected_phys = (&buf as *const u32 as u64).wrapping_sub(hhdm);
+        assert_eq!(sg.dma_address, expected_phys, "sg.dma_address should be buf - hhdm");
+        assert_eq!(sg.dma_length, 4);
+        assert_eq!(sg.length, 4);
+    }
+
     log::pr(b"ARSENAL_LINUXKPI_OK\n");
 }
 
