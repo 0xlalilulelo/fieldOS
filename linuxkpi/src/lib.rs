@@ -590,6 +590,53 @@ pub fn self_test() {
         }
     }
 
+    // M1-2-5 closing-commit round 22a (ADR-0011): workqueue
+    // cooperative-runner round-trip. INIT_WORK + queue_work +
+    // drain_one + idempotency on duplicate queue + empty-queue
+    // returns false. The runner task itself isn't spawned yet
+    // when this self_test runs (it's spawned later by main.rs);
+    // here we drive drain_one directly from the boot stack.
+    {
+        static WQ_TEST_COUNT: locks::AtomicInt = locks::AtomicInt::new(0);
+        unsafe extern "C" fn wq_test_func(_w: *mut workqueue::work_struct) {
+            WQ_TEST_COUNT.inc();
+        }
+        let mut work = workqueue::work_struct::default();
+        // SAFETY: work lives on this stack for the duration of the
+        // queue / drain cycle; the work_struct's storage is the
+        // 64-byte _opaque buffer which the inner cast uses.
+        unsafe {
+            workqueue::linuxkpi_work_init(
+                &mut work as *mut _,
+                wq_test_func as *const types::c_void,
+            );
+            // Initial enqueue: IDLE -> PENDING, true.
+            assert!(
+                workqueue::queue_work(core::ptr::null_mut(), &mut work as *mut _),
+                "queue_work on idle work should return true"
+            );
+            // Re-enqueue while PENDING: returns false (no double-queue).
+            assert!(
+                !workqueue::queue_work(core::ptr::null_mut(), &mut work as *mut _),
+                "queue_work on pending work should return false"
+            );
+        }
+        assert_eq!(WQ_TEST_COUNT.read(), 0, "work body not yet dispatched");
+        assert!(workqueue::drain_one(), "drain_one should report work dispatched");
+        assert_eq!(WQ_TEST_COUNT.read(), 1, "work body ran exactly once");
+        assert!(!workqueue::drain_one(), "empty queue returns false");
+        // Re-queue after IDLE: works again.
+        // SAFETY: same as above.
+        unsafe {
+            assert!(
+                workqueue::queue_work(core::ptr::null_mut(), &mut work as *mut _),
+                "queue_work on now-idle work should return true again"
+            );
+        }
+        assert!(workqueue::drain_one());
+        assert_eq!(WQ_TEST_COUNT.read(), 2);
+    }
+
     log::pr(b"ARSENAL_LINUXKPI_OK\n");
 }
 

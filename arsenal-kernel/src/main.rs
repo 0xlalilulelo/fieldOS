@@ -369,6 +369,16 @@ extern "C" fn _start() -> ! {
     // which is how the smoke validates 4-4.
     sched::spawn(preempt_witness);
 
+    // M1-2-5 closing-commit round 22a (ADR-0011): cooperative
+    // workqueue runner. Drains linuxkpi's PENDING work queue
+    // (balloon's stats / size-update / free-page work paths and
+    // any future inherited driver's deferred work). Spawned
+    // before any inherited driver init so the runner is in the
+    // runqueue when queue_work first fires. One runner for all
+    // inherited drivers at M1; ADR-0013 is the per-workqueue
+    // successor.
+    sched::spawn(workqueue_runner);
+
     // 3G-1: shell task. Prints `> `, emits ARSENAL_PROMPT_OK, then
     // loops on kbd::poll feeding a 256-byte line buffer with VT100
     // backspace handling and a stub dispatch (3G-2 lands the
@@ -421,6 +431,19 @@ fn finish() -> ! {
 /// asm that would actually invoke this; today it's never executed.
 fn task_smoke_entry() -> ! {
     halt();
+}
+
+/// M1-2-5 closing-commit round 22a (ADR-0011): cooperative workqueue
+/// runner. Drains linuxkpi's shared PENDING queue. On each iteration:
+/// if work is pending, dispatch one body; otherwise yield. Bodies run
+/// to completion before the next work is popped (no concurrent work
+/// at M1 — single runner, single shared queue).
+fn workqueue_runner() -> ! {
+    loop {
+        if !linuxkpi::workqueue::drain_one() {
+            sched::yield_now();
+        }
+    }
 }
 
 /// 4-4 preempt witness. Tight loop that never yields. The smoke's
