@@ -324,6 +324,12 @@ extern void linuxkpi_warn(const char *file, int line, const char *cond);
 #define WARN_ON_ONCE(cond) WARN_ON(cond)
 #define WARN_ONCE(cond, ...) WARN_ON(cond)
 
+/* BUILD_BUG_ON — compile-time assertion. A true `cond` makes the
+ * array size negative, which fails to compile. Pure compile-time,
+ * no runtime cost. balloon: BUILD_BUG_ON(PAGE_SHIFT <
+ * VIRTIO_BALLOON_PFN_SHIFT). */
+#define BUILD_BUG_ON(cond) ((void)sizeof(char[1 - 2 * !!(cond)]))
+
 /* ---- <linux/err.h> ---- */
 
 #define MAX_ERRNO 4095
@@ -362,6 +368,18 @@ extern int  list_empty(const struct list_head *head);
     struct list_head *head__ = (ptr); \
     struct list_head *first__ = head__->next; \
     first__ != head__ ? list_entry(first__, type, member) : NULL; })
+
+/* ---- <linux/limits.h> ---- */
+
+#define ULONG_MAX (~0UL)
+
+/* ---- <asm/page.h> ---- */
+
+/* 4-KiB base page. Matches arsenal-kernel's frame size (the only
+ * granule frames::FRAMES hands out). page_to_pfn shifts a struct
+ * page's _phys by PAGE_SHIFT. */
+#define PAGE_SHIFT 12
+#define PAGE_SIZE  (1UL << PAGE_SHIFT)
 
 /* ---- <linux/mm_types.h> ---- */
 
