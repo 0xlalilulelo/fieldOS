@@ -38,6 +38,17 @@ typedef int16_t __s16;
 typedef int32_t __s32;
 typedef int64_t __s64;
 
+/* Kernel short-form scalar aliases (the in-tree names inherited
+ * drivers use, distinct from the __-prefixed UAPI forms above). */
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int8_t  s8;
+typedef int16_t s16;
+typedef int32_t s32;
+typedef int64_t s64;
+
 typedef uint32_t gfp_t;
 typedef uint64_t dma_addr_t;
 typedef int64_t  loff_t;
@@ -125,9 +136,38 @@ extern void mutex_unlock(struct mutex *m);
 
 /* ---- <linux/spinlock.h> ---- */
 
+typedef struct spinlock spinlock_t;
+
 extern void spin_lock_init(struct spinlock *s);
 extern void spin_lock(struct spinlock *s);
 extern void spin_unlock(struct spinlock *s);
+
+/* IRQ-saving variants. M1 simplification: virtio is polled (vq
+ * callbacks run in process/polling context, not hard IRQ) and each
+ * inherited driver's locks are private to it, so the local-IRQ
+ * disable these provide in Linux is not needed for correctness yet —
+ * the underlying spin_lock supplies the mutual exclusion. `flags` is
+ * cleared rather than holding a saved IRQ state. Documented
+ * simplification in the spirit of time.rs's busy-wait msleep; real
+ * local_irq_save / _restore lands when an inherited driver takes a
+ * lock in hard-IRQ context (a bridge fn, then). */
+#define spin_lock_irqsave(lock, flags) \
+    do { (flags) = 0; spin_lock(lock); } while (0)
+#define spin_unlock_irqrestore(lock, flags) \
+    do { (void)(flags); spin_unlock(lock); } while (0)
+#define spin_lock_irq(lock)   spin_lock(lock)
+#define spin_unlock_irq(lock) spin_unlock(lock)
+
+/* ---- <linux/pm_wakeup.h> + <linux/device.h> wakeup ---- */
+
+/* Power-management wakeup sources. Arsenal has no PM / suspend
+ * subsystem at M1, so these are no-ops; balloon uses them to keep
+ * the device awake while adjusting the balloon (a suspend-time
+ * concern that does not exist yet). */
+#define pm_stay_awake(dev) ((void)(dev))
+#define pm_relax(dev)      ((void)(dev))
+#define device_set_wakeup_capable(dev, capable) \
+    do { (void)(dev); (void)(capable); } while (0)
 
 /* ---- <linux/pci.h> + <linux/mod_devicetable.h> ---- */
 
