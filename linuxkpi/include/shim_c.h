@@ -25,7 +25,10 @@
 #define ARSENAL_LINUXKPI_SHIM_C_H
 
 #include <stddef.h>  /* size_t */
-#include <stdint.h>  /* fixed-width integers */
+#include <stdint.h>   /* fixed-width integers */
+#include <stdbool.h>  /* `bool` — used across the shim regardless of
+                       * which header an inherited driver includes
+                       * first (order-independent). */
 
 /* ---- <linux/types.h> aliases ---- */
 
@@ -297,6 +300,8 @@ struct virtio_device_id {
     __u32 vendor;
 };
 
+struct virtio_config_ops;  /* defined just below virtio_device */
+
 /* Trimmed virtio_device. Fields are the ones balloon (and the M1
  * inherited driver fleet) actually reach for. Layout matches
  * linuxkpi/src/virtio.rs's `pub struct virtio_device`. */
@@ -304,8 +309,11 @@ struct virtio_device {
     __u32 id_device;
     __u32 id_vendor;
     void *priv;
+    /* PCI transport address (shim-internal). `pci_dev`, not `dev`,
+     * so it doesn't collide with the embedded `struct device dev`
+     * below that inherited drivers reach via `&vdev->dev`. */
     __u8  bus;
-    __u8  dev;
+    __u8  pci_dev;
     __u8  func;
     __u8  _pad;
     void *common_cfg;
@@ -313,16 +321,39 @@ struct virtio_device {
     __u32 notify_off_multiplier;
     void *isr;
     void *device_cfg;
+    /* virtio_config_ops vtable. The shim populates it at probe time
+     * (M1-2-5-closing); balloon reads ->get + ->del_vqs. */
+    const struct virtio_config_ops *config;
+    /* Linux's embedded device. balloon takes `&vdev->dev`. */
+    struct device dev;
 };
 
-/* Trimmed virtio_driver. M1-2-4 / 2-5 will surface missing fields
- * (feature_table, validate, scan, config_changed) when balloon's
- * compile demands them; we add then. */
-struct virtio_driver {
+/* Config-ops vtable. Trimmed to what balloon dereferences: ->get
+ * (validate checks it is non-NULL) and ->del_vqs (remove teardown).
+ * The full Linux vtable is ~15 ops; future drivers extend this. */
+struct virtio_config_ops {
+    void (*get)(struct virtio_device *vdev, unsigned int offset,
+                void *buf, unsigned int len);
+    void (*del_vqs)(struct virtio_device *vdev);
+};
+
+/* virtio_driver — Linux shape: name lives in the embedded
+ * struct device_driver (.driver.name), per balloon's initializer.
+ * Trimmed to balloon's used fields; the PM freeze/restore ops are
+ * #ifdef CONFIG_PM_SLEEP in balloon and omitted here. */
+struct device_driver {
     const char *name;
+};
+
+struct virtio_driver {
+    struct device_driver driver;
     const struct virtio_device_id *id_table;
+    const unsigned int *feature_table;
+    unsigned int feature_table_size;
+    int  (*validate)(struct virtio_device *dev);
     int  (*probe)(struct virtio_device *dev);
     void (*remove)(struct virtio_device *dev);
+    void (*config_changed)(struct virtio_device *dev);
 };
 
 extern int  register_virtio_driver(struct virtio_driver *drv);
@@ -335,14 +366,38 @@ extern void  virtio_cwrite8(struct virtio_device *vdev, unsigned int offset, __u
 extern void  virtio_cwrite16(struct virtio_device *vdev, unsigned int offset, __u16 val);
 extern void  virtio_cwrite32(struct virtio_device *vdev, unsigned int offset, __u32 val);
 
-/* Virtqueue surface — opaque type + entry-point declarations.
- * M1-2-3 ships these as panic-on-call stubs; real virtqueue
- * machinery lands at M1-2-5 when virtio-balloon online demands
- * them (the gap-filling sub-block per HANDOFF). */
-struct virtqueue { unsigned char _opaque[16]; };
+/* virtio feature bits (the ones balloon's validate touches; the
+ * device-specific VIRTIO_BALLOON_F_* live in the UAPI header). */
+#define VIRTIO_F_ACCESS_PLATFORM 33
 
-extern int  find_vqs(struct virtio_device *vdev, unsigned int nvqs,
-                     struct virtqueue **vqs, const char *const *names);
+/* Host/virtio endian conversion. Modern virtio (VIRTIO_F_VERSION_1)
+ * is little-endian and Arsenal's targets are little-endian x86, so
+ * these are identity; the vdev argument (which would select legacy
+ * byte order) is ignored. Real on a big-endian port would branch on
+ * vdev's negotiated VERSION_1 bit. */
+#define cpu_to_virtio16(vdev, v) ((__u16)(v))
+#define cpu_to_virtio32(vdev, v) ((__u32)(v))
+#define cpu_to_virtio64(vdev, v) ((__u64)(v))
+#define virtio16_to_cpu(vdev, v) ((__u16)(v))
+#define virtio32_to_cpu(vdev, v) ((__u32)(v))
+#define virtio64_to_cpu(vdev, v) ((__u64)(v))
+
+/* Virtqueue. balloon reads ->vdev (owning device) and ->num_free
+ * (available descriptors); priv holds shim-internal vring state the
+ * M1-2-5-closing virtqueue impl populates. */
+struct virtqueue {
+    struct virtio_device *vdev;
+    unsigned int          num_free;
+    void                 *priv;
+};
+
+/* virtqueue_info + virtio_find_vqs live in <linux/virtio_config.h>
+ * (their Linux home); the closing-commit impl + the
+ * struct virtqueue_info definition are declared there. */
+
+/* Virtqueue entry points — panic-on-call stubs (M1-2-3 / 2-5
+ * iteration); real virtqueue machinery lands at the M1-2-5-closing
+ * commit when virtio-balloon online demands it. */
 extern int  virtqueue_add_outbuf(struct virtqueue *vq, const void *sg,
                                  unsigned int num, void *data,
                                  unsigned int gfp);
@@ -351,6 +406,11 @@ extern int  virtqueue_add_inbuf(struct virtqueue *vq, const void *sg,
                                 unsigned int gfp);
 extern int  virtqueue_kick(struct virtqueue *vq);
 extern void *virtqueue_get_buf(struct virtqueue *vq, unsigned int *len);
+extern unsigned int virtqueue_get_vring_size(const struct virtqueue *vq);
+
+/* __virtio_clear_bit — clear a driver-side feature bit during
+ * validate (lower-level than virtio_clear_bit). */
+extern void __virtio_clear_bit(struct virtio_device *vdev, unsigned int fbit);
 
 /* ---- <linux/kernel.h> + <linux/bug.h> macros ---- */
 

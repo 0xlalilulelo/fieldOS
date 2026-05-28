@@ -74,18 +74,26 @@ extern void virtio_clear_bit(struct virtio_device *vdev, unsigned int fbit);
     }                                                                    \
 } while (0)
 
-/* virtio_find_vqs — Linux's signature has more parameters than the
- * M1-2-3 find_vqs panic-stub in shim_c.h (callbacks, ctx,
- * irq_affinity). Declared here in its Linux shape; the
- * M1-2-5-closing commit will reconcile the extern signature with
- * the implementation in linuxkpi/src/virtio.rs. For now, the
- * declaration lets balloon.c compile; the link-time symbol will
- * resolve once the closing commit lands the impl. */
-typedef void (*vq_callback_t)(struct virtqueue *vq);
-struct irq_affinity;
+/* virtio_find_vqs — Linux 6.12 shape: the per-vq parameters
+ * (name, callback, ctx) are bundled into a struct virtqueue_info
+ * array rather than the older parallel callbacks[] / names[] / ctx[]
+ * arrays. vq_callback_t is the bare function type, so
+ * `vq_callback_t *callback` is a pointer. The implementation in
+ * linuxkpi/src/virtio.rs is a panic-on-call stub until the
+ * M1-2-5-closing commit lands the real vring setup. */
+typedef void vq_callback_t(struct virtqueue *vq);
+
+struct virtqueue_info {
+    const char    *name;
+    vq_callback_t *callback;
+    bool           ctx;
+};
+
+struct irq_affinity;  /* opaque; balloon passes NULL */
+
 extern int virtio_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
-                           struct virtqueue *vqs[], vq_callback_t *callbacks[],
-                           const char *const names[], const bool *ctx,
+                           struct virtqueue *vqs[],
+                           struct virtqueue_info vqs_info[],
                            struct irq_affinity *desc);
 
 #endif /* ARSENAL_LINUXKPI_LINUX_VIRTIO_CONFIG_H */

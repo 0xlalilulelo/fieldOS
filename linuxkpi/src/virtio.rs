@@ -110,7 +110,11 @@ pub struct virtio_device {
     /// access device_cfg directly; find_vqs / virtqueue_*
     /// (deferred to M1-2-5) will use common_cfg + notify_base.
     pub bus: u8,
-    pub dev: u8,
+    /// PCI device number (transport address). Named `pci_dev`, not
+    /// `dev`, so it does not collide with the embedded `dev`
+    /// (`struct device`) below that inherited drivers reach via
+    /// `&vdev->dev`. Matches shim_c.h.
+    pub pci_dev: u8,
     pub func: u8,
     pub _pad: u8,
     pub common_cfg: *mut u8,
@@ -118,6 +122,14 @@ pub struct virtio_device {
     pub notify_off_multiplier: u32,
     pub isr: *mut u8,
     pub device_cfg: *mut u8,
+    /// virtio_config_ops vtable (opaque to Rust). NULL until the
+    /// M1-2-5-closing commit populates it; balloon reads ->get +
+    /// ->del_vqs through it. Layout-matches shim_c.h's `config`.
+    pub config: *const c_void,
+    /// Linux's embedded `struct device` (8-byte opaque in shim_c.h;
+    /// the DMA section's `struct device`). balloon takes `&vdev->dev`
+    /// for dev_* logging + PM, all no-ops at M1.
+    pub dev: [u8; 8],
 }
 
 // SAFETY: virtio_device is a passive descriptor; concurrent
@@ -125,17 +137,30 @@ pub struct virtio_device {
 unsafe impl Send for virtio_device {}
 unsafe impl Sync for virtio_device {}
 
-/// `struct virtio_driver`. M1-2-3 trimmed surface: name +
-/// id_table + probe + remove. The full Linux struct includes
-/// feature_table / validate / scan / config_changed / freeze /
-/// restore — added when balloon's compile (M1-2-4 / 2-5)
-/// demands them.
+/// `struct device_driver` — Linux's base driver struct. balloon
+/// (and the Linux virtio_driver shape) put the driver name here,
+/// reached as `.driver.name`. Only `name` is mirrored; the rest of
+/// Linux's device_driver is bus/PM machinery the shim doesn't model.
+#[repr(C)]
+pub struct device_driver {
+    pub name: *const c_char,
+}
+
+/// `struct virtio_driver` — Linux shape (matches shim_c.h). `name`
+/// moved into the embedded `driver` (device_driver); feature_table /
+/// feature_table_size / validate / config_changed added for
+/// balloon's initializer. Field order + types mirror shim_c.h
+/// exactly (the registration code below reads id_table + probe).
 #[repr(C)]
 pub struct virtio_driver {
-    pub name: *const c_char,
+    pub driver: device_driver,
     pub id_table: *const virtio_device_id,
+    pub feature_table: *const c_uint,
+    pub feature_table_size: c_uint,
+    pub validate: Option<unsafe extern "C" fn(*mut virtio_device) -> c_int>,
     pub probe: Option<unsafe extern "C" fn(*mut virtio_device) -> c_int>,
     pub remove: Option<unsafe extern "C" fn(*mut virtio_device)>,
+    pub config_changed: Option<unsafe extern "C" fn(*mut virtio_device)>,
 }
 
 unsafe impl Send for virtio_driver {}
@@ -206,7 +231,7 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
             id_vendor: VIRTIO_VENDOR as u32,
             priv_data: core::ptr::null_mut(),
             bus,
-            dev,
+            pci_dev: dev,
             func,
             _pad: 0,
             common_cfg: raw.common_cfg as *mut u8,
@@ -214,6 +239,8 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
             notify_off_multiplier: raw.notify_off_multiplier,
             isr: raw.isr as *mut u8,
             device_cfg: raw.device_cfg as *mut u8,
+            config: core::ptr::null(),
+            dev: [0u8; 8],
         };
         // SAFETY: probe_fn is a valid extern "C" fn per the
         // driver's declaration; vdev lives on this stack frame
@@ -351,29 +378,57 @@ pub unsafe extern "C" fn virtio_cwrite32(vdev: *mut virtio_device, offset: c_uin
 // machinery (the "gap-filling" sub-block per HANDOFF).
 // =====================================================================
 
-/// Linux's `struct virtqueue` is opaque to drivers; they only
-/// hold pointers. M1-2-3 declares it as an opaque placeholder so
-/// inherited driver code that does `struct virtqueue *vq;`
-/// compiles. Actual layout populated at M1-2-5.
+/// `struct virtqueue`. Mirrors shim_c.h: balloon reads `vdev` (the
+/// owning device) and `num_free` (available descriptors); `priv`
+/// holds shim-internal vring state the M1-2-5-closing impl fills.
+/// Inherited drivers only hold `*mut virtqueue`; the shim allocates
+/// and populates instances at find-vqs time.
 #[repr(C)]
 pub struct virtqueue {
-    _opaque: [u8; 16],
+    pub vdev: *mut virtio_device,
+    pub num_free: c_uint,
+    pub priv_: *mut c_void,
 }
 
-/// `find_vqs` — discover and configure virtqueues for `vdev`.
-/// Stubbed at M1-2-3; lands at M1-2-5 when balloon demands.
+/// `virtio_find_vqs` — discover and configure `nvqs` virtqueues for
+/// `vdev` per the `vqs_info` descriptors, storing the results in
+/// `vqs`. Linux 6.12 shape (replaced the older names-array find_vqs).
+/// Stubbed; the real vring setup lands at the M1-2-5-closing commit.
+/// `vqs_info` (`struct virtqueue_info *`) and `desc` are opaque here.
 ///
 /// # Safety
-/// Calling this at M1-2-3 panics; never reached under the
-/// existing self-test path.
+/// Calling this during the M1-2-5 Part B iteration arc panics.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn find_vqs(
+pub unsafe extern "C" fn virtio_find_vqs(
     _vdev: *mut virtio_device,
     _nvqs: c_uint,
     _vqs: *mut *mut virtqueue,
-    _names: *const *const c_char,
+    _vqs_info: *mut c_void,
+    _desc: *mut c_void,
 ) -> c_int {
-    panic!("linuxkpi: find_vqs not yet implemented (lands at M1-2-5)")
+    panic!("linuxkpi: virtio_find_vqs not yet implemented (lands at M1-2-5 close)")
+}
+
+/// `virtqueue_get_vring_size` — number of descriptor slots in `vq`'s
+/// vring. balloon reads it to size its free-page-reporting batches.
+/// Stubbed until the M1-2-5-closing virtqueue impl.
+///
+/// # Safety
+/// Calling this during the M1-2-5 Part B iteration arc panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn virtqueue_get_vring_size(_vq: *const virtqueue) -> c_uint {
+    panic!("linuxkpi: virtqueue_get_vring_size not yet implemented (lands at M1-2-5 close)")
+}
+
+/// `__virtio_clear_bit` — clear driver-side feature bit `fbit` on
+/// `vdev` (lower-level than virtio_clear_bit; used during validate).
+/// Real impl clears the bit in the negotiated-features storage.
+///
+/// # Safety
+/// Calling this during the M1-2-5 Part B iteration arc panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __virtio_clear_bit(_vdev: *mut virtio_device, _fbit: c_uint) {
+    panic!("linuxkpi: __virtio_clear_bit not yet implemented (lands at M1-2-5 close)")
 }
 
 /// `virtqueue_add_outbuf` — submit an outbound buffer to a vq.

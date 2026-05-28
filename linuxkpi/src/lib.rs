@@ -337,10 +337,16 @@ pub fn self_test() {
             virtio::virtio_device_id { device: 0, vendor: 0 },
         ];
         let mut driver = virtio::virtio_driver {
-            name: c"linuxkpi-virtio-self-test".as_ptr(),
+            driver: virtio::device_driver {
+                name: c"linuxkpi-virtio-self-test".as_ptr(),
+            },
             id_table: VIRTIO_ID_TABLE.as_ptr(),
+            feature_table: core::ptr::null(),
+            feature_table_size: 0,
+            validate: None,
             probe: Some(noop_virtio_probe),
             remove: None,
+            config_changed: None,
         };
         // SAFETY: driver lives on this stack for the registration
         // window; register_virtio_driver dispatches probe
