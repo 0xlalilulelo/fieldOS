@@ -263,7 +263,7 @@ use crate::virtio::{
     Virtqueue, VirtioDevice, activate_queue, set_driver_ok,
     notify as virtio_notify, cc_read8, cc_write8, cc_read16, cc_write16,
     cc_read32, cc_write32,
-    CC_QUEUE_SELECT, CC_QUEUE_SIZE, CC_DEVICE_STATUS,
+    CC_QUEUE_SELECT, CC_QUEUE_SIZE, CC_DEVICE_STATUS, CC_MSIX_CONFIG,
     CC_DEVICE_FEATURE_SELECT, CC_DEVICE_FEATURE,
     CC_DRIVER_FEATURE_SELECT, CC_DRIVER_FEATURE,
     STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_FEATURES_OK,
@@ -570,6 +570,34 @@ pub unsafe extern "C" fn linuxkpi_virtio_init_transport(
         );
 
         negotiated
+    }
+}
+
+/// Write the MSI-X vector index for the virtio config-change irq
+/// into `CC_MSIX_CONFIG` (offset 0x10 in COMMON_CFG). Per virtio
+/// v1.2 § 4.1.5.1.2, the device fires its config-change irq via
+/// the MSI-X vector at the written index after this write; the
+/// special value `VIRTIO_MSI_NO_VECTOR` (0xFFFF) disables the
+/// irq. Read back the same offset to confirm the write (the spec
+/// requires the device echo the written value if the vector is
+/// valid; reading back 0xFFFF after writing a real index would
+/// signal allocation failure). Round-22c wiring: balloon's
+/// `virtballoon_changed` becomes reachable from QMP-driven
+/// config updates after this write.
+///
+/// # Safety
+/// `common_cfg` is the mapped COMMON_CFG region for a live virtio
+/// device.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtio_set_msix_config_vector(
+    common_cfg: *mut u8,
+    vector_idx: u16,
+) -> u16 {
+    // SAFETY: caller's contract; CC_MSIX_CONFIG is at offset 0x10
+    // (within the 4-KiB COMMON_CFG region).
+    unsafe {
+        cc_write16(common_cfg, CC_MSIX_CONFIG, vector_idx);
+        cc_read16(common_cfg, CC_MSIX_CONFIG)
     }
 }
 

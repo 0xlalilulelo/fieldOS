@@ -38,12 +38,12 @@ unsafe extern "C" {
 /// Mirror of `arsenal_kernel::linuxkpi_bridge::LinuxkpiMsixInfo`.
 /// Populated by the bridge's `linuxkpi_pci_msix_info` extern.
 #[repr(C)]
-struct MsixInfoRaw {
-    present: u32,
-    cap_offset: u32,
-    table_size: u32,
-    table_bar: u32,
-    table_offset: u32,
+pub(crate) struct MsixInfoRaw {
+    pub(crate) present: u32,
+    pub(crate) cap_offset: u32,
+    pub(crate) table_size: u32,
+    pub(crate) table_bar: u32,
+    pub(crate) table_offset: u32,
 }
 
 // =====================================================================

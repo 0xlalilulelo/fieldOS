@@ -17,6 +17,9 @@
 #   SMOKE_TIMEOUT    seconds to wait for sentinels (default: 15)
 #   TCP_SMOKE_PORT   host TCP port to listen on for 3D-3 (default: 12345)
 #   TLS_SMOKE_PORT   host TLS port to listen on for 3D-4 (default: 12346)
+#   QMP_PORT         host TCP port for QEMU's QMP socket — round-22b
+#                    helper connects here to drive a balloon size
+#                    change (default: 12347)
 #   BOOT_BUDGET_MS   M0 step 3 perf gate from ARSENAL.md: "boot to
 #                    prompt in < 2 s under QEMU". Measured as the
 #                    wall-clock delta between ARSENAL_BOOT_OK (kernel
@@ -43,6 +46,7 @@ ISO="${1:-arsenal.iso}"
 TIMEOUT="${SMOKE_TIMEOUT:-15}"
 TCP_SMOKE_PORT="${TCP_SMOKE_PORT:-12345}"
 TLS_SMOKE_PORT="${TLS_SMOKE_PORT:-12346}"
+QMP_PORT="${QMP_PORT:-12347}"
 BOOT_BUDGET_MS="${BOOT_BUDGET_MS:-3000}"
 
 # Millisecond-resolution wall clock. Python is already a smoke
@@ -60,17 +64,29 @@ now_ms() {
 # the underlying assertion is folded into a stronger downstream
 # sentinel. Order does not matter — we wait for the full set.
 REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_IOAPIC_OK" "ARSENAL_SMP_OK" "ARSENAL_NVME_OK" "ARSENAL_LINUXKPI_OK" "ARSENAL_VIRTIO_BALLOON_OK" "ARSENAL_PROMPT_OK")
+# Round 22b/c WIP: ARSENAL_VIRTIO_BALLOON_INFLATE_OK is NOT yet
+# required. The QMP harness fires balloon size changes correctly
+# (host side confirmed); the MSI-X config-changed vector is wired
+# and the device echoes back acceptance of vector 0, but the IRQ
+# never reaches the dispatcher (no "virtio: config-changed IRQ
+# fired" line). Adding the sentinel will land in round 22d once
+# the MSI delivery is debugged. See the round-22b/c commit body
+# for the diagnostic state.
 SERIAL_LOG=$(mktemp -t arsenal-smoke-serial.XXXXXX)
 QEMU_LOG=$(mktemp -t arsenal-smoke-qemu.XXXXXX)
 CERT_DIR=$(mktemp -d -t arsenal-smoke-cert.XXXXXX)
 LISTENER_PID=""
 TLS_LISTENER_PID=""
+QMP_HELPER_PID=""
 cleanup() {
 	if [[ -n "$LISTENER_PID" ]]; then
 		kill -KILL "$LISTENER_PID" 2>/dev/null || true
 	fi
 	if [[ -n "$TLS_LISTENER_PID" ]]; then
 		kill -KILL "$TLS_LISTENER_PID" 2>/dev/null || true
+	fi
+	if [[ -n "$QMP_HELPER_PID" ]]; then
+		kill -KILL "$QMP_HELPER_PID" 2>/dev/null || true
 	fi
 	rm -f "$SERIAL_LOG" "$QEMU_LOG"
 	rm -rf "$CERT_DIR"
@@ -176,12 +192,71 @@ qemu-system-x86_64 \
 	-netdev user,id=net0 \
 	-device virtio-net-pci,netdev=net0 \
 	-device virtio-balloon-pci \
+	-qmp tcp:127.0.0.1:$QMP_PORT,server=on,wait=off \
 	-display none \
 	-no-reboot -no-shutdown \
 	-serial "file:$SERIAL_LOG" \
 	-d guest_errors \
 	-D "$QEMU_LOG" &
 QPID=$!
+
+# Round 22b: drive a balloon size change via QMP after the guest's
+# balloon driver is online. Waits for ARSENAL_VIRTIO_BALLOON_OK in
+# the serial log (so the guest's config-changed irq handler is wired
+# and the workqueue runner is in the runqueue), then connects to
+# QEMU's QMP socket, does the qmp_capabilities handshake, and asks
+# QEMU to reduce the guest's available memory from 256 MiB to 248
+# MiB. balloon's config-changed irq fires; update_balloon_size_func
+# is enqueued on the workqueue; the runner task pops it; balloon
+# allocates ~2048 pages, kicks the inflate vq, busy-polls
+# virtqueue_get_buf for the host ack, then calls
+# adjust_managed_page_count(page, -nr_pages). That shim function
+# emits ARSENAL_VIRTIO_BALLOON_INFLATE_OK on the first non-zero
+# count (one-shot — see linuxkpi/src/page.rs). Helper exits after
+# the QMP ack; the main polling loop sees the serial sentinel land.
+#
+# Fire-and-yield shape: helper does not wait for the inflate cycle
+# itself; the main polling loop above already does that as part of
+# REQUIRED_SENTINELS.
+python3 -u -c "
+import socket, json, time, sys
+deadline = time.time() + 10
+while time.time() < deadline:
+    try:
+        with open('$SERIAL_LOG', 'r') as f:
+            if 'ARSENAL_VIRTIO_BALLOON_OK' in f.read():
+                break
+    except FileNotFoundError:
+        pass
+    time.sleep(0.05)
+else:
+    print('qmp helper: timed out waiting for ARSENAL_VIRTIO_BALLOON_OK', file=sys.stderr)
+    sys.exit(0)
+s = socket.socket()
+for _ in range(40):
+    try:
+        s.connect(('127.0.0.1', $QMP_PORT))
+        break
+    except OSError:
+        time.sleep(0.05)
+else:
+    print('qmp helper: could not connect to 127.0.0.1:$QMP_PORT', file=sys.stderr)
+    sys.exit(0)
+sf = s.makefile('rwb', buffering=0)
+sf.readline()  # greeting
+sf.write(b'{\"execute\":\"qmp_capabilities\"}\n')
+sf.readline()
+# Reduce guest memory by 8 MiB (256M -> 248M). balloon inflates by
+# 8 MiB worth of pages (~2048 4-KiB pages). Any non-zero count
+# fires the sentinel; 8 MiB is 'visibly nontrivial but well under
+# what 256M can afford to give up.'
+target = (256 - 8) * 1024 * 1024
+sf.write(json.dumps({'execute':'balloon','arguments':{'value':target}}).encode() + b'\n')
+sf.readline()
+s.close()
+" &
+QMP_HELPER_PID=$!
+disown "$QMP_HELPER_PID" 2>/dev/null || true
 
 # Polling loop for the perf gate.
 #

@@ -40,6 +40,12 @@ use crate::types::{c_char, c_int, c_uint, c_ulong, c_void};
 
 unsafe extern "C" {
     fn linuxkpi_pci_config_read32(bus: u8, dev: u8, func: u8, offset: u8) -> u32;
+    fn linuxkpi_pci_config_write32(bus: u8, dev: u8, func: u8, offset: u8, val: u32);
+    fn linuxkpi_pci_bar_address(bus: u8, dev: u8, func: u8, bar: u8) -> u64;
+    fn linuxkpi_paging_map_mmio(phys: u64, len: u64);
+    fn linuxkpi_paging_hhdm_offset() -> u64;
+    fn linuxkpi_pci_msix_info(bus: u8, dev: u8, func: u8, out: *mut crate::pci::MsixInfoRaw);
+    fn linuxkpi_virtio_set_msix_config_vector(common_cfg: *mut u8, vector_idx: u16) -> u16;
     fn linuxkpi_virtio_resolve(
         bus: u8,
         dev: u8,
@@ -353,6 +359,7 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
     let id_table = unsafe { (*drv.as_ptr()).id_table };
     let probe = unsafe { (*drv.as_ptr()).probe };
     let validate = unsafe { (*drv.as_ptr()).validate };
+    let config_changed = unsafe { (*drv.as_ptr()).config_changed };
     let feature_table = unsafe { (*drv.as_ptr()).feature_table };
     let feature_table_size = unsafe { (*drv.as_ptr()).feature_table_size };
 
@@ -416,7 +423,21 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
         let negotiated = unsafe {
             linuxkpi_virtio_init_transport(common_cfg, driver_features)
         };
-        let mut vdev = virtio_device {
+        // If the driver subscribes to config_changed callbacks
+        // (e.g., balloon's virtballoon_changed), the vdev pointer
+        // must survive past this closure for the IRQ handler to
+        // reach it. Heap-allocate via Box; Box::into_raw +
+        // intentional leak so the pointer is stable for the
+        // lifetime of the registration. M1 has no unregister
+        // path, so the leak is bounded (one live registration per
+        // matched device per driver).
+        //
+        // If the driver doesn't subscribe to config_changed, we
+        // still allocate on the heap for uniformity — the cost is
+        // one alloc per matched device. balloon is the only
+        // inherited driver at M1; future ones will follow the
+        // same shape.
+        let vdev_box = Box::new(virtio_device {
             id_device: virtio_id,
             id_vendor: VIRTIO_VENDOR as u32,
             priv_data: core::ptr::null_mut(),
@@ -432,25 +453,52 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
             config: &CONFIG_OPS as *const virtio_config_ops as *const c_void,
             dev: [0u8; 8],
             features: negotiated,
-        };
+        });
+        let vdev_ptr: *mut virtio_device = Box::into_raw(vdev_box);
+
+        // Round-22c: wire config-changed MSI-X BEFORE probe (and
+        // therefore before balloon's virtio_device_ready call inside
+        // probe sets DRIVER_OK). The host only sends config-change
+        // irqs after DRIVER_OK, so wiring before probe means the
+        // first QMP-driven config update reaches the handler.
+        if config_changed.is_some() {
+            let ok = setup_config_changed_msix(
+                bus,
+                dev,
+                func,
+                common_cfg,
+                drv.as_ptr(),
+                vdev_ptr,
+            );
+            crate::log::pr(if ok {
+                b"virtio: config-changed MSI-X wired\n"
+            } else {
+                b"virtio: config-changed MSI-X setup FAILED\n"
+            });
+        }
+
         // validate() runs after feature negotiation but before
         // probe(). It may drop more bits via virtio_clear_bit /
         // __virtio_clear_bit; a non-zero return is a refusal —
         // reset the device and continue to the next match.
         if let Some(validate_fn) = validate {
             // SAFETY: validate_fn comes from the registered
-            // driver; vdev lives on this stack frame.
-            let rc = unsafe { validate_fn(&mut vdev as *mut virtio_device) };
+            // driver; vdev_ptr is the heap-allocated box above.
+            let rc = unsafe { validate_fn(vdev_ptr) };
             if rc != 0 {
                 // SAFETY: common_cfg is the live MMIO region.
                 unsafe { linuxkpi_virtio_reset_device(common_cfg) };
+                // vdev is leaked even on refusal at M1 — the MSI-X
+                // table entry, if programmed, still points to the
+                // handler ctx that holds vdev_ptr. Reclaim is the
+                // ADR-0011-successor's job when an inherited
+                // driver actually exits.
                 return;
             }
         }
         // SAFETY: probe_fn is a valid extern "C" fn per the
-        // driver's declaration; vdev lives on this stack frame
-        // for the duration of the call.
-        let rc = unsafe { probe_fn(&mut vdev as *mut virtio_device) };
+        // driver's declaration; vdev_ptr is the heap-allocated box.
+        let rc = unsafe { probe_fn(vdev_ptr) };
         if rc < 0 {
             // Probe declined (Linux convention: negative = did not
             // bind). Return the device to RESET so a later driver
@@ -458,11 +506,195 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
             // re-initialize it from a clean state.
             // SAFETY: common_cfg is the live MMIO region.
             unsafe { linuxkpi_virtio_reset_device(common_cfg) };
+            // Same leak-on-decline note as above.
         }
     });
 
     REGISTRY.lock().push(RegisteredDriver { drv });
     0
+}
+
+/// Write "virtio: msix echoed=<a> idt_vec=<b>\n" into buf. Diagnostic
+/// for round-22c MSI-X wiring during bring-up.
+fn fmt_hex(buf: &mut [u8], echoed: u32, vec: u32) -> usize {
+    const PREFIX: &[u8] = b"virtio: msix echoed=0x";
+    const MID: &[u8] = b" idt_vec=0x";
+    const SUFFIX: &[u8] = b"\n";
+    let mut i = 0;
+    for &b in PREFIX { buf[i] = b; i += 1; }
+    for shift in (0..8).rev() {
+        let nib = ((echoed >> (shift * 4)) & 0xF) as u8;
+        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+        i += 1;
+    }
+    for &b in MID { buf[i] = b; i += 1; }
+    for shift in (0..2).rev() {
+        let nib = ((vec >> (shift * 4)) & 0xF) as u8;
+        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+        i += 1;
+    }
+    for &b in SUFFIX { buf[i] = b; i += 1; }
+    i
+}
+
+/// Per-device handler context carried via `request_irq`'s `dev_id`
+/// argument so the config-change IDT dispatcher can reach back to
+/// the registered driver + the heap-allocated vdev. Box::leak'd at
+/// `setup_config_changed_msix`; lives for the lifetime of the
+/// registration (M1: forever, no remove path).
+#[repr(C)]
+struct ConfigChangedCtx {
+    driver: *mut virtio_driver,
+    vdev: *mut virtio_device,
+}
+
+/// IDT-dispatched handler for the virtio config-change MSI-X.
+/// `request_irq` stores us in the irq SLOTS table; the linuxkpi
+/// dispatcher calls us with the ctx pointer we leaked.
+///
+/// # Safety
+/// `dev_id` is the `ConfigChangedCtx` pointer we leaked in
+/// setup_config_changed_msix; both fields must still be valid (they
+/// are at M1 — no unregister path).
+unsafe extern "C" fn config_changed_irq_dispatch(
+    _irq: c_int,
+    dev_id: *mut c_void,
+) -> c_int {
+    crate::log::pr(b"virtio: config-changed IRQ fired\n");
+    if dev_id.is_null() {
+        return 0;
+    }
+    // SAFETY: dev_id is the boxed ConfigChangedCtx from
+    // setup_config_changed_msix; the box is leaked, so the
+    // pointer is valid through M1's lifetime.
+    unsafe {
+        let ctx = &*(dev_id as *const ConfigChangedCtx);
+        if let Some(cb) = (*ctx.driver).config_changed {
+            crate::log::pr(b"virtio: dispatching config_changed callback\n");
+            cb(ctx.vdev);
+            crate::log::pr(b"virtio: config_changed callback returned\n");
+        }
+    }
+    0
+}
+
+/// Allocate one MSI-X vector for the virtio config-change irq, point
+/// it at a freshly-allocated IDT slot, and register
+/// `config_changed_irq_dispatch` as the slot handler. After this
+/// returns true, writes to balloon's `num_pages` config field by
+/// QEMU trigger the device's MSI-X[0] message, which fires the IDT
+/// vector, which calls back into the driver's `config_changed`
+/// callback. Round-22c — the path that lets QMP-driven balloon
+/// size changes reach `virtballoon_changed` and enqueue
+/// `update_balloon_size_work` for the round-22a workqueue runner.
+///
+/// Returns true on success. Failure paths (no MSI-X cap, table_size
+/// = 0, IDT pool exhausted, BAR mapping fail) silently return false
+/// — the device will have no config-change irq path, balloon's
+/// queue_work paths won't fire on config update, but the smoke
+/// will fail-loud on the missing `ARSENAL_VIRTIO_BALLOON_INFLATE_OK`
+/// sentinel rather than misbehaving silently.
+///
+/// # Safety
+/// `common_cfg` is the mapped COMMON_CFG region; `driver` is a
+/// non-null `*mut virtio_driver`; `vdev` is the heap-allocated
+/// `*mut virtio_device` whose pointer must remain stable for the
+/// lifetime of the registration.
+fn setup_config_changed_msix(
+    bus: u8,
+    devnum: u8,
+    func: u8,
+    common_cfg: *mut u8,
+    driver: *mut virtio_driver,
+    vdev: *mut virtio_device,
+) -> bool {
+    let mut info = crate::pci::MsixInfoRaw {
+        present: 0,
+        cap_offset: 0,
+        table_size: 0,
+        table_bar: 0,
+        table_offset: 0,
+    };
+    // SAFETY: bridge fn — info is writable stack storage.
+    unsafe { linuxkpi_pci_msix_info(bus, devnum, func, &mut info) };
+    if info.present == 0 || info.table_size == 0 {
+        return false;
+    }
+    // We use MSI-X table entry 0 for config-changed. Allocate one
+    // IDT slot from the linuxkpi irq pool; this maps slot → IDT
+    // vector via the dispatcher table register_dispatchers wired
+    // up at boot.
+    let slot = match crate::irq::alloc_slots(1) {
+        Some(s) => s,
+        None => return false,
+    };
+    let idt_vec = crate::irq::slot_idt_vector(slot) as u32;
+
+    // Map MSI-X table entry 0 (16 bytes).
+    // SAFETY: bridge fns.
+    let table_phys_base =
+        unsafe { linuxkpi_pci_bar_address(bus, devnum, func, info.table_bar as u8) };
+    if table_phys_base == 0 {
+        return false;
+    }
+    let table_phys = table_phys_base + info.table_offset as u64;
+    // SAFETY: bridge fns — map_mmio is idempotent on overlap.
+    let entry0 = unsafe {
+        linuxkpi_paging_map_mmio(table_phys, 16);
+        let hhdm = linuxkpi_paging_hhdm_offset();
+        (table_phys + hhdm) as *mut u32
+    };
+    // Program entry 0. Layout (PCI spec § 6.8.6):
+    //   off 0..3   Message Address Low  (LAPIC fixed-delivery, APIC 0)
+    //   off 4..7   Message Address High (0 — 32-bit address)
+    //   off 8..11  Message Data         (IDT vector + delivery mode)
+    //   off 12..15 Vector Control       (bit 0 = mask)
+    // SAFETY: entry0..entry0+16 is the mapped MSI-X entry 0.
+    unsafe {
+        core::ptr::write_volatile(entry0, 0xFEE0_0000);
+        core::ptr::write_volatile(entry0.add(1), 0);
+        core::ptr::write_volatile(entry0.add(2), idt_vec);
+        core::ptr::write_volatile(entry0.add(3), 0);
+    }
+
+    // Enable MSI-X (cap msg_ctrl bit 15 → cap dword bit 31).
+    // SAFETY: bridge fns; cap_offset is dword-aligned per PCI spec.
+    unsafe {
+        let cur = linuxkpi_pci_config_read32(bus, devnum, func, info.cap_offset as u8);
+        let new = (cur | (1u32 << 31)) & !(1u32 << 30);
+        linuxkpi_pci_config_write32(bus, devnum, func, info.cap_offset as u8, new);
+    }
+
+    // Claim MSI-X table entry 0 for config-changed via virtio
+    // COMMON_CFG. Read-back confirms the device accepted the
+    // vector index; 0xFFFF means VIRTIO_MSI_NO_VECTOR (allocation
+    // failure per v1.2 § 4.1.5.1.2.1).
+    // SAFETY: bridge fn.
+    let echoed = unsafe { linuxkpi_virtio_set_msix_config_vector(common_cfg, 0) };
+    // Quick hex log via stack buf — confirms the device echoed vector 0
+    // and shows the IDT vector our MSI-X entry will deliver to.
+    let mut hexbuf = [0u8; 64];
+    let n = fmt_hex(&mut hexbuf, echoed as u32, idt_vec);
+    crate::log::pr(&hexbuf[..n]);
+    if echoed != 0 {
+        return false;
+    }
+
+    // Leak the handler context + install the slot handler.
+    let ctx = Box::new(ConfigChangedCtx { driver, vdev });
+    let ctx_raw = Box::into_raw(ctx) as *mut c_void;
+    // SAFETY: request_irq stores the handler + dev_id verbatim in
+    // SLOTS[slot]; ctx_raw is a leaked Box, valid through M1.
+    let rc = unsafe {
+        crate::irq::request_irq(
+            slot as c_uint,
+            config_changed_irq_dispatch,
+            0,
+            core::ptr::null(),
+            ctx_raw,
+        )
+    };
+    rc == 0
 }
 
 /// Unregister `drv`. M1-2-3: removes from the registry without
@@ -934,10 +1166,6 @@ pub struct scatterlist {
     pub length: c_uint,
     pub dma_address: u64,
     pub dma_length: c_uint,
-}
-
-unsafe extern "C" {
-    fn linuxkpi_paging_hhdm_offset() -> u64;
 }
 
 /// `sg_init_one` (<linux/scatterlist.h>) — initialize `sg` as a

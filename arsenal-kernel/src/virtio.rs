@@ -309,6 +309,7 @@ pub(crate) const CC_DEVICE_FEATURE_SELECT: usize = 0x00;
 pub(crate) const CC_DEVICE_FEATURE: usize = 0x04;
 pub(crate) const CC_DRIVER_FEATURE_SELECT: usize = 0x08;
 pub(crate) const CC_DRIVER_FEATURE: usize = 0x0C;
+pub(crate) const CC_MSIX_CONFIG: usize = 0x10;
 #[allow(dead_code)] // num_queues is informational; drivers read directly when interested
 pub(crate) const CC_NUM_QUEUES: usize = 0x12;
 pub(crate) const CC_DEVICE_STATUS: usize = 0x14;

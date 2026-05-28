@@ -178,17 +178,36 @@ pub unsafe extern "C" fn page_address(page: *const page) -> *mut c_void {
 
 /// `adjust_managed_page_count(page, count)` — adjust the kernel's
 /// managed-page accounting by `count` pages. Arsenal has no
-/// kernel-managed-page accounting at M1; balloon's call is
-/// informational, so this is intentionally a no-op (NOT a panic —
-/// the call is in balloon's inflate/deflate hot path and a panic
-/// would block ARSENAL_VIRTIO_BALLOON_OK; the "missing" accounting
-/// is honest at M1).
+/// kernel-managed-page accounting at M1; the call is
+/// informational, so the accounting body is a no-op (NOT a panic
+/// — the call is in balloon's inflate/deflate hot path and a
+/// panic would block ARSENAL_VIRTIO_BALLOON_OK; the "missing"
+/// accounting is honest at M1).
+///
+/// **M1-2-5 closing-commit round 22b** repurposes this hook as
+/// the inflate-cycle observation point: the first time it fires
+/// with a non-zero `count`, emit ARSENAL_VIRTIO_BALLOON_INFLATE_OK
+/// to serial. balloon calls this from `tell_host` (post-inflate)
+/// with a negative count and from `release_pages_balloon`
+/// (post-deflate) with a positive count, so either direction of
+/// the cycle proves the host-driven balloon round-trip
+/// completed. One-shot: `INFLATE_OK_FIRED` latches `true` after
+/// the first emission so subsequent inflates / deflates don't
+/// spam serial.
 ///
 /// # Safety
 /// `page` may be any pointer; never dereferenced.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn adjust_managed_page_count(_page: *mut page, _count: c_long) {
-    // intentional no-op — see fn doc.
+pub unsafe extern "C" fn adjust_managed_page_count(_page: *mut page, count: c_long) {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static INFLATE_OK_FIRED: AtomicBool = AtomicBool::new(false);
+    if count != 0
+        && INFLATE_OK_FIRED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        crate::log::pr(b"ARSENAL_VIRTIO_BALLOON_INFLATE_OK\n");
+    }
 }
 
 // =====================================================================
