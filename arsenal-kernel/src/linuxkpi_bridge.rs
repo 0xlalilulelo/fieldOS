@@ -261,7 +261,12 @@ pub unsafe extern "C" fn linuxkpi_pci_msix_info(
 
 use crate::virtio::{
     Virtqueue, VirtioDevice, activate_queue, set_driver_ok,
-    notify as virtio_notify, cc_read16, cc_write16, CC_QUEUE_SELECT, CC_QUEUE_SIZE,
+    notify as virtio_notify, cc_read8, cc_write8, cc_read16, cc_write16,
+    cc_read32, cc_write32,
+    CC_QUEUE_SELECT, CC_QUEUE_SIZE, CC_DEVICE_STATUS,
+    CC_DEVICE_FEATURE_SELECT, CC_DEVICE_FEATURE,
+    CC_DRIVER_FEATURE_SELECT, CC_DRIVER_FEATURE,
+    STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_FEATURES_OK,
 };
 
 /// Ring-physical-address descriptor for `linuxkpi_virtqueue_info`,
@@ -495,4 +500,100 @@ pub unsafe extern "C" fn linuxkpi_virtio_notify(
     queue_idx: u16,
 ) {
     virtio_notify(notify_ptr as *mut u16, queue_idx);
+}
+
+/// Run the virtio v1.2 § 3.1.1 init dance with **bus-side feature
+/// intersection**: reset, ACKNOWLEDGE, DRIVER, read device features,
+/// AND with `driver_features` (what the driver supports), write the
+/// negotiated set back as driver features, FEATURES_OK, verify
+/// retained. Returns the negotiated u64 — the bits the device offered
+/// AND the driver claimed, which the linuxkpi shim stores in
+/// `vdev.features`. Panics if the device clears FEATURES_OK (per the
+/// existing assert in `virtio::init_transport`); the intersection
+/// guarantees we never ask for an unsupported bit, so the assertion
+/// fires only on a broken transport.
+///
+/// Distinct from `virtio::init_transport`, which requires the caller
+/// to pre-intersect (the native blk/net drivers know their feature
+/// requirements at compile time). Linux convention is that drivers
+/// advertise *supported* features and the bus computes the
+/// intersection; this bridge is that bus side.
+///
+/// # Safety
+/// `common_cfg` is the mapped COMMON_CFG region for a live virtio
+/// device (returned by `linuxkpi_virtio_resolve`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtio_init_transport(
+    common_cfg: *mut u8,
+    driver_features: u64,
+) -> u64 {
+    // SAFETY: common_cfg is a 4-KiB MMIO region per the caller's
+    // contract; all CC_* offsets are < 0x40.
+    unsafe {
+        cc_write8(common_cfg, CC_DEVICE_STATUS, 0);
+        for _ in 0..16 {
+            if cc_read8(common_cfg, CC_DEVICE_STATUS) == 0 {
+                break;
+            }
+        }
+        cc_write8(common_cfg, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
+        cc_write8(
+            common_cfg,
+            CC_DEVICE_STATUS,
+            STATUS_ACKNOWLEDGE | STATUS_DRIVER,
+        );
+
+        cc_write32(common_cfg, CC_DEVICE_FEATURE_SELECT, 0);
+        let dev_lo = cc_read32(common_cfg, CC_DEVICE_FEATURE);
+        cc_write32(common_cfg, CC_DEVICE_FEATURE_SELECT, 1);
+        let dev_hi = cc_read32(common_cfg, CC_DEVICE_FEATURE);
+        let device_features = ((dev_hi as u64) << 32) | dev_lo as u64;
+
+        let negotiated = driver_features & device_features;
+        let drv_lo = (negotiated & 0xFFFF_FFFF) as u32;
+        let drv_hi = (negotiated >> 32) as u32;
+        cc_write32(common_cfg, CC_DRIVER_FEATURE_SELECT, 0);
+        cc_write32(common_cfg, CC_DRIVER_FEATURE, drv_lo);
+        cc_write32(common_cfg, CC_DRIVER_FEATURE_SELECT, 1);
+        cc_write32(common_cfg, CC_DRIVER_FEATURE, drv_hi);
+
+        cc_write8(
+            common_cfg,
+            CC_DEVICE_STATUS,
+            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
+        );
+        let after = cc_read8(common_cfg, CC_DEVICE_STATUS);
+        assert_eq!(
+            after & STATUS_FEATURES_OK,
+            STATUS_FEATURES_OK,
+            "linuxkpi: device cleared FEATURES_OK after intersection write — transport broken"
+        );
+
+        negotiated
+    }
+}
+
+/// Reset a virtio device by writing DEVICE_STATUS = 0 and waiting
+/// (bounded) for the device to acknowledge per v1.2 § 2.1.2. The
+/// device returns to RESET; subsequent re-initialization must go
+/// through `linuxkpi_virtio_init_transport` again. Used when a
+/// driver's probe declines (returns negative) so the device is left
+/// in a clean state for a later driver to re-claim — the linuxkpi
+/// self-test's no-op driver leans on this for blk/net/rng, which
+/// `virtio_blk::smoke` / `virtio_net::smoke` then re-initialize.
+///
+/// # Safety
+/// `common_cfg` is the mapped COMMON_CFG region for a live virtio
+/// device.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuxkpi_virtio_reset_device(common_cfg: *mut u8) {
+    // SAFETY: caller's contract.
+    unsafe {
+        cc_write8(common_cfg, CC_DEVICE_STATUS, 0);
+        for _ in 0..16 {
+            if cc_read8(common_cfg, CC_DEVICE_STATUS) == 0 {
+                break;
+            }
+        }
+    }
 }

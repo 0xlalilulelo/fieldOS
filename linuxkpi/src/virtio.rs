@@ -49,9 +49,8 @@ unsafe extern "C" {
     );
 
     // Virtqueue + transport bridge (M1-2-5 closing-commit work).
-    // `linuxkpi_virtqueue_free` + `linuxkpi_virtqueue_info` +
-    // `linuxkpi_virtio_set_driver_ok` are declared now but consumed
-    // in the next round (del_vqs + virtio_device_ready wiring);
+    // `linuxkpi_virtqueue_free` + `linuxkpi_virtqueue_info` are
+    // declared now but consumed in a later round (del_vqs wiring);
     // keeping them in the same bridge-extern block as the rest keeps
     // the bridge surface adjacent.
     fn linuxkpi_virtqueue_new(size: u16) -> *mut c_void;
@@ -83,9 +82,10 @@ unsafe extern "C" {
         queue_idx: u16,
         queue_handle: *const c_void,
     ) -> *mut c_void;
-    #[allow(dead_code)]
     fn linuxkpi_virtio_set_driver_ok(common_cfg: *mut u8);
     fn linuxkpi_virtio_notify(notify_ptr: *mut c_void, queue_idx: u16);
+    fn linuxkpi_virtio_init_transport(common_cfg: *mut u8, driver_features: u64) -> u64;
+    fn linuxkpi_virtio_reset_device(common_cfg: *mut u8);
 }
 
 /// Mirror of arsenal-kernel's `LinuxkpiVqInfo` (linuxkpi_bridge.rs).
@@ -303,6 +303,32 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
     // contract guarantees the function pointers + id_table.
     let id_table = unsafe { (*drv.as_ptr()).id_table };
     let probe = unsafe { (*drv.as_ptr()).probe };
+    let validate = unsafe { (*drv.as_ptr()).validate };
+    let feature_table = unsafe { (*drv.as_ptr()).feature_table };
+    let feature_table_size = unsafe { (*drv.as_ptr()).feature_table_size };
+
+    // Fold the driver's feature_table (array of bit numbers) into a
+    // u64 mask. Linux convention: drivers advertise *supported*
+    // bits; the bus AND-intersects with what the device offers.
+    // VIRTIO_F_VERSION_1 (bit 32) is mandatory for v1.0 devices and
+    // is added unconditionally if the table doesn't already include
+    // it (Linux does the same in drivers/virtio/virtio.c). Bits >=
+    // 64 are silently skipped — Arsenal stores the negotiated set
+    // in a u64; the upper-half feature space (e.g.,
+    // VIRTIO_F_ACCESS_PLATFORM) is out of M1's scope.
+    let mut driver_features: u64 = 1u64 << 32; // VIRTIO_F_VERSION_1
+    if !feature_table.is_null() && feature_table_size > 0 {
+        // SAFETY: caller's contract — feature_table points to
+        // feature_table_size readable c_uint entries.
+        unsafe {
+            for i in 0..feature_table_size as usize {
+                let fbit = *feature_table.add(i);
+                if fbit < 64 {
+                    driver_features |= 1u64 << fbit;
+                }
+            }
+        }
+    }
 
     walk_virtio_devices(|bus, dev, func, pci_device_id| {
         let virtio_id = pci_to_virtio_id(pci_device_id);
@@ -330,6 +356,17 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
         if raw.present == 0 {
             return;
         }
+        let common_cfg = raw.common_cfg as *mut u8;
+        // Drive the v1.2 § 3.1.1 init dance with bus-side feature
+        // intersection. negotiated = device-offered AND
+        // driver-supported, written back as the device's
+        // driver_features and stored on vdev for validate / probe
+        // to read via virtio_has_feature.
+        // SAFETY: common_cfg came from linuxkpi_virtio_resolve, a
+        // mapped MMIO region.
+        let negotiated = unsafe {
+            linuxkpi_virtio_init_transport(common_cfg, driver_features)
+        };
         let mut vdev = virtio_device {
             id_device: virtio_id,
             id_vendor: VIRTIO_VENDOR as u32,
@@ -338,20 +375,40 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
             pci_dev: dev,
             func,
             _pad: 0,
-            common_cfg: raw.common_cfg as *mut u8,
+            common_cfg,
             notify_base: raw.notify_base as *mut u8,
             notify_off_multiplier: raw.notify_off_multiplier,
             isr: raw.isr as *mut u8,
             device_cfg: raw.device_cfg as *mut u8,
             config: core::ptr::null(),
             dev: [0u8; 8],
-            features: 0,
+            features: negotiated,
         };
+        // validate() runs after feature negotiation but before
+        // probe(). It may drop more bits via virtio_clear_bit /
+        // __virtio_clear_bit; a non-zero return is a refusal —
+        // reset the device and continue to the next match.
+        if let Some(validate_fn) = validate {
+            // SAFETY: validate_fn comes from the registered
+            // driver; vdev lives on this stack frame.
+            let rc = unsafe { validate_fn(&mut vdev as *mut virtio_device) };
+            if rc != 0 {
+                // SAFETY: common_cfg is the live MMIO region.
+                unsafe { linuxkpi_virtio_reset_device(common_cfg) };
+                return;
+            }
+        }
         // SAFETY: probe_fn is a valid extern "C" fn per the
         // driver's declaration; vdev lives on this stack frame
         // for the duration of the call.
-        unsafe {
-            let _ = probe_fn(&mut vdev as *mut virtio_device);
+        let rc = unsafe { probe_fn(&mut vdev as *mut virtio_device) };
+        if rc < 0 {
+            // Probe declined (Linux convention: negative = did not
+            // bind). Return the device to RESET so a later driver
+            // (or virtio_blk::smoke / virtio_net::smoke) can
+            // re-initialize it from a clean state.
+            // SAFETY: common_cfg is the live MMIO region.
+            unsafe { linuxkpi_virtio_reset_device(common_cfg) };
         }
     });
 
@@ -903,25 +960,40 @@ pub unsafe extern "C" fn virtio_has_feature(
     unsafe { (*vdev).features & (1u64 << fbit) != 0 }
 }
 
-/// `virtio_device_ready` — set the DRIVER_OK status bit on
-/// `vdev`. Real impl writes to common_cfg.device_status.
+/// `virtio_device_ready` — set the DRIVER_OK status bit on `vdev`,
+/// completing the v1.2 § 3.1.1 init dance. Forwards to the bridge's
+/// `linuxkpi_virtio_set_driver_ok`, which writes ACK | DRIVER |
+/// FEATURES_OK | DRIVER_OK to CC_DEVICE_STATUS.
 ///
 /// # Safety
-/// Calling this during M1-2-5 Part B iteration arc panics.
+/// `vdev` must be a valid `*mut virtio_device` whose `common_cfg`
+/// points at a mapped COMMON_CFG region and whose feature
+/// negotiation has completed (init_transport already ran).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn virtio_device_ready(_vdev: *mut virtio_device) {
-    panic!("linuxkpi: virtio_device_ready not yet implemented (lands at M1-2-5 close)")
+pub unsafe extern "C" fn virtio_device_ready(vdev: *mut virtio_device) {
+    if vdev.is_null() {
+        return;
+    }
+    // SAFETY: caller's contract.
+    unsafe { linuxkpi_virtio_set_driver_ok((*vdev).common_cfg) };
 }
 
-/// `virtio_reset_device` — clear device status (status = 0).
-/// Real impl writes 0 to common_cfg.device_status and waits for
-/// the device to ack per virtio v1.2 § 2.1.2.
+/// `virtio_reset_device` — clear DEVICE_STATUS to 0, returning the
+/// device to RESET per v1.2 § 2.1.2. Forwards to the bridge's
+/// `linuxkpi_virtio_reset_device`, which writes 0 and bounded-waits
+/// for the device to ack. Subsequent re-init must go through
+/// init_transport again.
 ///
 /// # Safety
-/// Calling this during M1-2-5 Part B iteration arc panics.
+/// `vdev` must be a valid `*mut virtio_device` whose `common_cfg`
+/// is a mapped COMMON_CFG region.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn virtio_reset_device(_vdev: *mut virtio_device) {
-    panic!("linuxkpi: virtio_reset_device not yet implemented (lands at M1-2-5 close)")
+pub unsafe extern "C" fn virtio_reset_device(vdev: *mut virtio_device) {
+    if vdev.is_null() {
+        return;
+    }
+    // SAFETY: caller's contract.
+    unsafe { linuxkpi_virtio_reset_device((*vdev).common_cfg) };
 }
 
 /// `virtio_clear_bit` — clear feature bit `fbit` on `vdev`'s
