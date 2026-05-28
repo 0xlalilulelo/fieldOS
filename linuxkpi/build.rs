@@ -37,18 +37,35 @@ fn main() {
     println!("cargo:rerun-if-changed=include/shim_c.h");
     println!("cargo:rerun-if-changed=include/linux");
     println!("cargo:rerun-if-changed=../vendor/linux-6.12/include/uapi/linux");
+    println!("cargo:rerun-if-changed=../vendor/linux-6.12/drivers/virtio/virtio_balloon.c");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Source manifest. M1-2-4: BSD-2 smoke only. The M1-2-5-
-    // closing commit appends vendor/linux-6.12/drivers/virtio/
-    // virtio_balloon.c alongside the linuxkpi/include/linux/*.h
-    // reimplementations + linuxkpi/src/*.rs additions needed to
-    // make it link green. Until then main stays green by leaving
-    // balloon.c out of the manifest; the iteration arc happens
-    // local-WIP per the build-loop-is-sacred discipline.
-    let sources: &[&str] = &["csrc/smoke.c"];
+    // Source manifest — (path, extra_cflags) tuples.
+    //
+    // - csrc/smoke.c: BSD-2 shim self-smoke; the M1-2-4 inhabitant.
+    // - vendor/.../virtio_balloon.c: M1-2-5-closing GPLv2 driver,
+    //   the first inherited Linux driver Arsenal links. Extra
+    //   cflags it needs vs. the BSD-2 default:
+    //     -DKBUILD_MODNAME='"virtio_balloon"' — Linux's per-module
+    //       printk-format prefix. balloon's pr_* macros expand to
+    //       references to this string.
+    //     -Wno-pointer-sign — balloon passes char* / unsigned char*
+    //       across function-call boundaries in a few places; not a
+    //       real bug, just upstream's looser type discipline. Linux
+    //       Kbuild disables this warning globally; we scope it to
+    //       the GPLv2 sources to keep the BSD-2 surface strict.
+    let sources: &[(&str, &[&str])] = &[
+        ("csrc/smoke.c", &[]),
+        (
+            "../vendor/linux-6.12/drivers/virtio/virtio_balloon.c",
+            &[
+                "-DKBUILD_MODNAME=\"virtio_balloon\"",
+                "-Wno-pointer-sign",
+            ],
+        ),
+    ];
 
-    for path in sources {
+    for (path, _) in sources {
         check_path(path);
         if !Path::new(path).exists() {
             panic!("linuxkpi build: source {path} missing");
@@ -83,42 +100,57 @@ fn main() {
 
     let mut object_paths: Vec<PathBuf> = Vec::new();
 
-    for &src in sources {
+    for &(src, extra_cflags) in sources {
         let stem = Path::new(src)
             .file_stem()
             .and_then(|s| s.to_str())
             .expect("source path has no file stem");
         let obj_path = out_dir.join(format!("{stem}.o"));
 
-        let status = Command::new("clang")
-            .args([
-                "-target", "x86_64-unknown-none",
-                "-x", "c",
-                "-nostdinc",
-                "-isystem", &resource_include,
-                "-ffreestanding",
-                "-fno-stack-protector",
-                "-mno-red-zone",
-                "-mcmodel=kernel",
-                "-fno-pic",
-                "-fno-pie",
-                "-Wno-unused-parameter",
-                "-Wno-unused-function",
-                "-O2",
-                // ADR-0006 § 1: linuxkpi/include/ provides the
-                // Linux API surface (BSD-2 reimplementations).
-                "-I", "include",
-                // ADR-0006 § 3: only the UAPI carve-out dir is
-                // exposed from vendor/, not the whole include/
-                // tree. <linux/virtio_balloon.h>,
-                // <linux/virtio_ids.h>, <linux/virtio_types.h>
-                // resolve here verbatim from upstream BSD-3.
-                "-I", "../vendor/linux-6.12/include/uapi",
-                "-c",
-                src,
-                "-o",
-            ])
-            .arg(&obj_path)
+        let mut cmd = Command::new("clang");
+        cmd.args([
+            "-target", "x86_64-unknown-none",
+            "-x", "c",
+            "-nostdinc",
+            "-isystem", &resource_include,
+            "-ffreestanding",
+            "-fno-stack-protector",
+            "-mno-red-zone",
+            "-mcmodel=kernel",
+            // Kernel context — no SSE/MMX/AVX. arsenal-kernel's
+            // x86_64-unknown-none target sets +soft-float and
+            // -sse{,2,3,..} -mmx -avx in rustc; without the same
+            // restriction on the C side, clang -O2 emits xorps /
+            // movups for stack-local zero-init and #UDs on the
+            // first instruction (SSE not enabled in CR4 at M1).
+            // Mirrors Linux Kbuild's x86_64 flags exactly.
+            "-mno-sse",
+            "-mno-sse2",
+            "-mno-mmx",
+            "-mno-3dnow",
+            "-mno-avx",
+            "-msoft-float",
+            "-fno-pic",
+            "-fno-pie",
+            "-Wno-unused-parameter",
+            "-Wno-unused-function",
+            "-O2",
+            // ADR-0006 § 1: linuxkpi/include/ provides the
+            // Linux API surface (BSD-2 reimplementations).
+            "-I", "include",
+            // ADR-0006 § 3: only the UAPI carve-out dir is
+            // exposed from vendor/, not the whole include/
+            // tree. <linux/virtio_balloon.h>,
+            // <linux/virtio_ids.h>, <linux/virtio_types.h>
+            // resolve here verbatim from upstream BSD-3.
+            "-I", "../vendor/linux-6.12/include/uapi",
+        ]);
+        for f in extra_cflags {
+            cmd.arg(f);
+        }
+        cmd.args(["-c", src, "-o"]).arg(&obj_path);
+
+        let status = cmd
             .status()
             .unwrap_or_else(|e| panic!("clang invocation failed: {e}"));
         if !status.success() {

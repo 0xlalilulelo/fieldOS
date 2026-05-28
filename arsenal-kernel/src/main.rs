@@ -333,6 +333,35 @@ extern "C" fn _start() -> ! {
     // balloon online) extend this slot.
     linuxkpi::self_test();
 
+    // M1-2-5 closing-commit round 22a: light up the first
+    // inherited Linux driver. `virtio_balloon_driver_init` is the
+    // `module_virtio_driver(virtio_balloon_driver)`-generated
+    // wrapper (see linuxkpi/include/linux/module.h); we reach it
+    // by symbol name per ADR-0008 (explicit `extern "C"` call,
+    // no initcall-style table at M1's single-digit inherited-
+    // driver count). The wrapper calls `register_virtio_driver`,
+    // which drives init_transport → validate → probe over each
+    // matched device. balloon's probe creates its virtqueues +
+    // INIT_WORKs its stats / size / free-page work_structs over
+    // the cooperative workqueue (ADR-0011) against the in-guest
+    // balloon device QEMU surfaces via `-device virtio-balloon-
+    // pci`. A non-zero return is a boot-time fatal (Linux
+    // semantics for a driver init that fails to register). The
+    // QMP-driven inflate cycle (queue_work → runner-dispatched
+    // size-update body) is round 22b.
+    unsafe extern "C" {
+        fn virtio_balloon_driver_init() -> core::ffi::c_int;
+    }
+    // SAFETY: the symbol is defined by balloon.c's
+    // module_virtio_driver expansion; its register-call signature
+    // is validated by the macro at compile time.
+    let rc = unsafe { virtio_balloon_driver_init() };
+    assert_eq!(
+        rc, 0,
+        "virtio_balloon_driver_init returned non-zero ({rc})"
+    );
+    serial::write_str("ARSENAL_VIRTIO_BALLOON_OK\n");
+
     // virtio-blk smoke: locate the device, init, read sector 0,
     // assert the hybrid-ISO MBR boot signature 0xAA55, print
     // ARSENAL_BLK_OK. Runs on the boot stack before sched::init
