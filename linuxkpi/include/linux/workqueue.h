@@ -52,6 +52,16 @@ extern struct workqueue_struct *alloc_workqueue(const char *fmt,
 extern void destroy_workqueue(struct workqueue_struct *wq);
 extern bool queue_work(struct workqueue_struct *wq, struct work_struct *work);
 extern bool cancel_work(struct work_struct *work);
+/* cancel_work_sync — cancel + wait for the work to finish. M1
+ * panic-on-call (the deferred-work path doesn't run yet). */
+extern bool cancel_work_sync(struct work_struct *work);
+
+/* System-wide shared workqueues. M1: declared so inherited drivers
+ * can name them in queue_work calls; queue_work is itself panic-on-
+ * call, so the pointer is never dereferenced yet (defined NULL in
+ * workqueue.rs). balloon queues its stats / size work on
+ * system_freezable_wq. */
+extern struct workqueue_struct *system_freezable_wq;
 
 /* Workqueue creation flags — values match Linux 6.12 LTS so any
  * future real impl honors the same semantics. balloon passes

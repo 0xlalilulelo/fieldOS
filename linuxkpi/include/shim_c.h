@@ -101,6 +101,18 @@ typedef int64_t  loff_t;
 
 extern int printk(const char *fmt);
 
+/* ---- <linux/dev_printk.h> ---- */
+
+/* Device-scoped diagnostics. M1's printk takes no varargs (M1-2-1
+ * deferred that to the first inherited driver demanding it), so
+ * these discard the format + arguments and keep only the
+ * side-effect-free device reference; the messages return once printk
+ * grows a varargs entry point. */
+#define dev_err(dev, ...)              ((void)(dev))
+#define dev_warn(dev, ...)             ((void)(dev))
+#define dev_info(dev, ...)             ((void)(dev))
+#define dev_info_ratelimited(dev, ...) ((void)(dev))
+
 /* ---- <linux/slab.h> ---- */
 
 extern void *kmalloc(size_t size, gfp_t flags);
@@ -488,6 +500,24 @@ extern int  list_empty(const struct list_head *head);
  * block order against this. */
 #define MAX_PAGE_ORDER 10
 
+/* ---- <linux/vmstat.h> ---- */
+
+/* No VM event / node-state accounting at M1 — the stats balloon
+ * reports to the host are informational, so global_node_page_state
+ * returns 0 (NR_FILE_PAGES is the only item balloon reads). */
+#define NR_FILE_PAGES 0
+#define global_node_page_state(item) ((unsigned long)0)
+
+/* ---- <linux/mm.h> page-init / poisoning ---- */
+
+/* Arsenal has neither init-on-free nor page poisoning at M1; both
+ * report disabled. PAGE_POISON is the byte balloon would memset with
+ * if poisoning were on (Linux's default 0xaa), kept for the
+ * sizeof/memset call shape. */
+#define want_init_on_free()             0
+#define page_poisoning_enabled_static() 0
+#define PAGE_POISON 0xaa
+
 /* ---- <linux/mm_types.h> ---- */
 
 /* struct page — thin per-frame handle per ADR-0007. NOT Linux's
@@ -504,6 +534,51 @@ struct page {
     int              _refcount;
     void            *_private;
 };
+
+/* ---- <linux/scatterlist.h> ---- */
+
+/* Linux's scatterlist shape (field names preserved for future
+ * drivers using sg_set_page / sg_page); balloon only ever builds a
+ * single-entry list via sg_init_one. The body of sg_init_one lives
+ * in linuxkpi/src/virtio.rs as a panic-on-call stub — the M1-2-5-
+ * closing commit settles the scatterlist representation together
+ * with the real virtqueue_add_* it feeds. */
+struct scatterlist {
+    unsigned long page_link;
+    unsigned int  offset;
+    unsigned int  length;
+    dma_addr_t    dma_address;
+    unsigned int  dma_length;
+};
+
+extern void sg_init_one(struct scatterlist *sg, const void *buf,
+                        unsigned int buflen);
+
+/* ---- <linux/shrinker.h> ---- */
+
+/* Memory-reclaim shrinker. Arsenal has no reclaim subsystem at M1;
+ * shrinker_alloc / _free / _register are panic-on-call stubs in
+ * linuxkpi/src/mm.rs. balloon registers a shrinker only under
+ * VIRTIO_BALLOON_F_FREE_PAGE_HINT, which the M1 smoke device does
+ * not negotiate. struct shrinker carries the callbacks + private
+ * data balloon assigns after alloc. */
+struct shrink_control {
+    gfp_t         gfp_mask;
+    unsigned long nr_to_scan;
+};
+
+struct shrinker {
+    unsigned long (*count_objects)(struct shrinker *s, struct shrink_control *sc);
+    unsigned long (*scan_objects)(struct shrinker *s, struct shrink_control *sc);
+    void *private_data;
+};
+
+/* shrinker_alloc is __printf(2,3) varargs in Linux; balloon passes
+ * only the bare name, so the non-varargs declaration matches its
+ * call site. */
+extern struct shrinker *shrinker_alloc(unsigned int flags, const char *name);
+extern void shrinker_free(struct shrinker *shrinker);
+extern void shrinker_register(struct shrinker *shrinker);
 
 /* ---- <linux/notifier.h> ---- */
 

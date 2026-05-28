@@ -25,6 +25,10 @@
 
 #include "../shim_c.h"
 
+/* Max scatterlist entries a single report batch carries (Linux's
+ * value). balloon sizes its reporting sg array to this. */
+#define PAGE_REPORTING_CAPACITY 32
+
 struct scatterlist;
 
 struct page_reporting_dev_info {

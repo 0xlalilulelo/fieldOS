@@ -83,3 +83,30 @@ pub unsafe extern "C" fn queue_work(_wq: *mut c_void, _work: *mut work_struct) -
 pub unsafe extern "C" fn cancel_work(_work: *mut work_struct) -> bool {
     panic!("linuxkpi: cancel_work not yet implemented (ADR-0005 § 6)")
 }
+
+/// `cancel_work_sync` — cancel `work` and wait for any in-flight
+/// execution to finish. M1 panic-on-call (no deferred-work path).
+///
+/// # Safety
+/// Calling this during M1 panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cancel_work_sync(_work: *mut work_struct) -> bool {
+    panic!("linuxkpi: cancel_work_sync not yet implemented (ADR-0005 § 6)")
+}
+
+/// Pointer-sized wrapper so a `*const` workqueue handle can be a
+/// `static`. The pointer is null and never dereferenced at M1
+/// (queue_work panics first); it exists only so inherited C links
+/// against the `system_freezable_wq` symbol.
+#[repr(transparent)]
+pub struct WqPtr(*const c_void);
+
+// SAFETY: the contained pointer is null and immutable; nothing reads
+// through it at M1. Sharing a null sentinel across threads is sound.
+unsafe impl Sync for WqPtr {}
+
+/// `system_freezable_wq` — the shared freezable workqueue balloon
+/// queues its stats / size work onto. NULL at M1; the real shared
+/// workqueues land with the deferred-work subsystem (ADR-0010).
+#[unsafe(no_mangle)]
+pub static system_freezable_wq: WqPtr = WqPtr(core::ptr::null());

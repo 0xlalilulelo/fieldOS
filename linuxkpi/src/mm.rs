@@ -21,7 +21,7 @@
 
 use core::ffi::c_void;
 
-use crate::types::{c_int, c_long};
+use crate::types::{c_char, c_int, c_long, c_uint};
 
 #[repr(C)]
 pub struct sysinfo {
@@ -104,4 +104,35 @@ pub unsafe extern "C" fn page_reporting_register(_prdev: *mut c_void) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn page_reporting_unregister(_prdev: *mut c_void) {
     panic!("linuxkpi: page_reporting_unregister not yet implemented (no reporting subsystem at M1)")
+}
+
+/// `shrinker_alloc` — allocate a memory-reclaim shrinker. Arsenal
+/// has no reclaim subsystem at M1; panic-on-call. balloon registers
+/// a shrinker only under VIRTIO_BALLOON_F_FREE_PAGE_HINT.
+///
+/// # Safety
+/// Calling this during M1 panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn shrinker_alloc(_flags: c_uint, _name: *const c_char) -> *mut c_void {
+    panic!("linuxkpi: shrinker_alloc not yet implemented (no reclaim subsystem at M1)")
+}
+
+/// `shrinker_free` — release a shrinker (pairs with shrinker_alloc).
+/// Panic-on-call.
+///
+/// # Safety
+/// Calling this during M1 panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn shrinker_free(_shrinker: *mut c_void) {
+    panic!("linuxkpi: shrinker_free not yet implemented (no reclaim subsystem at M1)")
+}
+
+/// `shrinker_register` — activate a shrinker on the reclaim path.
+/// Panic-on-call.
+///
+/// # Safety
+/// Calling this during M1 panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn shrinker_register(_shrinker: *mut c_void) {
+    panic!("linuxkpi: shrinker_register not yet implemented (no reclaim subsystem at M1)")
 }

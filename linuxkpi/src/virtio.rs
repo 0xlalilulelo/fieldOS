@@ -431,6 +431,23 @@ pub unsafe extern "C" fn virtqueue_get_buf(
     panic!("linuxkpi: virtqueue_get_buf not yet implemented (lands at M1-2-5)")
 }
 
+/// `sg_init_one` (<linux/scatterlist.h>) — initialize a single-entry
+/// scatterlist pointing at `buf` for `buflen` bytes. The scatterlist
+/// representation is settled at the M1-2-5-closing commit together
+/// with the real virtqueue_add_* that consumes it; panic-on-call
+/// until then. `sg` is opaque (`struct scatterlist *`) to this stub.
+///
+/// # Safety
+/// Calling this during the M1-2-5 Part B iteration arc panics.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sg_init_one(
+    _sg: *mut c_void,
+    _buf: *const c_void,
+    _buflen: c_uint,
+) {
+    panic!("linuxkpi: sg_init_one not yet implemented (lands at M1-2-5 close)")
+}
+
 // =====================================================================
 // virtio_config.h helpers — panic-on-call stubs landed during
 // M1-2-5 Part B sub-task 3's iteration arc. Real implementations
