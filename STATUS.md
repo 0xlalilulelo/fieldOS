@@ -538,17 +538,37 @@ balloon's own int-vs-unsigned get_buf calls, to be suppressed via
 #include resolves and every body symbol balloon references is
 declared. The compile phase of sub-task 3 is DONE.
 
-**What remains is the M1-2-5-closing commit — LINK + RUNTIME, not
-compile:**
-  - Swap the panic-on-call stubs for real implementations: the
-    virtqueue machinery (virtqueue_add_outbuf/_inbuf/kick/get_buf,
-    virtio_find_vqs, virtqueue_get_vring_size) — the largest piece;
-    the struct page lifecycle (alloc_pages/free_pages/put_page/
-    page_address/balloon_page_alloc/_enqueue/_dequeue); sg_init_one;
-    test_and_set/clear_bit; the virtio_config_ops table + populating
-    virtio_device.config; the module_init invocation mechanism
-    (ADR-0007's deferred design decision: explicit call vs initcall
-    table).
+**Closing-commit work in flight — incremental, self-tested pieces:**
+  - Round 18 `16070ec`: real atomic test_and_set_bit /
+    test_and_clear_bit (LOCK-prefixed AtomicU64::fetch_or /
+    fetch_and over the unsigned-long bitmap word) + self-test.
+  - Round 19 `c52ea00`: real struct page lifecycle — alloc_pages
+    (order 0) + put_page + page_address over the frame allocator +
+    HHDM bridge; balloon_page_alloc / _enqueue / _dequeue with a
+    Rust mirror of struct balloon_dev_info; sg_init_one (buf - hhdm
+    → dma_address); adjust_managed_page_count is intentionally a
+    no-op (balloon hot-path, M1 has no managed-page accounting).
+    Self-test covers all three round-trips. free_pages stays panic
+    (free-page-hint feature path, gated off at M1).
+
+**What remains for ARSENAL_VIRTIO_BALLOON_OK — virtqueue bridge +
+final wiring:**
+  - The virtqueue bridge — wrap arsenal-kernel's existing Virtqueue
+    (push_descriptor / push_chain / pop_used in
+    arsenal-kernel/src/virtio.rs) + init_transport / activate_queue /
+    set_driver_ok / notify via new linuxkpi_* bridge functions; route
+    the shim's virtqueue_add_outbuf/_inbuf/kick/get_buf/get_vring_size
+    /virtio_find_vqs panic-stubs to them. The shim's
+    `struct virtqueue.priv` carries the bridge-side handle. **This is
+    the largest remaining piece**; validation comes only when balloon
+    runs (no isolated self-test makes sense for it).
+  - virtio_config_ops table + populating virtio_device.config (so
+    balloon's vdev->config->get / del_vqs / etc. resolve to real
+    shim ops). Also wire virtio_has_feature / virtio_device_ready /
+    virtio_reset_device / virtio_clear_bit / __virtio_clear_bit to
+    bridge into arsenal-kernel's transport state machine.
+  - The module-init invocation mechanism (ADR-0007's deferred design
+    decision: explicit call by symbol name vs initcall-style table).
   - Add balloon.c to build.rs's source manifest with
     -DKBUILD_MODNAME='"virtio_balloon"' + -Wno-pointer-sign.
   - Wire QEMU's `-device virtio-balloon-pci` into the smoke cmdline.
