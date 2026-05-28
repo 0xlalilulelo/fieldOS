@@ -370,6 +370,60 @@ extern void linuxkpi_warn(const char *file, int line, const char *cond);
  * VIRTIO_BALLOON_PFN_SHIFT). */
 #define BUILD_BUG_ON(cond) ((void)sizeof(char[1 - 2 * !!(cond)]))
 
+/* ---- <linux/minmax.h> + <linux/kernel.h> + <linux/align.h> ---- */
+
+/* Simple (non-type-checked) min/max — sufficient for the integer
+ * comparisons inherited drivers use; Linux's strict-type versions
+ * exist for safety, not behavior. */
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b))
+
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+/* ALIGN / round_up assume `a` is a power of two (Linux's contract). */
+#define ALIGN(x, a)    (((x) + (a) - 1) & ~((typeof(x))(a) - 1))
+#define round_up(x, y) ((((x) + (y) - 1) / (y)) * (y))
+
+/* ---- <linux/compiler.h> ---- */
+
+#define likely(x)   __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+
+/* ---- <linux/string.h> ---- */
+
+/* memset / memcpy / memmove resolve to the freestanding intrinsics
+ * the kernel already provides (compiler_builtins for the Rust base);
+ * declared here so inherited C can call them. */
+extern void *memset(void *s, int c, size_t n);
+extern void *memcpy(void *dst, const void *src, size_t n);
+extern void *memmove(void *dst, const void *src, size_t n);
+
+/* ---- <linux/bitops.h> + <asm/bitops.h> ---- */
+
+/* Atomic test-and-set / test-and-clear of bit `nr` in the bitmap at
+ * `addr`; return the previous bit value. Bodies in linuxkpi/src/
+ * bitops.rs (panic-on-call this iteration; real atomic ops land at
+ * the M1-2-5-closing commit when balloon's config-read path runs). */
+extern int test_and_set_bit(long nr, volatile unsigned long *addr);
+extern int test_and_clear_bit(long nr, volatile unsigned long *addr);
+
+/* ---- <uapi/asm-generic/errno-base.h> + errno.h ---- */
+
+/* Standard errno values (asm-generic, the x86 set). Inherited
+ * drivers return these negated (`return -ENOMEM;`). */
+#define EPERM    1
+#define ENOENT   2
+#define EINTR    4
+#define EIO      5
+#define EAGAIN  11
+#define ENOMEM  12
+#define EFAULT  14
+#define EBUSY   16
+#define ENODEV  19
+#define EINVAL  22
+#define ENOSPC  28
+#define ENOSYS  38
+
 /* ---- <linux/err.h> ---- */
 
 #define MAX_ERRNO 4095
@@ -408,6 +462,14 @@ extern int  list_empty(const struct list_head *head);
     struct list_head *head__ = (ptr); \
     struct list_head *first__ = head__->next; \
     first__ != head__ ? list_entry(first__, type, member) : NULL; })
+/* Iterate safely against removal of the current entry — `n` holds
+ * the next entry so `pos` can be deleted mid-loop. balloon uses it
+ * to drain its page lists. */
+#define list_for_each_entry_safe(pos, n, head, member) \
+    for (pos = list_entry((head)->next, typeof(*pos), member), \
+         n = list_entry(pos->member.next, typeof(*pos), member); \
+         &pos->member != (head); \
+         pos = n, n = list_entry(n->member.next, typeof(*n), member))
 
 /* ---- <linux/limits.h> ---- */
 
@@ -420,6 +482,11 @@ extern int  list_empty(const struct list_head *head);
  * page's _phys by PAGE_SHIFT. */
 #define PAGE_SHIFT 12
 #define PAGE_SIZE  (1UL << PAGE_SHIFT)
+
+/* Largest order the page allocator hands out (Linux 6.12 renamed
+ * MAX_ORDER → MAX_PAGE_ORDER). balloon clamps its free-page hint
+ * block order against this. */
+#define MAX_PAGE_ORDER 10
 
 /* ---- <linux/mm_types.h> ---- */
 

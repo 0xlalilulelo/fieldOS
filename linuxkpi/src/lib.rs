@@ -64,6 +64,7 @@
 #![no_std]
 #![feature(abi_x86_interrupt)]
 
+pub mod bitops;
 pub mod dma;
 pub mod err;
 pub mod irq;
