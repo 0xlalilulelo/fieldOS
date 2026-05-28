@@ -221,9 +221,12 @@ pub struct virtio_device {
     pub notify_off_multiplier: u32,
     pub isr: *mut u8,
     pub device_cfg: *mut u8,
-    /// virtio_config_ops vtable (opaque to Rust). NULL until the
-    /// M1-2-5-closing commit populates it; balloon reads ->get +
-    /// ->del_vqs through it. Layout-matches shim_c.h's `config`.
+    /// virtio_config_ops vtable. `register_virtio_driver` installs
+    /// the bus-side `CONFIG_OPS` table on every matched device
+    /// before validate / probe (so balloon's validate-time null-check
+    /// of `vdev->config->get` resolves). Stays NULL on directly
+    /// stack-constructed vdevs (e.g., the self-test bit-op vdev).
+    /// Layout-matches shim_c.h's `config`.
     pub config: *const c_void,
     /// Linux's embedded `struct device` (8-byte opaque in shim_c.h;
     /// the DMA section's `struct device`). balloon takes `&vdev->dev`
@@ -269,6 +272,52 @@ pub struct virtio_driver {
 
 unsafe impl Send for virtio_driver {}
 unsafe impl Sync for virtio_driver {}
+
+/// `struct virtio_config_ops` — Linux shape (matches shim_c.h:339).
+/// Trimmed to what balloon dereferences: ->get (which validate
+/// null-checks) and ->del_vqs (remove teardown). Future inherited
+/// drivers extend this; the full Linux vtable is ~15 ops.
+#[repr(C)]
+pub struct virtio_config_ops {
+    pub get: Option<unsafe extern "C" fn(*mut virtio_device, c_uint, *mut c_void, c_uint)>,
+    pub del_vqs: Option<unsafe extern "C" fn(*mut virtio_device)>,
+}
+
+// SAFETY: virtio_config_ops is a static vtable of plain fn pointers.
+unsafe impl Sync for virtio_config_ops {}
+
+/// `get` slot — balloon's validate checks this is non-NULL but never
+/// calls it during init. A real call would mean a driver reaching for
+/// device-config data that the shim doesn't yet route; fail-loud per
+/// the ADR-0005 § 6 deferred-path discipline.
+unsafe extern "C" fn config_ops_get(
+    _vdev: *mut virtio_device,
+    _offset: c_uint,
+    _buf: *mut c_void,
+    _len: c_uint,
+) {
+    panic!("linuxkpi: virtio_config_ops.get not yet implemented (M1-2-5+ when a driver actually calls it)")
+}
+
+/// `del_vqs` slot — tears down the per-device virtqueue table on
+/// driver remove. At M1 each inherited driver is initialized once and
+/// is never removed (no module unload), so this is a no-op and the
+/// virtqueue allocations leak by design (one balloon, bounded). The
+/// successor with real teardown lands when an inherited driver
+/// actually exits — beyond M1's scope.
+unsafe extern "C" fn config_ops_del_vqs(_vdev: *mut virtio_device) {
+    // No-op at M1 — see fn doc.
+}
+
+/// The single bus-side config-ops table the shim hands every
+/// registered driver. balloon's validate dereferences vdev->config
+/// (so it must be non-NULL by the time validate runs); register_-
+/// virtio_driver installs this on every matched device before
+/// validate / probe.
+static CONFIG_OPS: virtio_config_ops = virtio_config_ops {
+    get: Some(config_ops_get),
+    del_vqs: Some(config_ops_del_vqs),
+};
 
 // =====================================================================
 // Registry — drivers register here at module init; the shim's
@@ -380,7 +429,7 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
             notify_off_multiplier: raw.notify_off_multiplier,
             isr: raw.isr as *mut u8,
             device_cfg: raw.device_cfg as *mut u8,
-            config: core::ptr::null(),
+            config: &CONFIG_OPS as *const virtio_config_ops as *const c_void,
             dev: [0u8; 8],
             features: negotiated,
         };
