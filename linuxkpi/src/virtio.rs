@@ -229,6 +229,11 @@ pub struct virtio_device {
     /// the DMA section's `struct device`). balloon takes `&vdev->dev`
     /// for dev_* logging + PM, all no-ops at M1.
     pub dev: [u8; 8],
+    /// Negotiated feature bits. Populated by the bus-side lifecycle
+    /// from init_transport; virtio_has_feature reads it,
+    /// virtio_clear_bit / __virtio_clear_bit clear bits in it (the
+    /// validate-time bit drops). Layout-matches shim_c.h's `features`.
+    pub features: u64,
 }
 
 // SAFETY: virtio_device is a passive descriptor; concurrent
@@ -340,6 +345,7 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
             device_cfg: raw.device_cfg as *mut u8,
             config: core::ptr::null(),
             dev: [0u8; 8],
+            features: 0,
         };
         // SAFETY: probe_fn is a valid extern "C" fn per the
         // driver's declaration; vdev lives on this stack frame
@@ -615,14 +621,24 @@ pub unsafe extern "C" fn virtqueue_get_vring_size(vq: *const virtqueue) -> c_uin
 }
 
 /// `__virtio_clear_bit` — clear driver-side feature bit `fbit` on
-/// `vdev` (lower-level than virtio_clear_bit; used during validate).
-/// Real impl clears the bit in the negotiated-features storage.
+/// `vdev`. Drops the bit from `vdev.features`; the device-side
+/// state remains FEATURES_OK with the original negotiation, but
+/// the driver agrees not to use this feature (Linux semantics —
+/// the validate path drops bits the driver/platform can't honor).
 ///
 /// # Safety
-/// Calling this during the M1-2-5 Part B iteration arc panics.
+/// `vdev` must be a valid `*mut virtio_device`. `fbit` must be in
+/// [0, 64) (Arsenal stores the negotiated features in a u64).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __virtio_clear_bit(_vdev: *mut virtio_device, _fbit: c_uint) {
-    panic!("linuxkpi: __virtio_clear_bit not yet implemented (lands at M1-2-5 close)")
+pub unsafe extern "C" fn __virtio_clear_bit(vdev: *mut virtio_device, fbit: c_uint) {
+    if vdev.is_null() || fbit >= 64 {
+        return;
+    }
+    // SAFETY: caller's contract; non-atomic — only the owning driver
+    // touches features (Linux convention).
+    unsafe {
+        (*vdev).features &= !(1u64 << fbit);
+    }
 }
 
 /// Shared body for virtqueue_add_outbuf / _inbuf. `sg_flags` is 0
@@ -867,19 +883,24 @@ pub unsafe extern "C" fn sg_init_one(
 // than silently returning bad values.
 // =====================================================================
 
-/// `virtio_has_feature` — test whether the negotiated feature
-/// set for `vdev` has the bit `fbit` set. Real impl needs a
-/// negotiated-features field on `struct virtio_device` (mirrored
-/// in shim_c.h); deferred to the M1-2-5-closing commit.
+/// `virtio_has_feature` — test whether the negotiated feature set
+/// for `vdev` has bit `fbit` set. Reads `vdev.features`, which the
+/// bus-side lifecycle (init_transport, M1-2-5 closing-commit round
+/// 21b) populates with the bits the device offered AND the driver
+/// claimed. False for any `fbit >= 64` (Arsenal's storage is u64).
 ///
 /// # Safety
-/// Calling this during M1-2-5 Part B iteration arc panics.
+/// `vdev` must be a valid `*const virtio_device`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtio_has_feature(
-    _vdev: *const virtio_device,
-    _fbit: c_uint,
+    vdev: *const virtio_device,
+    fbit: c_uint,
 ) -> bool {
-    panic!("linuxkpi: virtio_has_feature not yet implemented (lands at M1-2-5 close)")
+    if vdev.is_null() || fbit >= 64 {
+        return false;
+    }
+    // SAFETY: caller's contract.
+    unsafe { (*vdev).features & (1u64 << fbit) != 0 }
 }
 
 /// `virtio_device_ready` — set the DRIVER_OK status bit on
@@ -904,15 +925,17 @@ pub unsafe extern "C" fn virtio_reset_device(_vdev: *mut virtio_device) {
 }
 
 /// `virtio_clear_bit` — clear feature bit `fbit` on `vdev`'s
-/// driver-features set. Real impl clears the bit in the
-/// negotiated-features storage AND writes the updated word to
-/// common_cfg.driver_feature.
+/// negotiated-features storage. Alias for `__virtio_clear_bit` at
+/// M1 (no separate driver-features register; validate clears bits
+/// the driver agrees not to use, and the change is shim-local).
 ///
 /// # Safety
-/// Calling this during M1-2-5 Part B iteration arc panics.
+/// `vdev` must be a valid `*mut virtio_device`. `fbit` must be in
+/// [0, 64).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn virtio_clear_bit(_vdev: *mut virtio_device, _fbit: c_uint) {
-    panic!("linuxkpi: virtio_clear_bit not yet implemented (lands at M1-2-5 close)")
+pub unsafe extern "C" fn virtio_clear_bit(vdev: *mut virtio_device, fbit: c_uint) {
+    // SAFETY: forwarded — __virtio_clear_bit has the same contract.
+    unsafe { __virtio_clear_bit(vdev, fbit) }
 }
 
 // =====================================================================

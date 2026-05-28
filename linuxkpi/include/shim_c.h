@@ -326,6 +326,11 @@ struct virtio_device {
     const struct virtio_config_ops *config;
     /* Linux's embedded device. balloon takes `&vdev->dev`. */
     struct device dev;
+    /* Negotiated feature bits. Populated by init_transport (the
+     * M1-2-5 closing-commit lifecycle); virtio_has_feature reads it,
+     * virtio_clear_bit / __virtio_clear_bit clear bits in it
+     * (validate-time bit drops). */
+    __u64 features;
 };
 
 /* Config-ops vtable. Trimmed to what balloon dereferences: ->get

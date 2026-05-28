@@ -556,6 +556,40 @@ pub fn self_test() {
         assert_eq!(sg.length, 4);
     }
 
+    // virtio_has_feature / _clear_bit / __virtio_clear_bit operate on
+    // the new `features: u64` field on struct virtio_device. The
+    // bus-side lifecycle (round 21b) populates `features` from
+    // init_transport; here we exercise the bit operations directly
+    // by stack-constructing a virtio_device with a known mask.
+    {
+        let mut vdev = virtio::virtio_device {
+            id_device: 0, id_vendor: 0,
+            priv_data: core::ptr::null_mut(),
+            bus: 0, pci_dev: 0, func: 0, _pad: 0,
+            common_cfg: core::ptr::null_mut(),
+            notify_base: core::ptr::null_mut(),
+            notify_off_multiplier: 0,
+            isr: core::ptr::null_mut(),
+            device_cfg: core::ptr::null_mut(),
+            config: core::ptr::null(),
+            dev: [0u8; 8],
+            features: (1u64 << 3) | (1u64 << 33),
+        };
+        // SAFETY: vdev lives on this stack for the duration of the
+        // calls below; the bit-op functions just touch `features`.
+        unsafe {
+            assert!(virtio::virtio_has_feature(&vdev, 3), "bit 3 should be set");
+            assert!(virtio::virtio_has_feature(&vdev, 33), "bit 33 should be set");
+            assert!(!virtio::virtio_has_feature(&vdev, 4), "bit 4 should be clear");
+            assert!(!virtio::virtio_has_feature(&vdev, 64), "out-of-range bit returns false");
+            virtio::virtio_clear_bit(&mut vdev, 3);
+            assert!(!virtio::virtio_has_feature(&vdev, 3), "bit 3 cleared");
+            assert!(virtio::virtio_has_feature(&vdev, 33), "bit 33 still set");
+            virtio::__virtio_clear_bit(&mut vdev, 33);
+            assert_eq!(vdev.features, 0, "all named bits cleared");
+        }
+    }
+
     log::pr(b"ARSENAL_LINUXKPI_OK\n");
 }
 
