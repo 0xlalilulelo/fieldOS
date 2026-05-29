@@ -36,7 +36,9 @@ pace; still inside the 15-month ARSENAL.md budget.
    [`docs/devlogs/2026-05-arsenal-nvme.md`](docs/devlogs/2026-05-arsenal-nvme.md).
 2. **LinuxKPI shim foundation + first tiny inherited driver.**
    ARSENAL.md's "single largest engineering task" — budget
-   12-20 weeks. **Active.**
+   12-20 weeks. **Complete (2026-05-29).** virtio-balloon online;
+   M1-2-6 paper shipped (three devlogs: shim foundation, GPL
+   boundary, virtio-balloon).
 3. **xHCI USB.** Native Rust vs LinuxKPI port — evaluate at
    step kickoff.
 4. **virtio-gpu native Rust.** KMS-capable GPU driver for
@@ -109,6 +111,34 @@ Posture changes carrying to M1 step 2:
   `dma_alloc_coherent` shim will be a thin wrapper.
 
 ### Active work
+
+**Next: M1 step 3 — xHCI USB.** The kickoff decision is native
+Rust versus a LinuxKPI port; virtio-balloon is the data point
+that makes the port option credible. The next session writes the
+step-3 HANDOFF.
+
+---
+
+**M1 step 2 — COMPLETE (2026-05-29).** First inherited Linux
+driver (virtio-balloon) online end to end; the BSD-2 shim, the
+GPL/BSD-2 boundary, and the cc-build loop are all proven against
+a real driver. M1-2-6 closed the step with the three-devlog
+cluster — [shim foundation](docs/devlogs/2026-05-arsenal-linuxkpi-shim.md),
+[GPL boundary](docs/devlogs/2026-05-arsenal-gpl-boundary.md),
+[virtio-balloon](docs/devlogs/2026-05-arsenal-virtio-balloon.md) —
+plus this retrospective. Smoke 17/17. Cumulative cadence: the
+step rode the post-pivot concentration window faster than the
+12-20-week HANDOFF budget for sub-blocks 2-0 through 2-5 Part A,
+but the closing-commit chain (rounds 18-22d) and one silent-drop
+MSI bug (round 22d, PCI Bus Master Enable) ate most of several
+sessions — the honest texture of inherited-driver work, and the
+preview of where the calendar goes in steps 5-7: not the
+spec-correct code, but the gap between "every precondition is
+correct" and "it works." Two ADRs were forced by balloon during
+the step (0007 struct page, 0008 module-init-by-symbol) plus one
+mid-step strategy correction (0006 headers-are-shim) and one
+deferred-work decision (0011 cooperative runner). The detailed
+sub-block history follows below.
 
 **M1 step 2 — LinuxKPI shim foundation + first inherited
 driver.** Step-2 HANDOFF landed at `5fb0382` with a 7-sub-
