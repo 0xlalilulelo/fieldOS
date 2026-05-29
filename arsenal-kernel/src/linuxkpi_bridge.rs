@@ -392,9 +392,9 @@ pub unsafe extern "C" fn linuxkpi_virtqueue_push_chain(
     let mut buf: [(u64, u32, u16); 8] = [(0, 0, 0); 8];
     // SAFETY: forwarded caller contract.
     unsafe {
-        for i in 0..nparts as usize {
+        for (i, slot) in buf.iter_mut().enumerate().take(nparts as usize) {
             let p = &*parts.add(i);
-            buf[i] = (p.addr, p.len, p.flags);
+            *slot = (p.addr, p.len, p.flags);
         }
         let slice = &buf[..nparts as usize];
         match (*(handle as *mut Virtqueue)).push_chain(slice) {
