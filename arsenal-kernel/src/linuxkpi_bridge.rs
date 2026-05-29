@@ -166,6 +166,25 @@ pub extern "C" fn linuxkpi_lapic_eoi() {
     apic::send_eoi();
 }
 
+/// Number of physical frames currently free in arsenal-kernel's
+/// frame allocator. Used by the shim's `si_meminfo` and
+/// `si_mem_available` to populate balloon's
+/// VIRTIO_BALLOON_S_MEMFREE / S_AVAIL stats.
+#[unsafe(no_mangle)]
+pub extern "C" fn linuxkpi_frames_free_count() -> u64 {
+    frames::FRAMES.free_count() as u64
+}
+
+/// Total physical frames added to arsenal-kernel's frame
+/// allocator (a stand-in for "physical RAM frames" — the M1 model
+/// has no kernel-reserved set distinct from frames-added). Used
+/// by the shim's `si_meminfo` to populate balloon's
+/// VIRTIO_BALLOON_S_MEMTOT stat.
+#[unsafe(no_mangle)]
+pub extern "C" fn linuxkpi_frames_total_count() -> u64 {
+    frames::FRAMES.total_added() as u64
+}
+
 /// Resolve the virtio-modern transport at `(bus, dev, func)`
 /// into `*out`. Sets `out.present = 0` when the function is not
 /// a virtio device or lacks the modern capability set; sets

@@ -63,15 +63,14 @@ now_ms() {
 # its "this subsystem survived" assertion in CI; remove one only when
 # the underlying assertion is folded into a stronger downstream
 # sentinel. Order does not matter — we wait for the full set.
-REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_IOAPIC_OK" "ARSENAL_SMP_OK" "ARSENAL_NVME_OK" "ARSENAL_LINUXKPI_OK" "ARSENAL_VIRTIO_BALLOON_OK" "ARSENAL_PROMPT_OK")
-# Round 22b/c WIP: ARSENAL_VIRTIO_BALLOON_INFLATE_OK is NOT yet
-# required. The QMP harness fires balloon size changes correctly
-# (host side confirmed); the MSI-X config-changed vector is wired
-# and the device echoes back acceptance of vector 0, but the IRQ
-# never reaches the dispatcher (no "virtio: config-changed IRQ
-# fired" line). Adding the sentinel will land in round 22d once
-# the MSI delivery is debugged. See the round-22b/c commit body
-# for the diagnostic state.
+REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_IOAPIC_OK" "ARSENAL_SMP_OK" "ARSENAL_NVME_OK" "ARSENAL_LINUXKPI_OK" "ARSENAL_VIRTIO_BALLOON_OK" "ARSENAL_VIRTIO_BALLOON_INFLATE_OK" "ARSENAL_PROMPT_OK")
+# ARSENAL_VIRTIO_BALLOON_INFLATE_OK closes the config-changed loop:
+# the QMP helper below drives a balloon size change, the device
+# raises its config-changed MSI-X (vector 0x41), the dispatcher
+# runs virtballoon_changed, the workqueue runner inflates the
+# balloon, and adjust_managed_page_count fires the sentinel on the
+# first non-zero reclaim. Required since round 22d (MSI-X config
+# delivery needed PCI Bus Master Enable on the virtio device).
 SERIAL_LOG=$(mktemp -t arsenal-smoke-serial.XXXXXX)
 QEMU_LOG=$(mktemp -t arsenal-smoke-qemu.XXXXXX)
 CERT_DIR=$(mktemp -d -t arsenal-smoke-cert.XXXXXX)

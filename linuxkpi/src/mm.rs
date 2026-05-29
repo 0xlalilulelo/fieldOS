@@ -23,6 +23,11 @@ use core::ffi::c_void;
 
 use crate::types::{c_char, c_int, c_long, c_uint};
 
+unsafe extern "C" {
+    fn linuxkpi_frames_free_count() -> u64;
+    fn linuxkpi_frames_total_count() -> u64;
+}
+
 #[repr(C)]
 pub struct sysinfo {
     pub uptime: c_long,
@@ -41,26 +46,50 @@ pub struct sysinfo {
     pub _f: [u8; 0],
 }
 
-/// `si_meminfo` — fill `info` with the kernel's view of memory:
-/// totalram + freeram (in frames, scaled by mem_unit). Real impl
-/// reads arsenal-kernel's frame allocator state.
+/// `si_meminfo` — fill `info` with the kernel's view of memory.
+/// `totalram` is the total physical frames the frame allocator
+/// tracks; `freeram` is the currently-free frame count. `mem_unit`
+/// is the page size (4096) so balloon's `pages_to_bytes(i.freeram)`
+/// computation yields the right byte total. Other fields are zero
+/// at M1 — Arsenal has no swap, no page cache, no huge-page split.
 ///
 /// # Safety
-/// Calling this during M1-2-5 Part B iteration arc panics.
+/// `info` must point to a writable `struct sysinfo` (or be NULL).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn si_meminfo(_info: *mut sysinfo) {
-    panic!("linuxkpi: si_meminfo not yet implemented (lands at M1-2-5 close)")
+pub unsafe extern "C" fn si_meminfo(info: *mut sysinfo) {
+    if info.is_null() {
+        return;
+    }
+    // SAFETY: caller's contract.
+    unsafe {
+        (*info).uptime = 0;
+        (*info).loads = [0; 3];
+        (*info).totalram = linuxkpi_frames_total_count();
+        (*info).freeram = linuxkpi_frames_free_count();
+        (*info).sharedram = 0;
+        (*info).bufferram = 0;
+        (*info).totalswap = 0;
+        (*info).freeswap = 0;
+        (*info).procs = 0;
+        (*info).pad = 0;
+        (*info).totalhigh = 0;
+        (*info).freehigh = 0;
+        (*info).mem_unit = 4096;
+    }
 }
 
 /// `si_mem_available` — return the number of frames that could be
-/// allocated without page-reclaim. Real impl reads
-/// arsenal-kernel's frame allocator free count.
+/// allocated without page-reclaim. Arsenal has no reclaim
+/// subsystem at M1; the frame allocator's free count is the
+/// honest answer.
 ///
 /// # Safety
-/// Calling this during M1-2-5 Part B iteration arc panics.
+/// Takes no arguments and dereferences nothing; `unsafe` only to
+/// match the `extern "C"` ABI the inherited drivers link against.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn si_mem_available() -> c_long {
-    panic!("linuxkpi: si_mem_available not yet implemented (lands at M1-2-5 close)")
+    // SAFETY: bridge fn — returns a count.
+    unsafe { linuxkpi_frames_free_count() as c_long }
 }
 
 /// `register_oom_notifier` — add `nb` to the OOM notifier chain.

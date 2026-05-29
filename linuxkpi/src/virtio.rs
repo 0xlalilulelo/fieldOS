@@ -22,8 +22,11 @@
 //! VIRTIO_ID_BALLOON = 5), not the PCI device_id (e.g., 0x1045
 //! for modern virtio-balloon-pci). The shim translates PCI device
 //! IDs to VIRTIO_ID_* per virtio v1.2 § 4.1.2 ("PCI Device IDs"):
-//!   - 0x1000..=0x103F: legacy.   VIRTIO_ID = pci_id - 0x1000
-//!   - 0x1040..=0x107F: modern.   VIRTIO_ID = pci_id - 0x1040
+//!   - 0x1000..=0x103F: transitional. VIRTIO_ID lives in the PCI
+//!     Subsystem Device ID (config offset 0x2E), NOT derivable
+//!     from pci_id — QEMU's legacy assignment is non-linear
+//!     (0x1000=NET, 0x1001=BLOCK, 0x1002=BALLOON, 0x1005=RNG).
+//!   - 0x1040..=0x107F: modern. VIRTIO_ID = pci_id - 0x1040.
 //!
 //! VIRTIO_DEV_ANY_ID (0xFFFFFFFF) in the driver's id_table matches
 //! anything.
@@ -387,7 +390,9 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
     }
 
     walk_virtio_devices(|bus, dev, func, pci_device_id| {
-        let virtio_id = pci_to_virtio_id(pci_device_id);
+        // SAFETY: walk_virtio_devices yields (bus, dev, func) for a
+        // present PCI function.
+        let virtio_id = unsafe { pci_to_virtio_id(bus, dev, func, pci_device_id) };
         if !match_id_table(id_table, virtio_id) {
             return;
         }
@@ -411,6 +416,21 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
         };
         if raw.present == 0 {
             return;
+        }
+        // Enable PCI bus mastering on the device. Linux's virtio-pci
+        // transport bring-up (vp_modern_probe → pci_set_master) does
+        // this before handing the device to the driver, so inherited
+        // drivers assume mastering is already on. It is required for
+        // any device-initiated DMA: virtqueue descriptor access AND
+        // MSI-X message delivery — an MSI is a bus-master memory write
+        // to the LAPIC, which QEMU silently drops when the COMMAND
+        // register's Bus Master Enable bit (bit 2) is clear. Without
+        // this, balloon's config-changed MSI-X never reaches the LAPIC.
+        // SAFETY: bridge fns; COMMAND is at config offset 0x04
+        // (dword-aligned, within legacy config space).
+        unsafe {
+            let cmd = linuxkpi_pci_config_read32(bus, dev, func, 0x04);
+            linuxkpi_pci_config_write32(bus, dev, func, 0x04, cmd | (1 << 2));
         }
         let common_cfg = raw.common_cfg as *mut u8;
         // Drive the v1.2 § 3.1.1 init dance with bus-side feature
@@ -456,25 +476,18 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
         });
         let vdev_ptr: *mut virtio_device = Box::into_raw(vdev_box);
 
-        // Round-22c: wire config-changed MSI-X BEFORE probe (and
-        // therefore before balloon's virtio_device_ready call inside
-        // probe sets DRIVER_OK). The host only sends config-change
-        // irqs after DRIVER_OK, so wiring before probe means the
-        // first QMP-driven config update reaches the handler.
-        if config_changed.is_some() {
-            let ok = setup_config_changed_msix(
-                bus,
-                dev,
-                func,
-                common_cfg,
-                drv.as_ptr(),
-                vdev_ptr,
-            );
-            crate::log::pr(if ok {
-                b"virtio: config-changed MSI-X wired\n"
-            } else {
-                b"virtio: config-changed MSI-X setup FAILED\n"
-            });
+        // Wire config-changed MSI-X BEFORE probe (and therefore before
+        // balloon's virtio_device_ready call inside probe sets
+        // DRIVER_OK). The host only sends config-change irqs after
+        // DRIVER_OK, so wiring before probe means the first config
+        // update reaches the handler.
+        if config_changed.is_some()
+            && !setup_config_changed_msix(bus, dev, func, common_cfg, drv.as_ptr(), vdev_ptr)
+        {
+            // Fail-loud: the driver subscribed to config_changed but the
+            // irq path couldn't be wired (no MSI-X cap, IDT pool
+            // exhausted, BAR map fail). Config updates won't reach it.
+            crate::log::pr(b"virtio: config-changed MSI-X setup FAILED\n");
         }
 
         // validate() runs after feature negotiation but before
@@ -514,29 +527,6 @@ pub unsafe extern "C" fn register_virtio_driver(drv: *mut virtio_driver) -> c_in
     0
 }
 
-/// Write "virtio: msix echoed=<a> idt_vec=<b>\n" into buf. Diagnostic
-/// for round-22c MSI-X wiring during bring-up.
-fn fmt_hex(buf: &mut [u8], echoed: u32, vec: u32) -> usize {
-    const PREFIX: &[u8] = b"virtio: msix echoed=0x";
-    const MID: &[u8] = b" idt_vec=0x";
-    const SUFFIX: &[u8] = b"\n";
-    let mut i = 0;
-    for &b in PREFIX { buf[i] = b; i += 1; }
-    for shift in (0..8).rev() {
-        let nib = ((echoed >> (shift * 4)) & 0xF) as u8;
-        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-        i += 1;
-    }
-    for &b in MID { buf[i] = b; i += 1; }
-    for shift in (0..2).rev() {
-        let nib = ((vec >> (shift * 4)) & 0xF) as u8;
-        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-        i += 1;
-    }
-    for &b in SUFFIX { buf[i] = b; i += 1; }
-    i
-}
-
 /// Per-device handler context carried via `request_irq`'s `dev_id`
 /// argument so the config-change IDT dispatcher can reach back to
 /// the registered driver + the heap-allocated vdev. Box::leak'd at
@@ -560,7 +550,6 @@ unsafe extern "C" fn config_changed_irq_dispatch(
     _irq: c_int,
     dev_id: *mut c_void,
 ) -> c_int {
-    crate::log::pr(b"virtio: config-changed IRQ fired\n");
     if dev_id.is_null() {
         return 0;
     }
@@ -570,9 +559,7 @@ unsafe extern "C" fn config_changed_irq_dispatch(
     unsafe {
         let ctx = &*(dev_id as *const ConfigChangedCtx);
         if let Some(cb) = (*ctx.driver).config_changed {
-            crate::log::pr(b"virtio: dispatching config_changed callback\n");
             cb(ctx.vdev);
-            crate::log::pr(b"virtio: config_changed callback returned\n");
         }
     }
     0
@@ -657,7 +644,8 @@ fn setup_config_changed_msix(
         core::ptr::write_volatile(entry0.add(3), 0);
     }
 
-    // Enable MSI-X (cap msg_ctrl bit 15 → cap dword bit 31).
+    // Enable MSI-X (cap msg_ctrl bit 15 → cap dword bit 31); clear
+    // bit 30 (Function Mask) so per-entry vector_control governs masking.
     // SAFETY: bridge fns; cap_offset is dword-aligned per PCI spec.
     unsafe {
         let cur = linuxkpi_pci_config_read32(bus, devnum, func, info.cap_offset as u8);
@@ -666,16 +654,11 @@ fn setup_config_changed_msix(
     }
 
     // Claim MSI-X table entry 0 for config-changed via virtio
-    // COMMON_CFG. Read-back confirms the device accepted the
-    // vector index; 0xFFFF means VIRTIO_MSI_NO_VECTOR (allocation
-    // failure per v1.2 § 4.1.5.1.2.1).
+    // COMMON_CFG. Per virtio v1.2 § 4.1.5.1.2.1, the device echoes
+    // the written index back; 0xFFFF = VIRTIO_MSI_NO_VECTOR
+    // (allocation failure on the device side).
     // SAFETY: bridge fn.
     let echoed = unsafe { linuxkpi_virtio_set_msix_config_vector(common_cfg, 0) };
-    // Quick hex log via stack buf — confirms the device echoed vector 0
-    // and shows the IDT vector our MSI-X entry will deliver to.
-    let mut hexbuf = [0u8; 64];
-    let n = fmt_hex(&mut hexbuf, echoed as u32, idt_vec);
-    crate::log::pr(&hexbuf[..n]);
     if echoed != 0 {
         return false;
     }
@@ -1340,9 +1323,34 @@ where
 /// Translate a PCI device_id to a VIRTIO_ID_* constant per
 /// virtio v1.2 § 4.1.2 ("PCI Device IDs"). Returns 0 for an
 /// out-of-range device_id (caller then fails the match).
-fn pci_to_virtio_id(pci_device_id: u16) -> u32 {
+///
+/// Transitional devices (0x1000..=0x103F) DO NOT have a linear
+/// PCI-ID-to-VIRTIO_ID mapping; QEMU's historical assignment is
+/// 0x1000=NET(1), 0x1001=BLOCK(2), 0x1002=BALLOON(5),
+/// 0x1003=CONSOLE(3), 0x1004=SCSI(8), 0x1005=RNG(4) — non-linear.
+/// Per virtio v0.9.5 + 1.x transitional-compat spec, the real
+/// VIRTIO_ID for a transitional device is in its **PCI Subsystem
+/// Device ID** (config offset 0x2E). So for transitional devices
+/// we read the subsystem ID and use that as VIRTIO_ID. Modern
+/// devices (0x1040..=0x107F) use the linear `pci_id - 0x1040`
+/// mapping.
+///
+/// The earlier round-22a bug surfaced this: a `pci - 0x1000`
+/// fallback for legacy matched balloon's id_table (VIRTIO_ID 5)
+/// against QEMU's RNG device (0x1005). Round-22d fix: read the
+/// subsystem ID for the right device type.
+///
+/// # Safety
+/// `(bus, dev, func)` must identify a present PCI function.
+unsafe fn pci_to_virtio_id(bus: u8, dev: u8, func: u8, pci_device_id: u16) -> u32 {
     match pci_device_id {
-        0x1000..=0x103F => (pci_device_id - 0x1000) as u32,
+        0x1000..=0x103F => {
+            // SAFETY: caller's contract; offset 0x2C is dword-
+            // aligned within the standard PCI config space.
+            let subsys = unsafe { linuxkpi_pci_config_read32(bus, dev, func, 0x2C) };
+            // Subsystem Device ID is bits 16..31 (high half).
+            (subsys >> 16) & 0xFFFF
+        }
         0x1040..=0x107F => (pci_device_id - 0x1040) as u32,
         _ => 0,
     }

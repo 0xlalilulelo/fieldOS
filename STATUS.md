@@ -624,24 +624,51 @@ device through the full lifecycle (init_transport with
 feature intersection → validate → probe → INIT_WORK × 3 +
 virtqueue allocation + virtio_device_ready).
 
-**Round 22b (next session): QMP-driven inflate cycle.** The
-runner task is in the runqueue receiving CPU time but
-currently idle — balloon's queue_work paths fire on
-stats-callback (no host driver yet) and config-changed irq
-(no QMP driver yet). 22b adds:
-  - `-qmp tcp:127.0.0.1:N,server,nowait` to ci/qemu-smoke.sh
-    + a Python harness that connects post-boot and sends a
-    `{"execute":"balloon","arguments":{"value":<bytes>}}`
-    command to drive a host-side balloon size change.
-  - An observation hook somewhere on balloon's
-    update_balloon_size_func body (or in the virtqueue
-    completion path) that flips a new sentinel
-    (ARSENAL_VIRTIO_BALLOON_INFLATE_OK or similar) after one
-    inflate/deflate cycle observes pages moving.
-  - Scope decision before starting (per ADR-0011 §
-    Consequences "concurrent work is not supported at M1"):
-    does the QMP harness wait for the cycle synchronously, or
-    is it fire-and-yield? Probably the latter.
+**Rounds 22b-22d complete (2026-05-29): QMP-driven inflate
+cycle closed end to end.** `ARSENAL_VIRTIO_BALLOON_INFLATE_OK`
+is now in REQUIRED_SENTINELS; smoke is 17/17.
+  - 22b/22c (`4179259`): `-qmp tcp:127.0.0.1:N,server=on,
+    wait=off` + a fire-and-yield Python harness that waits for
+    BALLOON_OK then sends `{"execute":"balloon",...}`; the
+    config-changed MSI-X scaffolding (per-device IDT slot +
+    handler ctx + `linuxkpi_virtio_set_msix_config_vector`);
+    `adjust_managed_page_count` flips the one-shot sentinel.
+  - 22d (`7934d05`, this session): the config MSI-X never
+    reached the LAPIC despite every guest-side precondition
+    being provably correct. **Root cause: the linuxkpi
+    virtio-pci bring-up never set PCI Bus Master Enable.** An
+    MSI is a bus-master memory write to the LAPIC; QEMU routes
+    `msi_send_message` through the device's bus-master address
+    space (BME-gated) and *silently drops* the write when BME
+    is clear — so `msix_notify` ran, found nothing to gate on,
+    and the message evaporated. The differential that isolated
+    it: nvme/virtio-blk had BME set (`0x0107`) and delivered
+    MSI-X; balloon/net/rng had it clear (`0x0103`), and
+    balloon's config IRQ was the system's first virtio MSI so
+    the gap had never surfaced. Fix: `register_virtio_driver`
+    enables bus mastering during transport bring-up (mirrors
+    Linux's `vp_modern_probe → pci_set_master`). Folded into
+    the same commit: the `pci_to_virtio_id` transitional-device
+    subsystem-ID fix (the old `pci_id - 0x1000` matched
+    balloon's id_table against QEMU's RNG) and real
+    `si_meminfo` / `si_mem_available` over two new frame-count
+    bridge fns (balloon's stats-vq prime panicked on the stub).
+
+**Worth-recording trap for every future MSI-X driver:** PCI
+Bus Master Enable is a hard precondition for MSI delivery, not
+just for descriptor/ring DMA. QEMU drops MSI writes when BME is
+clear with no diagnostic. The native NVMe driver set it; the
+shim path didn't. Any new device that delivers interrupts via
+MSI/MSI-X must have BME set first. (Debugging technique that
+cracked it: read PCI config space live via q35 ECAM —
+`xp 0xb0000000 + (dev<<15) + offset` under QMP — and compare
+COMMAND registers across working vs broken devices.)
+
+Final smoke: 17/17 sentinels, boot→prompt ~210 ms. QMP reports
+a real `BALLOON_CHANGE` (~8 MiB inflated) — virtballoon_changed
+→ workqueue runner → inflate → adjust_managed_page_count now
+runs as a closed loop. M1-2-5 Part B sub-task 3's config-change
+path is done; the runner is no longer idle on a live config update.
 
 First inherited driver target (re-confirmed at step-2
 HANDOFF): virtio-balloon (~600 LOC inherited C, pure
