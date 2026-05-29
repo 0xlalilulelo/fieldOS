@@ -30,6 +30,7 @@ mod kbd;
 mod linuxkpi_bridge;
 mod net;
 mod nvme;
+mod xhci;
 mod paging;
 mod pci;
 mod rand;
@@ -361,6 +362,12 @@ extern "C" fn _start() -> ! {
         "virtio_balloon_driver_init returned non-zero ({rc})"
     );
     serial::write_str("ARSENAL_VIRTIO_BALLOON_OK\n");
+
+    // M1-3 xHCI host controller (3-1 seed, native per ADR-0009).
+    // No-op when no xHCI controller is present, so the production
+    // smoke is unaffected; fires only under `-device qemu-xhci`.
+    // 3-1 adds qemu-xhci + the ARSENAL_XHCI_OK sentinel to the smoke.
+    xhci::run();
 
     // virtio-blk smoke: locate the device, init, read sector 0,
     // assert the hybrid-ISO MBR boot signature 0xAA55, print

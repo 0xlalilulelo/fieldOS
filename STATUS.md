@@ -112,10 +112,20 @@ Posture changes carrying to M1 step 2:
 
 ### Active work
 
-**Next: M1 step 3 — xHCI USB.** The kickoff decision is native
-Rust versus a LinuxKPI port; virtio-balloon is the data point
-that makes the port option credible. The next session writes the
-step-3 HANDOFF.
+**Active: M1 step 3 — xHCI USB (native Rust).** Step-3 HANDOFF
+kicked off; **M1-3-0 complete (2026-05-29)** — the native-vs-port
+gate decided **native** ([ADR-0009](docs/adrs/0009-xhci-native-rust.md))
+on two spikes: the LinuxKPI port pulls a 655+ header closure (~2.5×
+balloon) + the full USB core, while a native NVMe-style bring-up of
+qemu-xhci got a command-ring round-trip first try (~340 LOC). The
+spike is promoted to `arsenal-kernel/src/xhci.rs` as the 3-1 seed
+(no-ops without an xHCI controller, so the smoke stays 17/17). Next:
+3-1 (HC bring-up + MSI-X + the qemu-xhci smoke device + ARSENAL_XHCI_OK)
+→ 3-2 enumeration → 3-3 HID keyboard → 3-4 mass storage. A latent
+finding logged for the step-7 real-hardware checklist: NVMe's MSI
+delivers without arsenal-kernel ever setting PCI Bus Master Enable
+(QEMU/Limine defaults it on); real hardware may need an explicit BME
+write nvme.rs lacks. The xHCI seed sets BME explicitly.
 
 ---
 

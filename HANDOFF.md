@@ -132,55 +132,48 @@ is fine, but 3-0's data is what decides.
 
 ## Sub-block plan
 
-The plan below is the kickoff proposal, not gospel. 3-0 is fixed;
-the post-3-0 sub-blocks fork on its decision and are sketched for
-both paths. The exit target (HID keyboard + mass storage) and the
-foundation reuse are the same either way.
+**(M1-3-0) Spike both, decide, record. The gate — COMPLETE (2026-05-29,
+decided NATIVE).** Both spikes ran on `spike/xhci-native`:
+  - *Port spike (measured):* the ADR-0006-style include-graph audit
+    of `drivers/usb/host/xhci-hcd` + usbcore resolved **655 headers
+    and was not complete** (~2.5× balloon's 281), with 52
+    Kbuild-generated misses, atop ~15k LOC of xhci `.c` plus the full
+    USB core. An amdgpu-scale shim explosion, front-loaded.
+  - *Native spike (worked):* an NVMe-style bring-up of `qemu-xhci`
+    (caps → reset → DCBAA → command ring → event ring/ERST → run →
+    No-Op command) got a Command Completion Event round-trip **first
+    try**, ~340 LOC, none of the spec-fragile pieces needing debug.
+  - *Decision:* **native Rust**, recorded in
+    [ADR-0009](docs/adrs/0009-xhci-native-rust.md) (a documented
+    deviation from ARSENAL.md's "xhci shim-hosted" line; the port
+    budget belongs on amdgpu). The spike was promoted to
+    `arsenal-kernel/src/xhci.rs` as the 3-1 seed — it no-ops when no
+    xHCI controller is present, so the production smoke is unaffected
+    (still 17/17). ADR-0005's provisional reservations shifted up one.
 
-**(M1-3-0) Spike both, decide, record. The gate.**
-  - *Native spike:* bring up `qemu-xhci` far enough to read its
-    capability + operational registers, allocate the DCBAA + a
-    command ring, post a No-Op command, and observe its completion
-    on the event ring via an MSI-X interrupt (set BME). The
-    NVMe-shaped "we can talk to the controller and get one ring
-    round-trip" proof. Timebox ~1 session, on a `spike/` branch
-    that does not touch the smoke.
-  - *Port spike:* run the ADR-0006-style include-graph audit on
-    `drivers/usb/host/xhci-hcd` + usbcore — how many shim surfaces
-    (functions, structs, headers) does it pull, how many are
-    USB-core-internal vs leaf. No compile required; the measured
-    closure is the deliverable. Timebox ~1 session.
-  - *Decide + record:* pick native or port on the spike data;
-    write the ADR (next free number, claimed at decision time per
-    the established first-use shuffle — it shifts ADR-0005's
-    provisional reservations); rewrite this file's post-3-0
-    sub-block plan to the chosen path. **No new sentinel.** Bisect
-    seam. Use **go m1-3-0-spike** for the spikes, **draft m1-3-0-adr**
-    for the decision ADR.
+The native path is now canonical:
 
-**If native (sketch):**
-  - 3-1 xHCI HC bring-up: capability/operational/runtime/doorbell
-    registers, DCBAA + scratchpad, command + event rings, port
-    reset/enable, MSI-X (BME). `ARSENAL_XHCI_OK` on first
-    command-ring round-trip.
-  - 3-2 Enumeration: Enable Slot → Address Device → GET_DESCRIPTOR
-    → SET_CONFIGURATION over the default control endpoint;
-    descriptor parsing.
-  - 3-3 HID keyboard: interrupt endpoint + transfer ring,
+  - **3-1 xHCI HC bring-up.** Build on the `xhci.rs` seed: keep the
+    caps/reset/DCBAA/command-ring/event-ring/ERST sequence the spike
+    proved, add port reset/enable, convert the polled event-ring
+    observation to MSI-X-driven completion (the seed already sets
+    BME), add `-device qemu-xhci` + `ARSENAL_XHCI_OK` to the smoke.
+    The seed's `run()` becomes the real bring-up entry point.
+  - **3-2 Enumeration.** Enable Slot → Address Device →
+    GET_DESCRIPTOR → SET_CONFIGURATION over the default control
+    endpoint; descriptor parsing. (`Address Device` with/without BSR
+    is the trap to watch — HANDOFF spec-fragile list.)
+  - **3-3 HID keyboard.** Interrupt endpoint + transfer ring,
     boot-protocol report parsing, keystrokes into the existing
-    kbd/shell path. Sentinel `ARSENAL_USB_HID_OK`.
-  - 3-4 Mass storage: bulk in/out endpoints, BOT/SCSI READ(10),
-    sector-0 + 0xAA55 check. Sentinel `ARSENAL_USB_STORAGE_OK`.
+    kbd/shell path. `-device usb-kbd`; sentinel `ARSENAL_USB_HID_OK`.
+  - **3-4 Mass storage.** Bulk in/out endpoints, BOT/SCSI READ(10),
+    sector-0 + 0xAA55 check (parallel to the NVMe/virtio-blk block
+    smoke). `-device usb-storage` backed by the ISO; sentinel
+    `ARSENAL_USB_STORAGE_OK`.
 
-**If port (sketch):**
-  - 3-1 USB-core shim surface part 1 (the closure 3-0 measured:
-    device model, URB allocation, root-hub enumeration hooks).
-  - 3-2 xhci-hcd into the cc-build manifest; compile-error
-    iteration (the balloon rounds-1-through-17 pattern, larger).
-  - 3-3 First device online through the ported stack;
-    `ARSENAL_XHCI_OK`.
-  - 3-4 HID + mass-storage class drivers (native on top of the
-    ported core, or inherited usbhid + usb-storage).
+(The LinuxKPI-port sub-block sketch is retired — see ADR-0009 for the
+data that ruled it out. A future complex USB need could revisit it as
+a successor ADR, but M1 step 3 is native.)
 
 **(M1-3-final) STATUS refresh + step-3 devlog(s) + step-4 HANDOFF.**
   Per the established close: flip STATUS to step 3 complete, write
@@ -298,10 +291,13 @@ ARSENAL_VIRTIO_BALLOON_OK + _INFLATE_OK both fire.
 
 ## First action
 
-Push `main` to `origin` (42 commits), then start 3-0: the native
-ring-bring-up spike and the port include-graph audit, in either
-order, on a `spike/` branch that leaves the smoke untouched until a
-decision lands. The next thing written after 3-0 is the
-architecture ADR and the rewritten post-3-0 sub-block plan in this
-file. Wait for the pick on native-vs-port until 3-0's data is in
-hand — do not pre-commit the architecture on the prose case above.
+**3-0 is complete (native, ADR-0009); start 3-1.** Build the real
+HC bring-up on the `arsenal-kernel/src/xhci.rs` seed: keep the
+caps/reset/DCBAA/command-ring/event-ring sequence the spike proved,
+add port reset/enable, convert the polled event-ring observation to
+MSI-X-driven completion, and add `-device qemu-xhci` +
+`ARSENAL_XHCI_OK` to `ci/qemu-smoke.sh`. Keep the build loop green;
+the seed already builds and round-trips a No-Op under qemu-xhci. Then
+3-2 (enumeration) → 3-3 (HID) → 3-4 (mass storage) per the plan
+above. The architecture section and spike framing above are kept as
+the rationale of record for ADR-0009.
