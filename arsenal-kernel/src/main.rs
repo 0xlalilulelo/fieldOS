@@ -363,10 +363,12 @@ extern "C" fn _start() -> ! {
     );
     serial::write_str("ARSENAL_VIRTIO_BALLOON_OK\n");
 
-    // M1-3 xHCI host controller (3-1 seed, native per ADR-0009).
-    // No-op when no xHCI controller is present, so the production
-    // smoke is unaffected; fires only under `-device qemu-xhci`.
-    // 3-1 adds qemu-xhci + the ARSENAL_XHCI_OK sentinel to the smoke.
+    // M1-3 xHCI host controller (native per ADR-0009). 3-1: HC
+    // bring-up + reset + DCBAA/command/event rings + interrupter-0
+    // MSI-X + root-port reset; a No-Op command completes via MSI-X
+    // → ARSENAL_XHCI_OK. The smoke runs this under `-device
+    // qemu-xhci`; no-ops (silent) when no controller is present.
+    // 3-2 builds device enumeration on top.
     xhci::run();
 
     // virtio-blk smoke: locate the device, init, read sector 0,

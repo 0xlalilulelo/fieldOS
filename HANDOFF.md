@@ -153,12 +153,17 @@ decided NATIVE).** Both spikes ran on `spike/xhci-native`:
 
 The native path is now canonical:
 
-  - **3-1 xHCI HC bring-up.** Build on the `xhci.rs` seed: keep the
-    caps/reset/DCBAA/command-ring/event-ring/ERST sequence the spike
-    proved, add port reset/enable, convert the polled event-ring
-    observation to MSI-X-driven completion (the seed already sets
-    BME), add `-device qemu-xhci` + `ARSENAL_XHCI_OK` to the smoke.
-    The seed's `run()` becomes the real bring-up entry point.
+  - **3-1 xHCI HC bring-up. COMPLETE (2026-05-29).** `xhci::run`
+    does the §4.2 sequence (caps → reset → DCBAA → command/event
+    rings + ERST → run), sets BME, wires interrupter 0 to an MSI-X
+    vector, resets connected root ports, and completes a No-Op
+    command via an MSI-X interrupt (drains the event ring honoring
+    the cycle bit, since the port resets enqueue Port Status Change
+    Events ahead of the Command Completion). `-device qemu-xhci` +
+    `-device usb-kbd` and `ARSENAL_XHCI_OK` are in the smoke (now 18
+    sentinels). Worked with one event-handling fix (drain vs
+    fixed-slot read); the MSI-X/BME/interrupter wiring was right
+    first try.
   - **3-2 Enumeration.** Enable Slot → Address Device →
     GET_DESCRIPTOR → SET_CONFIGURATION over the default control
     endpoint; descriptor parsing. (`Address Device` with/without BSR
@@ -291,13 +296,15 @@ ARSENAL_VIRTIO_BALLOON_OK + _INFLATE_OK both fire.
 
 ## First action
 
-**3-0 is complete (native, ADR-0009); start 3-1.** Build the real
-HC bring-up on the `arsenal-kernel/src/xhci.rs` seed: keep the
-caps/reset/DCBAA/command-ring/event-ring sequence the spike proved,
-add port reset/enable, convert the polled event-ring observation to
-MSI-X-driven completion, and add `-device qemu-xhci` +
-`ARSENAL_XHCI_OK` to `ci/qemu-smoke.sh`. Keep the build loop green;
-the seed already builds and round-trips a No-Op under qemu-xhci. Then
-3-2 (enumeration) → 3-3 (HID) → 3-4 (mass storage) per the plan
-above. The architecture section and spike framing above are kept as
-the rationale of record for ADR-0009.
+**3-0 and 3-1 are complete; start 3-2 (enumeration).** On a connected,
+reset port (3-1 already resets them and logs PED), drive the default
+control endpoint: Enable Slot command → allocate the device + input
+context (mind HCCPARAMS1.CSZ — 32 vs 64-byte contexts; qemu-xhci is
+32) → Address Device (watch the BSR two-phase) → GET_DESCRIPTOR
+(device, then config) → SET_CONFIGURATION; parse the descriptors.
+The 3-1 `xhci.rs` already has the command ring, event-ring drain
+(reuse it — enumeration generates Transfer Events too), MSI-X
+interrupter, and DCBAA. Add a control-transfer-ring helper + the
+slot/endpoint context structs. Then 3-3 (HID interrupt endpoint →
+keystrokes) → 3-4 (mass storage bulk → sector-0 + 0xAA55). Keep the
+build loop green; `-device usb-kbd` is already attached in the smoke.

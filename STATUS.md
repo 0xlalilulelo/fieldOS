@@ -118,10 +118,16 @@ gate decided **native** ([ADR-0009](docs/adrs/0009-xhci-native-rust.md))
 on two spikes: the LinuxKPI port pulls a 655+ header closure (~2.5×
 balloon) + the full USB core, while a native NVMe-style bring-up of
 qemu-xhci got a command-ring round-trip first try (~340 LOC). The
-spike is promoted to `arsenal-kernel/src/xhci.rs` as the 3-1 seed
-(no-ops without an xHCI controller, so the smoke stays 17/17). Next:
-3-1 (HC bring-up + MSI-X + the qemu-xhci smoke device + ARSENAL_XHCI_OK)
-→ 3-2 enumeration → 3-3 HID keyboard → 3-4 mass storage. A latent
+spike is promoted to `arsenal-kernel/src/xhci.rs`. **M1-3-1 complete
+(2026-05-29):** `xhci::run` does the §4.2 bring-up (caps → reset →
+DCBAA → command/event rings → run), sets BME, wires interrupter 0 to
+an MSI-X vector, resets connected root ports, and completes a No-Op
+command via MSI-X (`ARSENAL_XHCI_OK`); the smoke runs it under
+`-device qemu-xhci -device usb-kbd` and is now **18/18**. One
+event-handling fix in flight (drain the event ring honoring the cycle
+bit — port resets enqueue Port Status Change Events ahead of the
+Command Completion); the MSI-X/BME/interrupter wiring was right first
+try. Next: 3-2 enumeration → 3-3 HID keyboard → 3-4 mass storage. A latent
 finding logged for the step-7 real-hardware checklist: NVMe's MSI
 delivers without arsenal-kernel ever setting PCI Bus Master Enable
 (QEMU/Limine defaults it on); real hardware may need an explicit BME

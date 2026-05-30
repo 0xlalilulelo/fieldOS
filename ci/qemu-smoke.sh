@@ -63,7 +63,7 @@ now_ms() {
 # its "this subsystem survived" assertion in CI; remove one only when
 # the underlying assertion is folded into a stronger downstream
 # sentinel. Order does not matter — we wait for the full set.
-REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_IOAPIC_OK" "ARSENAL_SMP_OK" "ARSENAL_NVME_OK" "ARSENAL_LINUXKPI_OK" "ARSENAL_VIRTIO_BALLOON_OK" "ARSENAL_VIRTIO_BALLOON_INFLATE_OK" "ARSENAL_PROMPT_OK")
+REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_IOAPIC_OK" "ARSENAL_SMP_OK" "ARSENAL_NVME_OK" "ARSENAL_LINUXKPI_OK" "ARSENAL_VIRTIO_BALLOON_OK" "ARSENAL_VIRTIO_BALLOON_INFLATE_OK" "ARSENAL_XHCI_OK" "ARSENAL_PROMPT_OK")
 # ARSENAL_VIRTIO_BALLOON_INFLATE_OK closes the config-changed loop:
 # the QMP helper below drives a balloon size change, the device
 # raises its config-changed MSI-X (vector 0x41), the dispatcher
@@ -191,6 +191,8 @@ qemu-system-x86_64 \
 	-netdev user,id=net0 \
 	-device virtio-net-pci,netdev=net0 \
 	-device virtio-balloon-pci \
+	-device qemu-xhci,id=xhci \
+	-device usb-kbd,bus=xhci.0 \
 	-qmp tcp:127.0.0.1:$QMP_PORT,server=on,wait=off \
 	-display none \
 	-no-reboot -no-shutdown \
