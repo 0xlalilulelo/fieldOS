@@ -22,9 +22,19 @@
 //! then configuration) → SET_CONFIGURATION, parsing the descriptors
 //! and emitting `ARSENAL_USB_ENUM_OK`. It reuses the 3-1 command ring,
 //! event-ring drain, MSI-X interrupter, and DCBAA; a per-device EP0
-//! transfer ring carries the control TRBs. 3-3 / 3-4 add the HID and
-//! mass-storage class drivers. `run` no-ops when no xHCI controller is
-//! present.
+//! transfer ring carries the control TRBs.
+//!
+//! **3-3 state: HID boot keyboard.** When enumeration finds a HID
+//! boot-protocol keyboard interface, `setup_hid_keyboard` issues a
+//! Configure Endpoint command for its interrupt IN endpoint, arms the
+//! first transfer, and hands the live ring state to the `HID` static.
+//! The cooperative `hid_poll_task` (ADR-0011 runner shape; the MSI-X
+//! handler stays thin) drains interrupt Transfer Events, decodes the
+//! 8-byte boot report into ASCII, injects it into the shared `kbd`
+//! ring the shell drains, and re-arms — wrapping its transfer ring via
+//! a Link TRB so the keyboard stays live. `ARSENAL_USB_HID_OK` fires on
+//! the first decoded keystroke. 3-4 adds the mass-storage class driver.
+//! `run` no-ops when no xHCI controller is present.
 //!
 //! The spec-fragile pieces (xHCI §5): CAPLENGTH/RTSOFF/DBOFF offset
 //! math, 32-vs-64-byte contexts (HCCPARAMS1.CSZ), ring producer/
@@ -36,9 +46,10 @@ use core::fmt::Write;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use spin::Mutex;
 use x86_64::structures::idt::InterruptStackFrame;
 
-use crate::{apic, frames, idt, paging, pci, serial};
+use crate::{apic, frames, idt, kbd, paging, pci, serial};
 
 // xHCI class code (PCI): 0x0C serial bus, 0x03 USB, 0x30 xHCI.
 const XHCI_CLASS: u8 = 0x0C;
@@ -98,11 +109,14 @@ const MSIX_CTRL_ENABLE_DWORD_BIT: u32 = 1 << 31;
 const TRB_BYTES: u64 = 16;
 
 // TRB types.
+const TRB_TYPE_NORMAL: u32 = 1; // interrupt/bulk transfer TRB
+const TRB_TYPE_LINK: u32 = 6; // ring link (wrap) TRB
 const TRB_TYPE_SETUP_STAGE: u32 = 2; // control-transfer Setup Stage (§6.4.1.2.1)
 const TRB_TYPE_DATA_STAGE: u32 = 3; // control-transfer Data Stage
 const TRB_TYPE_STATUS_STAGE: u32 = 4; // control-transfer Status Stage
 const TRB_TYPE_ENABLE_SLOT: u32 = 9; // Enable Slot command
 const TRB_TYPE_ADDRESS_DEVICE: u32 = 11; // Address Device command
+const TRB_TYPE_CONFIGURE_ENDPOINT: u32 = 12; // Configure Endpoint command
 const TRB_TYPE_NOOP_CMD: u32 = 23;
 const TRB_TYPE_TRANSFER: u32 = 32; // Transfer Event
 const TRB_TYPE_CMD_COMPLETION: u32 = 33;
@@ -116,10 +130,20 @@ const USB_REQ_SET_CONFIGURATION: u8 = 9;
 const USB_DESC_DEVICE: u8 = 1;
 const USB_DESC_CONFIG: u8 = 2;
 const USB_DESC_INTERFACE: u8 = 4;
+const USB_DESC_ENDPOINT: u8 = 5;
+
+// HID boot-protocol keyboard interface triple (USB HID 1.11 §4.2/4.3).
+const USB_CLASS_HID: u8 = 0x03;
+const HID_SUBCLASS_BOOT: u8 = 0x01;
+const HID_PROTOCOL_KEYBOARD: u8 = 0x01;
 
 // The default control endpoint is Device Context Index 1; the slot's
 // doorbell takes the target DCI as its value.
 const DCI_EP0: u32 = 1;
+
+// EP0 + interrupt-endpoint transfer rings are a full frame (256 TRBs);
+// the last slot is reserved for a Link TRB so the producer can wrap.
+const EP_RING_TRBS: usize = 256;
 
 // Event ring segment size in TRBs (matches the ERSTSZ=1 entry below).
 const EVENT_RING_TRBS: usize = 16;
@@ -837,7 +861,113 @@ impl Xhci {
             "xhci: slot {slot_id} configured (value={config_value} iface class={iface_class:#04x}/\
              {iface_sub:#04x}/{iface_proto:#04x} eps={num_ep})",
         );
+
+        // 3-3: if this is a HID boot-protocol keyboard, configure its
+        // interrupt IN endpoint and arm the first transfer. The
+        // cooperative poller (hid_poll_task) services it from here on.
+        if iface_class == USB_CLASS_HID
+            && iface_sub == HID_SUBCLASS_BOOT
+            && iface_proto == HID_PROTOCOL_KEYBOARD
+        {
+            self.setup_hid_keyboard(slot_id, speed, port_num, cfg);
+        }
         true
+    }
+
+    /// Bring a HID boot keyboard's interrupt IN endpoint online: locate
+    /// the endpoint descriptor, Configure Endpoint to add it to the
+    /// slot, arm the first interrupt transfer, and hand the live ring
+    /// state to the cooperative poller via the `HID` static. The poller
+    /// re-arms each transfer and feeds decoded keystrokes into the
+    /// shared keyboard ring (3-1's command ring + event-ring drain and
+    /// the slot's DCBAA entry are all reused).
+    fn setup_hid_keyboard(&mut self, slot_id: u32, speed: u32, port_num: u8, cfg: &[u8]) {
+        let (ep_addr, ep_maxpkt, b_interval) = match find_interrupt_in_endpoint(cfg) {
+            Some(x) => x,
+            None => {
+                let _ = writeln!(serial::Writer, "xhci: slot {slot_id} no interrupt IN endpoint");
+                return;
+            }
+        };
+        let ep_num = (ep_addr & 0x0F) as u32;
+        let ep_dci = ep_num * 2 + 1; // IN endpoint DCI = n*2 + 1
+
+        // xHCI Interval encoding (§6.2.3.6): SS/HS interrupt = bInterval-1
+        // (already a 2^n microframe exponent); FS/LS = log2(bInterval ms)
+        // + 3 (1 ms = 8 × 125 µs = 2^3). Clamped to the 4-bit field.
+        let interval = match speed {
+            3 | 4 => b_interval.saturating_sub(1) as u32,
+            _ => 31 - (b_interval.max(1) as u32).leading_zeros() + 3,
+        }
+        .min(15);
+
+        let ce_input_phys = alloc_zeroed_frame();
+        let ep_ring_phys = alloc_zeroed_frame();
+        let report_phys = alloc_zeroed_frame();
+
+        // Configure Endpoint input context: Input Control Context adds
+        // the slot (A0) + the interrupt endpoint (its DCI); the slot
+        // context's Context Entries is bumped to the new highest DCI.
+        // SAFETY: input-context frame owned + mapped; offsets within
+        // 4 KiB for ctx_size ∈ {32, 64} and DCI ≤ 31.
+        unsafe {
+            let base = phys_to_virt(ce_input_phys);
+            write_volatile((base + 4) as *mut u32, 0b1 | (1 << ep_dci)); // Add Flags
+            let slot = base + self.ctx_size;
+            write_volatile(slot as *mut u32, (ep_dci << 27) | (speed << 20));
+            write_volatile((slot + 4) as *mut u32, (port_num as u32) << 16);
+            // Endpoint context for DCI `ep_dci` sits at (ep_dci+1)*ctx_size.
+            let ep = base + (ep_dci as usize + 1) * self.ctx_size;
+            write_volatile(ep as *mut u32, interval << 16); // Interval (bits 16..23)
+            // EP Type 7 = Interrupt IN; CErr 3; Max Packet Size.
+            write_volatile(
+                (ep + 4) as *mut u32,
+                ((ep_maxpkt as u32) << 16) | (7 << 3) | (3 << 1),
+            );
+            write_volatile((ep + 8) as *mut u32, (ep_ring_phys as u32) | 1); // TR deq lo | DCS
+            write_volatile((ep + 12) as *mut u32, (ep_ring_phys >> 32) as u32);
+            write_volatile((ep + 16) as *mut u32, ((ep_maxpkt as u32) << 16) | 8); // ESIT | avg
+        }
+
+        self.push_command(
+            ce_input_phys as u32,
+            (ce_input_phys >> 32) as u32,
+            0,
+            (slot_id << 24) | (TRB_TYPE_CONFIGURE_ENDPOINT << 10),
+        );
+        let (cc, _sid) = self.wait_command();
+        if cc != 1 {
+            let _ = writeln!(serial::Writer, "xhci: slot {slot_id} Configure Endpoint cc={cc}");
+            return;
+        }
+
+        // Hand the live ring state to the poller, then arm the first
+        // interrupt transfer. event_deq/event_ccs are copied *after* the
+        // Configure Endpoint completion was drained, so the next event
+        // (a HID report) lands at the poller's starting cursor.
+        let mut hid = HidState {
+            db_base: self.regs.db_base,
+            rt_base: self.regs.rt_base,
+            event_ring_phys: self.event_ring_phys,
+            event_deq: self.event_deq,
+            event_ccs: self.event_ccs,
+            slot_id: slot_id as u8,
+            ep_dci,
+            ep_ring_phys,
+            ep_enqueue: 0,
+            ep_cycle: 1,
+            report_phys,
+            prev: [0u8; 8],
+            sentinel_fired: false,
+        };
+        hid.arm_report();
+        *HID.lock() = Some(hid);
+
+        let _ = writeln!(
+            serial::Writer,
+            "xhci: HID keyboard armed (slot {slot_id} ep dci {ep_dci} maxpkt={ep_maxpkt} \
+             interval={interval}); waiting for input",
+        );
     }
 }
 
@@ -857,6 +987,214 @@ fn first_interface(cfg: &[u8]) -> (u8, u8, u8, u8) {
         i += len;
     }
     (0, 0, 0, 0)
+}
+
+/// Walk a configuration descriptor's tree and return the first
+/// interrupt IN endpoint's (bEndpointAddress, wMaxPacketSize,
+/// bInterval). None if the configuration has none.
+fn find_interrupt_in_endpoint(cfg: &[u8]) -> Option<(u8, u16, u8)> {
+    let mut i = 0usize;
+    while i + 2 <= cfg.len() {
+        let len = cfg[i] as usize;
+        if len < 2 || i + len > cfg.len() {
+            break;
+        }
+        if cfg[i + 1] == USB_DESC_ENDPOINT && len >= 7 {
+            let addr = cfg[i + 2];
+            let attrs = cfg[i + 3];
+            let maxpkt = u16::from_le_bytes([cfg[i + 4], cfg[i + 5]]);
+            let interval = cfg[i + 6];
+            // bmAttributes transfer type 3 = interrupt; bit 7 of address = IN.
+            if attrs & 0x3 == 0x3 && addr & 0x80 != 0 {
+                return Some((addr, maxpkt, interval));
+            }
+        }
+        i += len;
+    }
+    None
+}
+
+/// Translate a USB HID Keyboard/Keypad usage ID (Usage Page 0x07) to an
+/// ASCII byte for the shell's input stream. Covers the letters, digits,
+/// Enter / Backspace / Tab / Space, and the handful of symbols the
+/// shell needs; returns None for keys with no M1 ASCII mapping.
+fn hid_usage_to_ascii(usage: u8, shift: bool) -> Option<u8> {
+    let c = match usage {
+        0x04..=0x1D => b'a' + (usage - 0x04), // a..z
+        0x1E..=0x26 => b'1' + (usage - 0x1E), // 1..9
+        0x27 => b'0',
+        0x28 => b'\n',   // Enter
+        0x2A => 0x08,    // Backspace
+        0x2B => b'\t',   // Tab
+        0x2C => b' ',    // Space
+        0x2D => return Some(if shift { b'_' } else { b'-' }),
+        0x2E => return Some(if shift { b'+' } else { b'=' }),
+        0x36 => return Some(if shift { b'<' } else { b',' }),
+        0x37 => return Some(if shift { b'>' } else { b'.' }),
+        0x38 => return Some(if shift { b'?' } else { b'/' }),
+        _ => return None,
+    };
+    if shift && c.is_ascii_lowercase() {
+        Some(c - 32)
+    } else {
+        Some(c)
+    }
+}
+
+/// Live HID keyboard state owned by the cooperative poller. Carries the
+/// register bases + the event-ring consumer cursor handed over by
+/// `setup_hid_keyboard`, the interrupt endpoint's transfer ring, the
+/// report buffer, and the previous report (for press-edge detection so
+/// held keys aren't re-emitted).
+struct HidState {
+    db_base: usize,
+    rt_base: usize,
+    event_ring_phys: u64,
+    event_deq: usize,
+    event_ccs: u32,
+    slot_id: u8,
+    ep_dci: u32,
+    ep_ring_phys: u64,
+    ep_enqueue: usize,
+    ep_cycle: u32,
+    report_phys: u64,
+    prev: [u8; 8],
+    sentinel_fired: bool,
+}
+
+/// Set by `setup_hid_keyboard` once a boot keyboard's interrupt
+/// endpoint is armed; serviced by `hid_poll_task`. The poller is the
+/// sole accessor (the thin MSI-X handler only bumps a counter), so the
+/// Mutex is effectively uncontended — it exists for `Sync`.
+static HID: Mutex<Option<HidState>> = Mutex::new(None);
+
+impl HidState {
+    /// Enqueue a Normal TRB pointing at the report buffer on the
+    /// interrupt endpoint ring (IOC + ISP) and ring the slot doorbell.
+    /// Wraps via a Link TRB at the ring's last slot, toggling the
+    /// producer cycle — so the keyboard stays live indefinitely, not
+    /// just for the first 255 keystrokes.
+    fn arm_report(&mut self) {
+        // SAFETY: EP ring frame owned + HHDM-mapped; enqueue < EP_RING_TRBS.
+        unsafe {
+            if self.ep_enqueue == EP_RING_TRBS - 1 {
+                // Link TRB back to the ring base, Toggle Cycle (bit 1).
+                let link = (phys_to_virt(self.ep_ring_phys) as *mut u32).add(self.ep_enqueue * 4);
+                write_volatile(link, self.ep_ring_phys as u32);
+                write_volatile(link.add(1), (self.ep_ring_phys >> 32) as u32);
+                write_volatile(link.add(2), 0);
+                write_volatile(link.add(3), self.ep_cycle | (1 << 1) | (TRB_TYPE_LINK << 10));
+                self.ep_enqueue = 0;
+                self.ep_cycle ^= 1;
+            }
+            let trb = (phys_to_virt(self.ep_ring_phys) as *mut u32).add(self.ep_enqueue * 4);
+            write_volatile(trb, self.report_phys as u32);
+            write_volatile(trb.add(1), (self.report_phys >> 32) as u32);
+            write_volatile(trb.add(2), 8); // 8-byte boot report
+            // IOC (bit 5) + ISP (bit 2): complete on the report or a short packet.
+            write_volatile(
+                trb.add(3),
+                self.ep_cycle | (1 << 5) | (1 << 2) | (TRB_TYPE_NORMAL << 10),
+            );
+            self.ep_enqueue += 1;
+            // Ring the slot doorbell targeting the interrupt endpoint DCI.
+            w32(self.db_base + self.slot_id as usize * 4, self.ep_dci);
+        }
+    }
+
+    /// Non-blocking event-ring read: if the TRB at the consumer cursor
+    /// has the expected cycle bit, advance the cursor + ERDP and return
+    /// (ev_type, completion_code); otherwise None.
+    fn try_event(&mut self) -> Option<(u32, u32)> {
+        // SAFETY: event_deq < EVENT_RING_TRBS; ring frame owned + mapped.
+        let (d2, d3) = unsafe {
+            let p = (phys_to_virt(self.event_ring_phys) as *const u32).add(self.event_deq * 4);
+            (read_volatile(p.add(2)), read_volatile(p.add(3)))
+        };
+        if (d3 & 1) != self.event_ccs {
+            return None;
+        }
+        let ev_type = (d3 >> 10) & 0x3F;
+        let cc = (d2 >> 24) & 0xFF;
+        self.event_deq += 1;
+        if self.event_deq == EVENT_RING_TRBS {
+            self.event_deq = 0;
+            self.event_ccs ^= 1;
+        }
+        // SAFETY: interrupter 0 registers within the mapped BAR.
+        unsafe {
+            let ir0 = self.rt_base + 0x20;
+            w64(
+                ir0 + IR0_ERDP,
+                (self.event_ring_phys + self.event_deq as u64 * TRB_BYTES) | ERDP_EHB,
+            );
+            w32(ir0 + IR0_IMAN, IMAN_IE | IMAN_IP);
+        }
+        Some((ev_type, cc))
+    }
+
+    /// Drain every currently-available event. For each interrupt
+    /// Transfer Event, decode the boot report into keystrokes and re-arm
+    /// the next transfer. Returns immediately when the ring is empty.
+    fn service(&mut self) {
+        while let Some((ev_type, cc)) = self.try_event() {
+            if ev_type != TRB_TYPE_TRANSFER {
+                continue;
+            }
+            // SAFETY: report_phys frame owned + mapped; 8 valid bytes.
+            let report = unsafe {
+                let p = phys_to_virt(self.report_phys) as *const u8;
+                let mut r = [0u8; 8];
+                for (i, b) in r.iter_mut().enumerate() {
+                    *b = read_volatile(p.add(i));
+                }
+                r
+            };
+            self.decode_report(&report, cc);
+            self.arm_report();
+        }
+    }
+
+    /// Boot keyboard report = [modifiers, reserved, key0..key5]. Emit
+    /// the ASCII for each newly-pressed key (in this report but not the
+    /// previous one) into the shared keyboard ring. Fires
+    /// `ARSENAL_USB_HID_OK` once on the first decoded keystroke.
+    fn decode_report(&mut self, report: &[u8; 8], cc: u32) {
+        // Left/Right Shift = modifier bits 1 (0x02) and 5 (0x20).
+        let shift = report[0] & 0x22 != 0;
+        for &usage in &report[2..8] {
+            if usage == 0 || self.prev[2..8].contains(&usage) {
+                continue;
+            }
+            if let Some(ascii) = hid_usage_to_ascii(usage, shift) {
+                kbd::inject(ascii);
+                if !self.sentinel_fired {
+                    self.sentinel_fired = true;
+                    let _ = writeln!(
+                        serial::Writer,
+                        "xhci: HID key usage={usage:#04x} -> {ascii:#04x} (cc={cc})",
+                    );
+                    serial::write_str("ARSENAL_USB_HID_OK\n");
+                }
+            }
+        }
+        self.prev = *report;
+    }
+}
+
+/// Cooperative HID poller (M1-3-3). Spawned at boot; no-ops (yields)
+/// until `setup_hid_keyboard` arms a keyboard, then services its
+/// interrupt endpoint each scheduler turn — the ADR-0011 cooperative-
+/// runner shape, paired with the thin MSI-X handler that only bumps the
+/// IRQ counter. Decoded keystrokes reach the shell via the shared
+/// `kbd` ring.
+pub fn hid_poll_task() -> ! {
+    loop {
+        if let Some(hid) = HID.lock().as_mut() {
+            hid.service();
+        }
+        crate::sched::yield_now();
+    }
 }
 
 /// Reset each root port that reports a connected device, so 3-2's

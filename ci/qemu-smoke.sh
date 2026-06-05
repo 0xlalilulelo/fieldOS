@@ -63,7 +63,7 @@ now_ms() {
 # its "this subsystem survived" assertion in CI; remove one only when
 # the underlying assertion is folded into a stronger downstream
 # sentinel. Order does not matter — we wait for the full set.
-REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_IOAPIC_OK" "ARSENAL_SMP_OK" "ARSENAL_NVME_OK" "ARSENAL_LINUXKPI_OK" "ARSENAL_VIRTIO_BALLOON_OK" "ARSENAL_VIRTIO_BALLOON_INFLATE_OK" "ARSENAL_XHCI_OK" "ARSENAL_USB_ENUM_OK" "ARSENAL_PROMPT_OK")
+REQUIRED_SENTINELS=("ARSENAL_BOOT_OK" "ARSENAL_HEAP_OK" "ARSENAL_FRAMES_OK" "ARSENAL_BLK_OK" "ARSENAL_NET_OK" "ARSENAL_SCHED_OK" "ARSENAL_TCP_OK" "ARSENAL_TLS_OK" "ARSENAL_TIMER_OK" "ARSENAL_ACPI_OK" "ARSENAL_IOAPIC_OK" "ARSENAL_SMP_OK" "ARSENAL_NVME_OK" "ARSENAL_LINUXKPI_OK" "ARSENAL_VIRTIO_BALLOON_OK" "ARSENAL_VIRTIO_BALLOON_INFLATE_OK" "ARSENAL_XHCI_OK" "ARSENAL_USB_ENUM_OK" "ARSENAL_USB_HID_OK" "ARSENAL_PROMPT_OK")
 # ARSENAL_VIRTIO_BALLOON_INFLATE_OK closes the config-changed loop:
 # the QMP helper below drives a balloon size change, the device
 # raises its config-changed MSI-X (vector 0x41), the dispatcher
@@ -258,6 +258,56 @@ s.close()
 " &
 QMP_HELPER_PID=$!
 disown "$QMP_HELPER_PID" 2>/dev/null || true
+
+# M1-3-3: inject a USB HID keystroke once the guest's xHCI driver has
+# armed the boot keyboard's interrupt IN endpoint. Waits for the
+# "HID keyboard armed" marker in the serial log (so a Normal TRB is
+# queued on the interrupt endpoint ring and the controller will
+# complete it as soon as a report exists), then sends a press+release
+# of 'a' via QMP input-send-event. QEMU routes the key to the usb-kbd
+# on the xhci bus; the device returns an 8-byte boot report; the
+# guest's cooperative HID poller drains the Transfer Event, decodes
+# usage 0x04 -> 'a', injects it into the shared keyboard ring, and
+# fires ARSENAL_USB_HID_OK. Fire-and-yield: the main polling loop sees
+# the sentinel land.
+python3 -u -c "
+import socket, json, time, sys
+deadline = time.time() + 10
+while time.time() < deadline:
+    try:
+        with open('$SERIAL_LOG', 'r') as f:
+            if 'HID keyboard armed' in f.read():
+                break
+    except FileNotFoundError:
+        pass
+    time.sleep(0.05)
+else:
+    print('qmp hid helper: timed out waiting for HID keyboard armed', file=sys.stderr)
+    sys.exit(0)
+s = socket.socket()
+for _ in range(40):
+    try:
+        s.connect(('127.0.0.1', $QMP_PORT))
+        break
+    except OSError:
+        time.sleep(0.05)
+else:
+    print('qmp hid helper: could not connect to 127.0.0.1:$QMP_PORT', file=sys.stderr)
+    sys.exit(0)
+sf = s.makefile('rwb', buffering=0)
+sf.readline()  # greeting
+sf.write(b'{\"execute\":\"qmp_capabilities\"}\n')
+sf.readline()
+def keyevent(down):
+    return {'execute':'input-send-event','arguments':{'events':[
+        {'type':'key','data':{'down':down,'key':{'type':'qcode','data':'a'}}}]}}
+sf.write(json.dumps(keyevent(True)).encode() + b'\n');  sf.readline()
+time.sleep(0.05)
+sf.write(json.dumps(keyevent(False)).encode() + b'\n'); sf.readline()
+s.close()
+" &
+QMP_HID_HELPER_PID=$!
+disown "$QMP_HID_HELPER_PID" 2>/dev/null || true
 
 # Polling loop for the perf gate.
 #

@@ -142,7 +142,25 @@ single-phase Address Device (BSR=1 two-phase deferred to step 7 if a
 real full-speed device needs the pre-address descriptor read) and the
 context frames left allocated for the kernel lifetime (bounded
 one-time boot allocation, like the rings) are the two flagged
-shortcuts. Next: 3-3 HID keyboard → 3-4 mass storage. A latent
+shortcuts. **M1-3-3 complete (2026-06-05):** the HID boot keyboard is
+online and feeds the live shell. When enumeration finds a HID
+boot-protocol keyboard interface (class 0x03/0x01/0x01),
+`setup_hid_keyboard` issues a Configure Endpoint command for the
+interrupt IN endpoint (slot 1, EP DCI 3, maxpkt 8), arms a Normal TRB
+on a fresh transfer ring, and hands the live ring state to a `HID`
+static. The cooperative `hid_poll_task` (ADR-0011 runner shape; the
+MSI-X handler stays thin per the NVMe prior) drains interrupt Transfer
+Events, decodes the 8-byte boot report into ASCII (press-edge
+detection against the previous report; shift via the modifier byte),
+injects it into the shared `kbd::RING` the shell drains, and re-arms —
+the transfer ring wraps via a Link TRB so the keyboard stays live
+indefinitely, not just for the first 255 keystrokes. A second QMP
+helper in the smoke injects a press+release of 'a' (input-send-event)
+once the "HID keyboard armed" marker appears; the guest decodes
+usage 0x04 → 0x61 and fires `ARSENAL_USB_HID_OK`. Smoke is now
+**20/20**, stable across repeated runs. The keyboard ring is now
+fed by two producers (PS/2 IRQ + cooperative USB poller) converging on
+one input stream via `kbd::inject`. Next: 3-4 mass storage. A latent
 finding logged for the step-7 real-hardware checklist: NVMe's MSI
 delivers without arsenal-kernel ever setting PCI Bus Master Enable
 (QEMU/Limine defaults it on); real hardware may need an explicit BME

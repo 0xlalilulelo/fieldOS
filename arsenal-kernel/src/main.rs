@@ -417,6 +417,13 @@ extern "C" fn _start() -> ! {
     // successor.
     sched::spawn(workqueue_runner);
 
+    // M1-3-3: cooperative xHCI HID keyboard poller. No-ops (yields)
+    // until xhci::run armed a boot keyboard's interrupt endpoint, then
+    // services it each turn — decoded keystrokes reach the shell via
+    // the shared kbd ring. Harmless (idle yield) when no xHCI / no
+    // keyboard is present, e.g. the production smoke without qemu-xhci.
+    sched::spawn(xhci::hid_poll_task);
+
     // 3G-1: shell task. Prints `> `, emits ARSENAL_PROMPT_OK, then
     // loops on kbd::poll feeding a 256-byte line buffer with VT100
     // backspace handling and a stub dispatch (3G-2 lands the

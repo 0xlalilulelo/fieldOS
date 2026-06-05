@@ -234,6 +234,17 @@ pub fn init_irq() {
     );
 }
 
+/// Inject a decoded ASCII byte from another input source (the USB HID
+/// keyboard driver, M1-3-3). Shares the same SPSC ring the PS/2 IRQ
+/// handler feeds and the shell drains, so USB and PS/2 keystrokes
+/// converge on one input stream. The xHCI HID poller is a cooperative
+/// task — a second logical producer, but never concurrent with the
+/// PS/2 IRQ handler at the instruction level on single-core M1; the
+/// ring's Acquire/Release discipline covers the interleaving.
+pub fn inject(b: u8) {
+    ring_push(b);
+}
+
 /// Block (cooperatively yielding) until one decoded ASCII byte is
 /// available, then return it. The shell task is the only caller on
 /// single-core M0.
