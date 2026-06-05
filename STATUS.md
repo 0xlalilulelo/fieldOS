@@ -127,7 +127,22 @@ command via MSI-X (`ARSENAL_XHCI_OK`); the smoke runs it under
 event-handling fix in flight (drain the event ring honoring the cycle
 bit — port resets enqueue Port Status Change Events ahead of the
 Command Completion); the MSI-X/BME/interrupter wiring was right first
-try. Next: 3-2 enumeration → 3-3 HID keyboard → 3-4 mass storage. A latent
+try. **M1-3-2 complete (2026-06-05):** `xhci::enumerate` walks each
+connected, enabled root port and drives the default control endpoint
+through Enable Slot → device + input contexts (CSZ-aware, qemu-xhci is
+32B) → Address Device (single-phase, BSR=0) → GET_DESCRIPTOR (device,
+then full configuration) → SET_CONFIGURATION, parsing the descriptors;
+`ARSENAL_USB_ENUM_OK` fires and the smoke is now **19/19**. The
+qemu-xhci usb-kbd enumerates at High Speed (slot 1, maxpkt0=64,
+vid=0x0627) with one interface reporting class 0x03/0x01/0x01
+(HID/Boot/Keyboard) and one endpoint — exactly what 3-3 consumes. The
+3-1 command ring, event-ring drain, MSI-X interrupter, and DCBAA are
+reused; a per-device EP0 transfer ring carries the control TRBs. The
+single-phase Address Device (BSR=1 two-phase deferred to step 7 if a
+real full-speed device needs the pre-address descriptor read) and the
+context frames left allocated for the kernel lifetime (bounded
+one-time boot allocation, like the rings) are the two flagged
+shortcuts. Next: 3-3 HID keyboard → 3-4 mass storage. A latent
 finding logged for the step-7 real-hardware checklist: NVMe's MSI
 delivers without arsenal-kernel ever setting PCI Bus Master Enable
 (QEMU/Limine defaults it on); real hardware may need an explicit BME
