@@ -33,8 +33,19 @@
 //! 8-byte boot report into ASCII, injects it into the shared `kbd`
 //! ring the shell drains, and re-arms — wrapping its transfer ring via
 //! a Link TRB so the keyboard stays live. `ARSENAL_USB_HID_OK` fires on
-//! the first decoded keystroke. 3-4 adds the mass-storage class driver.
-//! `run` no-ops when no xHCI controller is present.
+//! the first decoded keystroke.
+//!
+//! **3-4 state: mass storage (Bulk-Only Transport).** When enumeration
+//! finds a SCSI-transparent BOT interface (class 0x08 / subclass 0x06 /
+//! protocol 0x50), `setup_mass_storage` issues a Configure Endpoint for
+//! its bulk endpoint pair (EP Type 2 = Bulk OUT, EP Type 6 = Bulk IN),
+//! then runs one BOT transaction synchronously inside the enumeration
+//! `sti` window — CBW(SCSI READ(10), LBA 0, 1 block) on bulk OUT → 512
+//! bytes on bulk IN → CSW on bulk IN — and asserts the MBR boot
+//! signature 0xAA55 at byte 510 (the NVMe / virtio-blk smoke pattern;
+//! the read self-completes, so no poller is handed off). Emits
+//! `ARSENAL_USB_STORAGE_OK`. `run` no-ops when no xHCI controller is
+//! present.
 //!
 //! The spec-fragile pieces (xHCI §5): CAPLENGTH/RTSOFF/DBOFF offset
 //! math, 32-vs-64-byte contexts (HCCPARAMS1.CSZ), ring producer/
@@ -136,6 +147,19 @@ const USB_DESC_ENDPOINT: u8 = 5;
 const USB_CLASS_HID: u8 = 0x03;
 const HID_SUBCLASS_BOOT: u8 = 0x01;
 const HID_PROTOCOL_KEYBOARD: u8 = 0x01;
+
+// USB Mass Storage / Bulk-Only Transport interface triple (USB MSC
+// 1.0 + Bulk-Only Transport 1.0): class 0x08 (mass storage), subclass
+// 0x06 (SCSI transparent command set), protocol 0x50 (BOT).
+const USB_CLASS_MASS_STORAGE: u8 = 0x08;
+const MSC_SUBCLASS_SCSI: u8 = 0x06;
+const MSC_PROTOCOL_BOT: u8 = 0x50;
+
+// Bulk-Only Transport wrapper signatures (BOT 1.0 §5.1/5.2) and the
+// SCSI READ(10) opcode (SBC). The CBW is 31 bytes, the CSW 13.
+const CBW_SIGNATURE: u32 = 0x4342_5355; // "USBC", little-endian
+const CSW_SIGNATURE: u32 = 0x5342_5355; // "USBS", little-endian
+const SCSI_READ_10: u8 = 0x28;
 
 // The default control endpoint is Device Context Index 1; the slot's
 // doorbell takes the target DCI as its value.
@@ -870,6 +894,15 @@ impl Xhci {
             && iface_proto == HID_PROTOCOL_KEYBOARD
         {
             self.setup_hid_keyboard(slot_id, speed, port_num, cfg);
+        // 3-4: if this is a SCSI-transparent Bulk-Only-Transport mass
+        // storage device, configure its bulk endpoint pair and read
+        // sector 0 synchronously (the read self-completes, unlike the
+        // HID poller — same shape as the NVMe / virtio-blk smokes).
+        } else if iface_class == USB_CLASS_MASS_STORAGE
+            && iface_sub == MSC_SUBCLASS_SCSI
+            && iface_proto == MSC_PROTOCOL_BOT
+        {
+            self.setup_mass_storage(slot_id, speed, port_num, cfg);
         }
         true
     }
@@ -969,6 +1002,187 @@ impl Xhci {
              interval={interval}); waiting for input",
         );
     }
+
+    /// Bring a Bulk-Only-Transport mass storage device online and read
+    /// sector 0: locate the bulk endpoint pair, Configure Endpoint to add
+    /// both (EP Type 2 = Bulk OUT, EP Type 6 = Bulk IN), then run one BOT
+    /// transaction — CBW(READ(10), LBA 0, 1 block) on bulk OUT → 512 bytes
+    /// on bulk IN → CSW on bulk IN — and assert the MBR boot signature.
+    /// Synchronous: the read self-completes, so this runs in the
+    /// enumeration `sti` window rather than handing off to a poller.
+    fn setup_mass_storage(&mut self, slot_id: u32, speed: u32, port_num: u8, cfg: &[u8]) {
+        let (in_addr, in_maxpkt, out_addr, out_maxpkt) = match find_bulk_endpoints(cfg) {
+            Some(x) => x,
+            None => {
+                let _ = writeln!(serial::Writer, "xhci: slot {slot_id} no bulk endpoint pair");
+                return;
+            }
+        };
+        // DCI = endpoint number * 2 (+1 for IN). The IN and OUT bulk
+        // endpoints often carry different endpoint numbers (QEMU: IN 0x81,
+        // OUT 0x02), so each DCI is computed from its own address.
+        let in_dci = (in_addr & 0x0F) as u32 * 2 + 1;
+        let out_dci = (out_addr & 0x0F) as u32 * 2;
+        let max_dci = in_dci.max(out_dci);
+
+        let ce_input_phys = alloc_zeroed_frame();
+        let in_ring_phys = alloc_zeroed_frame();
+        let out_ring_phys = alloc_zeroed_frame();
+
+        // Configure Endpoint input context: add the slot (A0) + both bulk
+        // endpoints; the slot context's Context Entries is the highest DCI.
+        // SAFETY: input-context frame owned + mapped; offsets within 4 KiB
+        // for ctx_size ∈ {32, 64} and DCI ≤ 31.
+        unsafe {
+            let base = phys_to_virt(ce_input_phys);
+            write_volatile((base + 4) as *mut u32, 0b1 | (1 << in_dci) | (1 << out_dci));
+            let slot = base + self.ctx_size;
+            write_volatile(slot as *mut u32, (max_dci << 27) | (speed << 20));
+            write_volatile((slot + 4) as *mut u32, (port_num as u32) << 16);
+            // Bulk OUT endpoint context (EP Type 2); CErr 3; Max Packet Size.
+            let epo = base + (out_dci as usize + 1) * self.ctx_size;
+            write_volatile((epo + 4) as *mut u32, ((out_maxpkt as u32) << 16) | (2 << 3) | (3 << 1));
+            write_volatile((epo + 8) as *mut u32, (out_ring_phys as u32) | 1); // TR deq lo | DCS
+            write_volatile((epo + 12) as *mut u32, (out_ring_phys >> 32) as u32);
+            write_volatile((epo + 16) as *mut u32, out_maxpkt as u32); // avg TRB length
+            // Bulk IN endpoint context (EP Type 6).
+            let epi = base + (in_dci as usize + 1) * self.ctx_size;
+            write_volatile((epi + 4) as *mut u32, ((in_maxpkt as u32) << 16) | (6 << 3) | (3 << 1));
+            write_volatile((epi + 8) as *mut u32, (in_ring_phys as u32) | 1);
+            write_volatile((epi + 12) as *mut u32, (in_ring_phys >> 32) as u32);
+            write_volatile((epi + 16) as *mut u32, in_maxpkt as u32);
+        }
+
+        self.push_command(
+            ce_input_phys as u32,
+            (ce_input_phys >> 32) as u32,
+            0,
+            (slot_id << 24) | (TRB_TYPE_CONFIGURE_ENDPOINT << 10),
+        );
+        let (cc, _sid) = self.wait_command();
+        if cc != 1 {
+            let _ = writeln!(serial::Writer, "xhci: slot {slot_id} mass-storage Configure Endpoint cc={cc}");
+            return;
+        }
+
+        // One 4 KiB frame split into the three BOT buffers: CBW at +0,
+        // the 512-byte data sector at +512, the CSW at +1024.
+        let buf_phys = alloc_zeroed_frame();
+        let cbw_phys = buf_phys;
+        let data_phys = buf_phys + 512;
+        let csw_phys = buf_phys + 1024;
+
+        // Build the CBW (BOT §5.1): READ(10) of LBA 0, 1 block, data IN.
+        let tag: u32 = 0x4152_5345; // "ARSE" — echoed back in the CSW
+        let mut cbw = [0u8; 31];
+        cbw[0..4].copy_from_slice(&CBW_SIGNATURE.to_le_bytes());
+        cbw[4..8].copy_from_slice(&tag.to_le_bytes());
+        cbw[8..12].copy_from_slice(&512u32.to_le_bytes()); // dCBWDataTransferLength
+        cbw[12] = 0x80; // bmCBWFlags: data-IN
+        cbw[13] = 0; // bCBWLUN
+        cbw[14] = 10; // bCBWCBLength (READ(10) is a 10-byte CDB)
+        cbw[15] = SCSI_READ_10; // opcode 0x28
+        // LBA 0 (big-endian, cbw[17..21]) and group (cbw[21]) stay zero.
+        cbw[22] = 0x00; // transfer length high byte
+        cbw[23] = 0x01; // transfer length low byte: 1 block
+        // SAFETY: cbw_phys frame owned + mapped; 31 bytes within the frame.
+        unsafe {
+            let p = phys_to_virt(cbw_phys) as *mut u8;
+            for (i, b) in cbw.iter().enumerate() {
+                write_volatile(p.add(i), *b);
+            }
+        }
+
+        // CBW out, 512-byte data in, 13-byte CSW in. Each endpoint ring is
+        // fresh (cycle 1, DCS 1); M1 issues one transaction so neither ring
+        // approaches its 256-TRB end. wait_transfer accepts success (cc 1)
+        // or short-packet (cc 13) — the data stage returns exactly 512.
+        let cc_cbw = self.bulk_normal(out_ring_phys, 0, slot_id, out_dci, cbw_phys, 31);
+        if cc_cbw != 1 && cc_cbw != 13 {
+            let _ = writeln!(serial::Writer, "xhci: slot {slot_id} BOT CBW transfer cc={cc_cbw}");
+            return;
+        }
+        let cc_data = self.bulk_normal(in_ring_phys, 0, slot_id, in_dci, data_phys, 512);
+        if cc_data != 1 && cc_data != 13 {
+            let _ = writeln!(serial::Writer, "xhci: slot {slot_id} BOT data transfer cc={cc_data}");
+            return;
+        }
+        let cc_csw = self.bulk_normal(in_ring_phys, 1, slot_id, in_dci, csw_phys, 13);
+        if cc_csw != 1 && cc_csw != 13 {
+            let _ = writeln!(serial::Writer, "xhci: slot {slot_id} BOT CSW transfer cc={cc_csw}");
+            return;
+        }
+
+        // Validate the CSW (signature, echoed tag, status) and the MBR.
+        // SAFETY: csw_phys / data_phys regions owned + mapped.
+        let (csw_sig, csw_tag, csw_status, sig) = unsafe {
+            let c = phys_to_virt(csw_phys) as *const u8;
+            let csw_sig = u32::from_le_bytes([
+                read_volatile(c),
+                read_volatile(c.add(1)),
+                read_volatile(c.add(2)),
+                read_volatile(c.add(3)),
+            ]);
+            let csw_tag = u32::from_le_bytes([
+                read_volatile(c.add(4)),
+                read_volatile(c.add(5)),
+                read_volatile(c.add(6)),
+                read_volatile(c.add(7)),
+            ]);
+            let csw_status = read_volatile(c.add(12));
+            let d = phys_to_virt(data_phys) as *const u8;
+            let sig = u16::from_le_bytes([read_volatile(d.add(510)), read_volatile(d.add(511))]);
+            (csw_sig, csw_tag, csw_status, sig)
+        };
+        assert_eq!(
+            csw_sig, CSW_SIGNATURE,
+            "xhci: BOT CSW signature {csw_sig:#010x} (wanted {CSW_SIGNATURE:#010x})"
+        );
+        assert_eq!(csw_tag, tag, "xhci: BOT CSW tag {csw_tag:#010x} != CBW tag {tag:#010x}");
+        // bCSWStatus: 0 passed, 1 CHECK CONDITION (a power-on unit-attention
+        // would surface here; QEMU answers READ(10) directly, so a non-zero
+        // status is a hard failure. A real device may need TEST UNIT READY /
+        // REQUEST SENSE retry before READ(10) — deferred to step 7 if it bites.
+        assert_eq!(csw_status, 0, "xhci: BOT CSW bStatus={csw_status} (wanted 0=passed)");
+        assert_eq!(
+            sig, 0xAA55,
+            "xhci: usb-storage sector 0 MBR signature {sig:#06x} (wanted 0xaa55); the QEMU \
+             usb-storage backing should be the same hybrid ISO nvme/virtio-blk read"
+        );
+
+        let _ = writeln!(
+            serial::Writer,
+            "xhci: slot {slot_id} usb-storage sector 0 read OK (bulk in dci {in_dci} \
+             out dci {out_dci}, csw_status=0, sig=0xaa55)",
+        );
+        serial::write_str("ARSENAL_USB_STORAGE_OK\n");
+    }
+
+    /// Enqueue one Normal TRB (IOC + ISP) on a bulk endpoint ring at
+    /// `idx`, ring the slot doorbell targeting `dci`, and wait for its
+    /// Transfer Event. All M1 bulk TRBs use cycle 1 (fresh ring, far from
+    /// the 256-TRB end). Returns the Transfer Event completion code.
+    fn bulk_normal(
+        &mut self,
+        ring_phys: u64,
+        idx: usize,
+        slot_id: u32,
+        dci: u32,
+        buf_phys: u64,
+        len: u32,
+    ) -> u32 {
+        // SAFETY: ring frame owned + HHDM-mapped; idx far below EP_RING_TRBS.
+        unsafe {
+            let trb = (phys_to_virt(ring_phys) as *mut u32).add(idx * 4);
+            write_volatile(trb, buf_phys as u32);
+            write_volatile(trb.add(1), (buf_phys >> 32) as u32);
+            write_volatile(trb.add(2), len);
+            // cycle 1 | IOC (bit 5) | ISP (bit 2) | Normal.
+            write_volatile(trb.add(3), 1 | (1 << 5) | (1 << 2) | (TRB_TYPE_NORMAL << 10));
+            w32(self.regs.db_base + slot_id as usize * 4, dci);
+        }
+        self.wait_transfer()
+    }
 }
 
 /// Walk a configuration descriptor's tree and return the first
@@ -1012,6 +1226,40 @@ fn find_interrupt_in_endpoint(cfg: &[u8]) -> Option<(u8, u16, u8)> {
         i += len;
     }
     None
+}
+
+/// Walk a configuration descriptor's tree and return the first bulk
+/// IN + bulk OUT endpoint pair as (in_addr, in_maxpkt, out_addr,
+/// out_maxpkt). None unless both directions are present (Bulk-Only
+/// Transport requires both). bmAttributes transfer type 2 = bulk; bit 7
+/// of bEndpointAddress = IN.
+fn find_bulk_endpoints(cfg: &[u8]) -> Option<(u8, u16, u8, u16)> {
+    let mut bulk_in: Option<(u8, u16)> = None;
+    let mut bulk_out: Option<(u8, u16)> = None;
+    let mut i = 0usize;
+    while i + 2 <= cfg.len() {
+        let len = cfg[i] as usize;
+        if len < 2 || i + len > cfg.len() {
+            break;
+        }
+        if cfg[i + 1] == USB_DESC_ENDPOINT && len >= 7 {
+            let addr = cfg[i + 2];
+            let attrs = cfg[i + 3];
+            let maxpkt = u16::from_le_bytes([cfg[i + 4], cfg[i + 5]]);
+            if attrs & 0x3 == 0x2 {
+                if addr & 0x80 != 0 {
+                    bulk_in = bulk_in.or(Some((addr, maxpkt)));
+                } else {
+                    bulk_out = bulk_out.or(Some((addr, maxpkt)));
+                }
+            }
+        }
+        i += len;
+    }
+    match (bulk_in, bulk_out) {
+        (Some((ia, im)), Some((oa, om))) => Some((ia, im, oa, om)),
+        _ => None,
+    }
 }
 
 /// Translate a USB HID Keyboard/Keypad usage ID (Usage Page 0x07) to an
