@@ -47,7 +47,19 @@ const CONTROL_QUEUE_SIZE: u16 = 16;
 
 // virtio_gpu_ctrl_type values (v1.2 § 5.7.6). 2D command subset only.
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
+const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+
+// virtio_gpu_formats (v1.2 § 5.7.3): B8G8R8X8_UNORM is the 32-bpp
+// little-endian XRGB layout — `[B, G, R, X]` in memory — matching
+// display::PixelFormat::Xrgb8888.
+const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
+
+// The single 2D resource we create for the scanout. Resource ids are
+// driver-assigned, host-tracked handles; any non-zero value works.
+const SCANOUT_RESOURCE_ID: u32 = 1;
 
 // VIRTIO_GPU_MAX_SCANOUTS (v1.2 § 5.7.6.1) — the fixed pmodes array
 // length in the display-info response.
@@ -91,14 +103,47 @@ struct RespDisplayInfo {
     pmodes: [DisplayOne; MAX_SCANOUTS],
 }
 
+/// virtio_gpu_resource_create_2d (v1.2 § 5.7.6.8) request body.
+#[repr(C)]
+struct ResourceCreate2d {
+    hdr: CtrlHdr,
+    resource_id: u32,
+    format: u32,
+    width: u32,
+    height: u32,
+}
+
+/// virtio_gpu_mem_entry — one scatter-gather backing entry.
+#[repr(C)]
+struct MemEntry {
+    addr: u64,
+    length: u32,
+    padding: u32,
+}
+
+/// virtio_gpu_resource_attach_backing (v1.2 § 5.7.6.10) with exactly
+/// one backing entry. The framebuffer is a single physically-
+/// contiguous heap allocation, so one entry suffices (no scatter-
+/// gather list); a fragmented backing would carry `nr_entries` of
+/// these.
+#[repr(C)]
+struct ResourceAttachBackingOne {
+    hdr: CtrlHdr,
+    resource_id: u32,
+    nr_entries: u32,
+    entry: MemEntry,
+}
+
 /// Request + response laid out contiguously so a single heap
 /// allocation backs both descriptors of the control-queue chain (the
 /// device reads `req`, writes `resp`). Mirrors virtio_blk's boxed
-/// request.
+/// request. `R` is the command request body; the response is always a
+/// bare header for the OK_NODATA commands, and `RespDisplayInfo` for
+/// GET_DISPLAY_INFO.
 #[repr(C)]
-struct DisplayInfoXfer {
-    req: CtrlHdr,
-    resp: RespDisplayInfo,
+struct Xfer<R, P> {
+    req: R,
+    resp: P,
 }
 
 impl CtrlHdr {
@@ -159,6 +204,117 @@ pub fn init() {
         "gpu: display info {}x{} format={:?} (scanout 0 enabled)",
         info.width, info.height, info.format,
     );
+
+    // 4-1: create a 2D resource matching the scanout and attach a
+    // physically-contiguous framebuffer as its backing. The heap is a
+    // single contiguous physical region, so one heap allocation is one
+    // contiguous backing (a single mem_entry, no scatter-gather).
+    //
+    // `fb` lives for the rest of init(): 4-2 writes a pattern into it
+    // and issues TRANSFER_TO_HOST_2D + RESOURCE_FLUSH before init
+    // returns. The device only DMAs the backing on TRANSFER, so the
+    // backing is never read between attach (here) and that transfer;
+    // when init returns and `fb` drops, no further DMA touches it
+    // (there is no compositor consumer until M2).
+    let fb_words = (info.width as usize) * (info.height as usize);
+    let fb: Box<[u32]> = alloc::vec![0u32; fb_words].into_boxed_slice();
+    let fb_phys = (fb.as_ptr() as u64) - paging::hhdm_offset();
+    let fb_bytes = (fb_words * 4) as u32;
+
+    cmd_nodata(
+        &mut ctrlq,
+        notify_ptr,
+        ResourceCreate2d {
+            hdr: CtrlHdr::cmd(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D),
+            resource_id: SCANOUT_RESOURCE_ID,
+            format: VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
+            width: info.width,
+            height: info.height,
+        },
+        "RESOURCE_CREATE_2D",
+    );
+
+    cmd_nodata(
+        &mut ctrlq,
+        notify_ptr,
+        ResourceAttachBackingOne {
+            hdr: CtrlHdr::cmd(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING),
+            resource_id: SCANOUT_RESOURCE_ID,
+            nr_entries: 1,
+            entry: MemEntry {
+                addr: fb_phys,
+                length: fb_bytes,
+                padding: 0,
+            },
+        },
+        "RESOURCE_ATTACH_BACKING",
+    );
+
+    let _ = writeln!(
+        serial::Writer,
+        "gpu: resource {SCANOUT_RESOURCE_ID} created ({}x{}) + backing attached \
+         ({fb_bytes} bytes @ {fb_phys:#x})",
+        info.width, info.height,
+    );
+}
+
+/// Push a two-descriptor control-queue chain — request (device-read) →
+/// response (device-write) — notify the device, and poll the used ring
+/// until the command completes. Shared by every command. yield_now
+/// early-returns pre-sched (empty runqueue); commands complete in
+/// microseconds under TCG.
+fn submit(
+    ctrlq: &mut virtio::Virtqueue,
+    notify_ptr: *mut u16,
+    req_phys: u64,
+    req_len: u32,
+    resp_phys: u64,
+    resp_len: u32,
+) {
+    ctrlq
+        .push_chain(&[
+            (req_phys, req_len, 0),
+            (resp_phys, resp_len, virtio::VIRTQ_DESC_F_WRITE),
+        ])
+        .expect("gpu: control queue full");
+    virtio::notify(notify_ptr, CONTROL_QUEUE_IDX);
+    let mut spins = 0u64;
+    while ctrlq.pop_used().is_none() {
+        sched::yield_now();
+        spins += 1;
+        assert!(spins <= 1_000_000, "gpu: command never completed");
+    }
+}
+
+/// Issue a command whose request body is `req` and which the device
+/// answers with a bare `OK_NODATA` header (RESOURCE_CREATE_2D,
+/// ATTACH_BACKING, and the 4-2 scanout/transfer/flush commands all do).
+/// Panics on any other response. `R` is the repr(C) request body; it is
+/// boxed contiguously with the response header so one heap allocation
+/// backs both descriptors (the virtio_blk pattern).
+fn cmd_nodata<R>(ctrlq: &mut virtio::Virtqueue, notify_ptr: *mut u16, req: R, what: &str) {
+    let xfer = Box::new(Xfer {
+        req,
+        resp: CtrlHdr::cmd(0),
+    });
+    let hhdm = paging::hhdm_offset();
+    let req_phys = (&xfer.req as *const R as u64) - hhdm;
+    let resp_phys = (&xfer.resp as *const CtrlHdr as u64) - hhdm;
+    submit(
+        ctrlq,
+        notify_ptr,
+        req_phys,
+        core::mem::size_of::<R>() as u32,
+        resp_phys,
+        core::mem::size_of::<CtrlHdr>() as u32,
+    );
+    // SAFETY: xfer is a live Box; resp was filled by the device. Volatile
+    // defeats constant-folding back to the cmd(0) initializer.
+    let resp_type = unsafe { read_volatile(&xfer.resp.type_ as *const u32) };
+    assert_eq!(
+        resp_type, VIRTIO_GPU_RESP_OK_NODATA,
+        "gpu: {what} response type {resp_type:#06x} (wanted {VIRTIO_GPU_RESP_OK_NODATA:#06x}=OK_NODATA)"
+    );
 }
 
 /// Issue VIRTIO_GPU_CMD_GET_DISPLAY_INFO on the control queue and parse
@@ -169,40 +325,24 @@ fn get_display_info(ctrlq: &mut virtio::Virtqueue, notify_ptr: *mut u16) -> Disp
     // Box the request+response so the device DMAs by physical address
     // derived from the heap virtual address via HHDM (the virtio_blk
     // pattern). resp is zeroed; the device overwrites it.
-    let xfer = Box::new(DisplayInfoXfer {
+    let xfer = Box::new(Xfer {
         req: CtrlHdr::cmd(VIRTIO_GPU_CMD_GET_DISPLAY_INFO),
         // SAFETY: RespDisplayInfo is plain repr(C) POD; an all-zero bit
         // pattern is a valid value (the device overwrites it anyway).
-        resp: unsafe { core::mem::zeroed() },
+        resp: unsafe { core::mem::zeroed::<RespDisplayInfo>() },
     });
 
     let hhdm = paging::hhdm_offset();
     let req_phys = (&xfer.req as *const CtrlHdr as u64) - hhdm;
     let resp_phys = (&xfer.resp as *const RespDisplayInfo as u64) - hhdm;
-
-    // Two-part chain: header (device-read) → response buffer
-    // (device-write).
-    ctrlq
-        .push_chain(&[
-            (req_phys, core::mem::size_of::<CtrlHdr>() as u32, 0),
-            (
-                resp_phys,
-                core::mem::size_of::<RespDisplayInfo>() as u32,
-                virtio::VIRTQ_DESC_F_WRITE,
-            ),
-        ])
-        .expect("gpu: control queue full on GET_DISPLAY_INFO");
-
-    virtio::notify(notify_ptr, CONTROL_QUEUE_IDX);
-
-    // Poll for completion. yield_now early-returns pre-sched (empty
-    // runqueue); the command completes in microseconds under TCG.
-    let mut spins = 0u64;
-    while ctrlq.pop_used().is_none() {
-        sched::yield_now();
-        spins += 1;
-        assert!(spins <= 1_000_000, "gpu: GET_DISPLAY_INFO never completed");
-    }
+    submit(
+        ctrlq,
+        notify_ptr,
+        req_phys,
+        core::mem::size_of::<CtrlHdr>() as u32,
+        resp_phys,
+        core::mem::size_of::<RespDisplayInfo>() as u32,
+    );
 
     // Read the response via volatile so the compiler can't constant-fold
     // it back to the zeroed initializer.
