@@ -30,6 +30,7 @@ use core::ptr::read_volatile;
 use alloc::boxed::Box;
 
 use crate::display::{DisplayInfo, PixelFormat};
+use crate::fb::{AMBER, NAVY};
 use crate::{paging, sched, serial, virtio};
 
 // virtio-gpu is modern-only: PCI device id 0x1040 + virtio device type
@@ -48,6 +49,9 @@ const CONTROL_QUEUE_SIZE: u16 = 16;
 // virtio_gpu_ctrl_type values (v1.2 § 5.7.6). 2D command subset only.
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
+const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
+const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
+const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
@@ -60,6 +64,9 @@ const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
 // The single 2D resource we create for the scanout. Resource ids are
 // driver-assigned, host-tracked handles; any non-zero value works.
 const SCANOUT_RESOURCE_ID: u32 = 1;
+
+// Scanout 0 — the one QEMU enables by default (num_scanouts=1).
+const SCANOUT_ID: u32 = 0;
 
 // VIRTIO_GPU_MAX_SCANOUTS (v1.2 § 5.7.6.1) — the fixed pmodes array
 // length in the display-info response.
@@ -78,6 +85,7 @@ struct CtrlHdr {
 }
 
 /// virtio_gpu_rect — a scanout/resource rectangle.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct Rect {
     x: u32,
@@ -132,6 +140,37 @@ struct ResourceAttachBackingOne {
     resource_id: u32,
     nr_entries: u32,
     entry: MemEntry,
+}
+
+/// virtio_gpu_set_scanout (v1.2 § 5.7.6.9) — bind a resource rectangle
+/// to a scanout (the display output).
+#[repr(C)]
+struct SetScanout {
+    hdr: CtrlHdr,
+    r: Rect,
+    scanout_id: u32,
+    resource_id: u32,
+}
+
+/// virtio_gpu_transfer_to_host_2d (v1.2 § 5.7.6.11) — copy a rectangle
+/// of the guest backing into the host-side resource.
+#[repr(C)]
+struct TransferToHost2d {
+    hdr: CtrlHdr,
+    r: Rect,
+    offset: u64,
+    resource_id: u32,
+    padding: u32,
+}
+
+/// virtio_gpu_resource_flush (v1.2 § 5.7.6.12) — flush a rectangle of
+/// the resource to the scanout it is bound to (present).
+#[repr(C)]
+struct ResourceFlush {
+    hdr: CtrlHdr,
+    r: Rect,
+    resource_id: u32,
+    padding: u32,
 }
 
 /// Request + response laid out contiguously so a single heap
@@ -217,7 +256,7 @@ pub fn init() {
     // when init returns and `fb` drops, no further DMA touches it
     // (there is no compositor consumer until M2).
     let fb_words = (info.width as usize) * (info.height as usize);
-    let fb: Box<[u32]> = alloc::vec![0u32; fb_words].into_boxed_slice();
+    let mut fb: Box<[u32]> = alloc::vec![0u32; fb_words].into_boxed_slice();
     let fb_phys = (fb.as_ptr() as u64) - paging::hhdm_offset();
     let fb_bytes = (fb_words * 4) as u32;
 
@@ -256,6 +295,71 @@ pub fn init() {
          ({fb_bytes} bytes @ {fb_phys:#x})",
         info.width, info.height,
     );
+
+    // 4-2: paint a known pattern into the backing, bind the resource to
+    // the scanout, copy the backing to the host, and flush it to the
+    // display. The pattern (an Arsenal-navy field with a centered amber
+    // band) makes a manual `-display gtk` run show the GPU presenting;
+    // the headless smoke asserts the command round-trips, not pixels —
+    // there is no scanout read-back the way a block device reads a
+    // sector, so ARSENAL_GPU_OK means "the present pipeline completed,"
+    // which is the honest limit of a headless GPU smoke.
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let band = (h / 2 - 20)..(h / 2 + 20);
+    for (y, row) in fb.chunks_mut(w).enumerate() {
+        row.fill(if band.contains(&y) { AMBER } else { NAVY });
+    }
+
+    let full = Rect {
+        x: 0,
+        y: 0,
+        width: info.width,
+        height: info.height,
+    };
+
+    cmd_nodata(
+        &mut ctrlq,
+        notify_ptr,
+        SetScanout {
+            hdr: CtrlHdr::cmd(VIRTIO_GPU_CMD_SET_SCANOUT),
+            r: full,
+            scanout_id: SCANOUT_ID,
+            resource_id: SCANOUT_RESOURCE_ID,
+        },
+        "SET_SCANOUT",
+    );
+
+    cmd_nodata(
+        &mut ctrlq,
+        notify_ptr,
+        TransferToHost2d {
+            hdr: CtrlHdr::cmd(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D),
+            r: full,
+            offset: 0,
+            resource_id: SCANOUT_RESOURCE_ID,
+            padding: 0,
+        },
+        "TRANSFER_TO_HOST_2D",
+    );
+
+    cmd_nodata(
+        &mut ctrlq,
+        notify_ptr,
+        ResourceFlush {
+            hdr: CtrlHdr::cmd(VIRTIO_GPU_CMD_RESOURCE_FLUSH),
+            r: full,
+            resource_id: SCANOUT_RESOURCE_ID,
+            padding: 0,
+        },
+        "RESOURCE_FLUSH",
+    );
+
+    let _ = writeln!(
+        serial::Writer,
+        "gpu: scanout {SCANOUT_ID} <- resource {SCANOUT_RESOURCE_ID}, transferred + flushed",
+    );
+    serial::write_str("ARSENAL_GPU_OK\n");
 }
 
 /// Push a two-descriptor control-queue chain — request (device-read) →
