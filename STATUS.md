@@ -39,11 +39,14 @@ pace; still inside the 15-month ARSENAL.md budget.
    12-20 weeks. **Complete (2026-05-29).** virtio-balloon online;
    M1-2-6 paper shipped (three devlogs: shim foundation, GPL
    boundary, virtio-balloon).
-3. **xHCI USB.** Native Rust vs LinuxKPI port — evaluate at
-   step kickoff.
+3. **xHCI USB.** Native Rust (ADR-0009; the port path measured at
+   655+ headers, deferred to amdgpu). **Complete (2026-06-08, five
+   sub-blocks 3-0..3-4).** HC bring-up + enumeration + HID keyboard +
+   BOT/SCSI mass storage; ~1,590 LOC. Devlog at
+   [`docs/devlogs/2026-06-arsenal-xhci.md`](docs/devlogs/2026-06-arsenal-xhci.md).
 4. **virtio-gpu native Rust.** KMS-capable GPU driver for
    QEMU CI; stabilizes the kernel-side GPU/display
-   abstraction. ~1000-1500 LOC.
+   abstraction. ~1000-1500 LOC. **Active (step-4 HANDOFF next).**
 5. **amdgpu KMS via LinuxKPI shim.** The headlining driver;
    ports against the abstraction step 4 stabilized.
 6. **iwlwifi + mac80211 via LinuxKPI.** Wireless.
@@ -112,6 +115,57 @@ Posture changes carrying to M1 step 2:
 
 ### Active work
 
+**Active: M1 step 4 — virtio-gpu (native Rust).** The CI-substrate
+step inserted before amdgpu: QEMU does not emulate amdgpu, so
+virtio-gpu gives the kernel a KMS-capable GPU driver QEMU smokes on
+every commit, and lets the kernel-side GPU/display abstraction
+stabilize against a clean virtual device before amdgpu (step 5) has
+to consume it. Third native virtio driver (after virtio-blk +
+virtio-net at M0, virtio-balloon via the shim at step 2), so the
+virtio transport surface is well-worn; the new work is the GPU
+command protocol (VIRTIO_GPU_CMD_* over the control queue), a 2D
+scanout (create resource → attach backing → set scanout → flush),
+and the display abstraction the compositor will sit on. ~1000-1500
+LOC budgeted. Step-4 HANDOFF is the next action.
+
+---
+
+**M1 step 3 — COMPLETE (2026-06-08).** A native USB stack from
+nothing: host-controller bring-up, device enumeration, and two
+device-class drivers (HID boot keyboard + BOT/SCSI mass storage),
+~1,590 LOC in `arsenal-kernel/src/xhci.rs`. Native Rust per
+[ADR-0009](docs/adrs/0009-xhci-native-rust.md) — the 3-0 spike
+measured the LinuxKPI port at 655+ headers (an amdgpu-scale shim
+explosion) against a native bring-up that round-tripped a command
+first try in ~340 LOC, and the decision keeps the shim's hard
+scaling test concentrated on amdgpu where it is unavoidable. The
+step exercises the full USB transfer-type spread one controller has
+to handle — control (enumeration over EP0), interrupt (HID), bulk
+(BOT) — which NVMe's single transfer model did not. Smoke closed at
+**21/21** (four new sentinels: `ARSENAL_XHCI_OK`,
+`ARSENAL_USB_ENUM_OK`, `ARSENAL_USB_HID_OK`, `ARSENAL_USB_STORAGE_OK`),
+boot→prompt ~211 ms, stable across repeated runs. The step-3 devlog
+([`docs/devlogs/2026-06-arsenal-xhci.md`](docs/devlogs/2026-06-arsenal-xhci.md))
+tells the full arc. Sub-block history below.
+
+Step-3 carry-forwards for the step-7 real-hardware checklist:
+1. **Address Device runs single-phase (BSR=0).** qemu-xhci handles
+   it; the two-phase BSR=1 form some real full-speed devices need
+   (pre-address descriptor read) is deferred to step 7 if it bites.
+2. **A real mass-storage device may answer READ(10) with a CHECK
+   CONDITION** (power-on unit-attention) that needs a TEST UNIT
+   READY / REQUEST SENSE retry before the read succeeds. QEMU is
+   lenient (answers directly), so 3-4 treats a non-zero CSW status
+   as a hard failure; the retry path is flagged in-code, deferred.
+3. **Per-device context frames stay allocated for the kernel
+   lifetime** (a bounded one-time boot allocation, like the rings).
+   Revisit if a device-detach / re-enumerate path ever lands.
+4. **Hubs, USB3 SuperSpeed specifics, isochronous, hotplug, power
+   management** were all explicitly out of scope for step 3; each
+   waits for a real device that needs it.
+
+**M1-3-3 → 3-4 sub-block detail.**
+
 **Active: M1 step 3 — xHCI USB (native Rust).** Step-3 HANDOFF
 kicked off; **M1-3-0 complete (2026-05-29)** — the native-vs-port
 gate decided **native** ([ADR-0009](docs/adrs/0009-xhci-native-rust.md))
@@ -160,11 +214,28 @@ once the "HID keyboard armed" marker appears; the guest decodes
 usage 0x04 → 0x61 and fires `ARSENAL_USB_HID_OK`. Smoke is now
 **20/20**, stable across repeated runs. The keyboard ring is now
 fed by two producers (PS/2 IRQ + cooperative USB poller) converging on
-one input stream via `kbd::inject`. Next: 3-4 mass storage. A latent
+one input stream via `kbd::inject`. A latent
 finding logged for the step-7 real-hardware checklist: NVMe's MSI
 delivers without arsenal-kernel ever setting PCI Bus Master Enable
 (QEMU/Limine defaults it on); real hardware may need an explicit BME
-write nvme.rs lacks. The xHCI seed sets BME explicitly.
+write nvme.rs lacks. The xHCI seed sets BME explicitly. **M1-3-4
+complete (2026-06-08):** USB mass storage online. When enumeration
+finds a SCSI-transparent Bulk-Only-Transport interface (class
+0x08/0x06/0x50), `setup_mass_storage` issues a Configure Endpoint for
+the bulk endpoint pair (EP Type 2 Bulk OUT, EP Type 6 Bulk IN — DCIs
+computed per-address since QEMU uses IN 0x81→DCI 3, OUT 0x02→DCI 4),
+then runs one BOT transaction synchronously inside the enumeration sti
+window: CBW(READ(10), LBA 0, 1 block) on bulk OUT → 512 bytes on bulk
+IN → CSW on bulk IN. The read self-completes (real data, no external
+stimulus), so this mirrors the NVMe/virtio-blk sector-0 smoke rather
+than the persistent HID poller. The CSW signature/tag/bStatus are
+validated, then the MBR 0xAA55 at byte 510 (the same hybrid-ISO
+assertion nvme.rs/virtio_blk.rs make on the same backing image).
+`-device usb-storage,bus=xhci.0` over the ISO; `ARSENAL_USB_STORAGE_OK`
+fires; smoke is now **21/21**, stable. QEMU answered READ(10) directly
+with no power-on unit-attention, so the TEST UNIT READY / REQUEST SENSE
+retry path is flagged in-code and deferred to step 7. **Step 3 closed
+here** — see the COMPLETE block above for the retrospective + devlog.
 
 ---
 
