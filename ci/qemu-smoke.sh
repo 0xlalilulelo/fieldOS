@@ -191,6 +191,7 @@ qemu-system-x86_64 \
 	-netdev user,id=net0 \
 	-device virtio-net-pci,netdev=net0 \
 	-device virtio-balloon-pci \
+	-device virtio-gpu-pci,id=gpu \
 	-device qemu-xhci,id=xhci \
 	-device usb-kbd,bus=xhci.0 \
 	-drive file="$ISO",if=none,id=usb0,format=raw,readonly=on \

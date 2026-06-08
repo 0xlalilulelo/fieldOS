@@ -19,6 +19,7 @@ use limine::request::{
 mod acpi;
 mod apic;
 mod cpu;
+mod display;
 mod fb;
 mod frames;
 mod gdt;
@@ -41,6 +42,7 @@ mod smp;
 mod task;
 mod virtio;
 mod virtio_blk;
+mod virtio_gpu;
 mod virtio_net;
 
 // Limine base-revision-1+ requires explicit start/end marker pairs around
@@ -377,6 +379,13 @@ extern "C" fn _start() -> ! {
     // takes over so blocking-via-yield works against the
     // single-CPU cooperative scheduler.
     virtio_blk::smoke();
+
+    // virtio-gpu bring-up (M1 step 4): locate the device, run the
+    // virtio init dance, activate the control queue, and read the
+    // scanout geometry via GET_DISPLAY_INFO. No-ops when no
+    // virtio-gpu device is attached. Runs on the boot stack like the
+    // block bring-ups; the scanout/flush path + sentinel land at 4-2.
+    virtio_gpu::init();
 
     // virtio-net smoke: locate the device, init, set up RX + TX
     // queues, send one zero-filled 64-byte frame, assert the TX
