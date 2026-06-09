@@ -46,9 +46,14 @@ pace; still inside the 15-month ARSENAL.md budget.
    [`docs/devlogs/2026-06-arsenal-xhci.md`](docs/devlogs/2026-06-arsenal-xhci.md).
 4. **virtio-gpu native Rust.** KMS-capable GPU driver for
    QEMU CI; stabilizes the kernel-side GPU/display
-   abstraction. ~1000-1500 LOC. **Active (step-4 HANDOFF next).**
+   abstraction. **Complete (2026-06-08, three sub-blocks
+   4-0..4-2).** Full 2D present pipeline (display info → resource →
+   backing → scanout → transfer → flush); ~517 LOC. Devlog at
+   [`docs/devlogs/2026-06-arsenal-virtio-gpu.md`](docs/devlogs/2026-06-arsenal-virtio-gpu.md).
 5. **amdgpu KMS via LinuxKPI shim.** The headlining driver;
-   ports against the abstraction step 4 stabilized.
+   the shim's hard scaling test (ADR-0009 deliberately
+   concentrated the LinuxKPI-port budget here). **Active
+   (step-5 HANDOFF next).**
 6. **iwlwifi + mac80211 via LinuxKPI.** Wireless.
 7. **First boot on real Framework 13 AMD hardware.** Real-
    iron exit criterion. ARSENAL.md performance gate
@@ -115,18 +120,79 @@ Posture changes carrying to M1 step 2:
 
 ### Active work
 
-**Active: M1 step 4 — virtio-gpu (native Rust).** The CI-substrate
-step inserted before amdgpu: QEMU does not emulate amdgpu, so
-virtio-gpu gives the kernel a KMS-capable GPU driver QEMU smokes on
-every commit, and lets the kernel-side GPU/display abstraction
-stabilize against a clean virtual device before amdgpu (step 5) has
-to consume it. Third native virtio driver (after virtio-blk +
-virtio-net at M0, virtio-balloon via the shim at step 2), so the
-virtio transport surface is well-worn; the new work is the GPU
-command protocol (VIRTIO_GPU_CMD_* over the control queue), a 2D
-scanout (create resource → attach backing → set scanout → flush),
-and the display abstraction the compositor will sit on. ~1000-1500
-LOC budgeted. Step-4 HANDOFF is the next action.
+**Active: M1 step 5 — amdgpu KMS via the LinuxKPI shim.** The
+headlining M1 driver, and the shim's hard scaling test: ADR-0009
+deliberately concentrated the LinuxKPI-port budget here (xHCI went
+native precisely so the shim's first complex-driver port is amdgpu,
+where it is unavoidable, not spent twice). The shim is proven for a
+*simple* inherited driver (virtio-balloon, ~600 LOC, pure virtio-bus);
+amdgpu is ~10K+ LOC of inherited C pulling DRM/KMS, GEM/TTM, dma-buf,
+fences, i2c/aux + EDID, firmware loading, and a large MMIO/IRQ surface
+— the header closure ADR-0006 warned grows super-linearly. amdgpu is
+KMS-only at M1 (no Vulkan). It cannot smoke under QEMU (no amdgpu
+emulation) — which is *why* step 4 built virtio-gpu first: the
+kernel-side display vocabulary (`display::DisplayInfo` / `PixelFormat`)
+now exists and amdgpu's KMS output targets it. amdgpu development
+proceeds against real Framework 13 AMD hardware; the per-commit QEMU
+gate stays green on virtio-gpu. Step-5 HANDOFF is the next action.
+
+---
+
+**M1 step 4 — COMPLETE (2026-06-08).** virtio-gpu native Rust: the full
+2D present pipeline — find (modern PCI id 0x1050) → transport init →
+GET_DISPLAY_INFO → RESOURCE_CREATE_2D → RESOURCE_ATTACH_BACKING →
+SET_SCANOUT → TRANSFER_TO_HOST_2D → RESOURCE_FLUSH — in ~517 LOC
+(`virtio_gpu.rs` 481 + `display.rs` 36), native, no shim. The
+CI-substrate step inserted before amdgpu: QEMU does not emulate amdgpu,
+so virtio-gpu gives the kernel a KMS-capable GPU driver QEMU smokes on
+every commit, and the kernel-side display vocabulary amdgpu's KMS will
+target now exists. `ARSENAL_GPU_OK` fires after the flush; smoke closed
+at **22/22**, stable. The step-4 devlog
+([`docs/devlogs/2026-06-arsenal-virtio-gpu.md`](docs/devlogs/2026-06-arsenal-virtio-gpu.md))
+tells the arc. Came in far under the ~1000-1500 LOC budget — the
+transport was already built (third native virtio driver), the 2D
+command subset is bounded, and the abstraction stayed deliberately
+minimal (see the design decision below).
+
+Step-4 design decision + carry-forwards:
+- **Display abstraction is shared data, no trait (4-0 decision).**
+  `display.rs` defines `DisplayInfo` + `PixelFormat` as plain data any
+  backend populates; the cross-driver `Display` trait is **deferred to
+  step 5**, when amdgpu becomes the second GPU backend and the
+  unification is informed by two real GPU drivers rather than one. At
+  M1 the Limine LFB (write-through) and a GPU (explicit transfer+flush)
+  have genuinely different present models; a trait at n=1-GPU would be
+  designed against too little. `fb.rs` was left untouched.
+- **4-3 (wire fb/shell to render through the scanout) was skipped.**
+  The CI-substrate + abstraction-vocabulary goals are both met; a real
+  fb→scanout consumer is M2 Stage work, and there is no consumer
+  demanding it at M1. Revisit in M2.
+- **Headless smoke asserts the command pipeline, not pixels.** A
+  scanout has no read-back (unlike a block device's sector), so
+  `ARSENAL_GPU_OK` means "present pipeline completed." Manual
+  `-display gtk` verification of the drawn pattern (navy field + amber
+  band) is the devlog's job, not CI's — flagged for whenever the
+  step-4 devlog gets a windowed run.
+- **The framebuffer is a single contiguous heap `Box<[u32]>`** → one
+  `mem_entry`, no scatter-gather. Relies on the heap being one
+  contiguous physical Limine region (the property virtio_blk already
+  uses for DMA). A future multi-region heap would force the SG path.
+
+**M1-4-0 → 4-2 sub-block detail.**
+- `0ea2814` (4-0): transport bring-up + GET_DISPLAY_INFO. find(0x1050),
+  init_transport (VERSION_1 only), control queue activated, DRIVER_OK,
+  display info parsed (scanout 0 at 1280x800). `display.rs` vocab
+  landed. GET_DISPLAY_INFO folded into 4-0 (the HANDOFF sketch had it
+  at 4-1) so the vocab is populated + the control queue verified — a
+  cleaner bisect seam than a bring-up that sends nothing. Smoke 21/21
+  (no new sentinel).
+- `dd96e50` (4-1): RESOURCE_CREATE_2D (id 1, B8G8R8X8_UNORM) +
+  RESOURCE_ATTACH_BACKING (one mem_entry, contiguous heap framebuffer).
+  Refactored the command path into shared `submit()` + `cmd_nodata<R>()`
+  helpers; `DisplayInfoXfer` → generic `Xfer<R, P>`. Smoke 21/21.
+- `f6c6da3` (4-2): pattern fill (navy + amber band) → SET_SCANOUT →
+  TRANSFER_TO_HOST_2D → RESOURCE_FLUSH; `ARSENAL_GPU_OK`; smoke
+  **22/22**. The first observable "the GPU presents" property.
 
 ---
 
