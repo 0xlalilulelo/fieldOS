@@ -52,8 +52,11 @@ pace; still inside the 15-month ARSENAL.md budget.
    [`docs/devlogs/2026-06-arsenal-virtio-gpu.md`](docs/devlogs/2026-06-arsenal-virtio-gpu.md).
 5. **amdgpu KMS via LinuxKPI shim.** The headlining driver;
    the shim's hard scaling test (ADR-0009 deliberately
-   concentrated the LinuxKPI-port budget here). **Active
-   (step-5 HANDOFF next).**
+   concentrated the LinuxKPI-port budget here). **Active —
+   M1-5-0 gate closed (2026-06-09): GOP-first scope
+   ([ADR-0010](docs/adrs/0010-amdgpu-kms-scope.md)).** Sub-blocks
+   redrawn: 5-1 GOP first-light on real Strix → 5-2 `Display`
+   trait → 5-3+ the ~925k-LOC amdgpu DC port.
 6. **iwlwifi + mac80211 via LinuxKPI.** Wireless.
 7. **First boot on real Framework 13 AMD hardware.** Real-
    iron exit criterion. ARSENAL.md performance gate
@@ -120,21 +123,47 @@ Posture changes carrying to M1 step 2:
 
 ### Active work
 
-**Active: M1 step 5 — amdgpu KMS via the LinuxKPI shim.** The
-headlining M1 driver, and the shim's hard scaling test: ADR-0009
-deliberately concentrated the LinuxKPI-port budget here (xHCI went
-native precisely so the shim's first complex-driver port is amdgpu,
-where it is unavoidable, not spent twice). The shim is proven for a
-*simple* inherited driver (virtio-balloon, ~600 LOC, pure virtio-bus);
-amdgpu is ~10K+ LOC of inherited C pulling DRM/KMS, GEM/TTM, dma-buf,
-fences, i2c/aux + EDID, firmware loading, and a large MMIO/IRQ surface
-— the header closure ADR-0006 warned grows super-linearly. amdgpu is
-KMS-only at M1 (no Vulkan). It cannot smoke under QEMU (no amdgpu
-emulation) — which is *why* step 4 built virtio-gpu first: the
-kernel-side display vocabulary (`display::DisplayInfo` / `PixelFormat`)
-now exists and amdgpu's KMS output targets it. amdgpu development
-proceeds against real Framework 13 AMD hardware; the per-commit QEMU
-gate stays green on virtio-gpu. Step-5 HANDOFF is the next action.
+**Active: M1 step 5 — amdgpu KMS via the LinuxKPI shim. M1-5-0
+gate closed (2026-06-09); GOP-first scope accepted.** The headlining M1
+driver, and the shim's hard scaling test: ADR-0009 deliberately
+concentrated the LinuxKPI-port budget here (xHCI went native precisely
+so the shim's first complex-driver port is amdgpu, where it is
+unavoidable, not spent twice). The shim is proven only for a *simple*
+inherited driver (virtio-balloon, 1,223 LOC, pure virtio-bus). It
+cannot smoke under QEMU (no amdgpu emulation) — which is *why* step 4
+built virtio-gpu first: the display vocabulary
+(`display::DisplayInfo` / `PixelFormat`) now exists for amdgpu's KMS
+output to target. Validation is manual on real Strix hardware; the
+22/22 QEMU gate stays green guarding everything *except* amdgpu (the two
+are not conflated).
+
+**The M1-5-0 gate (closed 2026-06-09) was a non-code gate: closure
+audit + hardware/firmware recon + scope ADR.** The audit
+([`docs/audits/2026-06-amdgpu-kms-closure-audit.md`](docs/audits/2026-06-amdgpu-kms-closure-audit.md))
+measured a KMS-only amdgpu port at **~925k LOC of inherited C** and
+**~200 API headers to reimplement** (71 `<drm/*>` = the whole DRM/KMS
+surface the shim has zero of) — ~30× the xHCI port ADR-0009 already
+rejected as too big, ~755× balloon. The decisive finding: **DC is
+monolithic** — ~283k LOC of shared DC core + DML2 timing math is needed
+for *any* DCN target vs a ~3k-LOC per-ASIC slice (75:1), so "minimal
+modeset" is a mirage. Target pinned to **Ryzen AI 300 / Strix Point**
+(RDNA 3.5, DCN 3.5/3.5.1, DML2 path); a Strix modeset needs ~15 signed
+firmware blobs incl. the full GFX microcode (device init brings up the
+whole GPU), vs **zero firmware for GOP**.
+
+**Scope decided ([ADR-0010](docs/adrs/0010-amdgpu-kms-scope.md),
+Accepted): GOP-first, then the DC port.** Three axes (LOC, the DC
+monolith, firmware) converge on it, and it rests on one fact: `fb.rs`
+already draws to a Limine LFB, which on UEFI hardware *is* the GOP
+framebuffer — so first-light on the Strix eDP is shipped M0 code plus a
+real-hardware boot, not a new driver. Redrawn sub-blocks: **5-1** GOP
+first-light on real Strix (confirm the Limine/GOP LFB lights the panel;
+merges with step-7 boot bring-up per decision C1) → **5-2** the minimal
+`Display` trait (decision B1) against the GOP + virtio-gpu backends →
+**5-3+** the ~925k-LOC amdgpu DC port. GOP-first **defers but does not
+shrink** the DC port — amdgpu DC stays the named step-5 deliverable, and
+the M1 calendar variance still lands in 5-3+. The step-5 sub-block
+HANDOFF (5-1, GOP first-light) is the next action.
 
 ---
 

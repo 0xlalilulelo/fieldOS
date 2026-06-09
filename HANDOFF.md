@@ -1,414 +1,267 @@
-Kickoff for M1 step 5 — amdgpu KMS via the LinuxKPI shim: the
-headlining M1 driver, the shim's first complex-driver port, and the
-step the whole M1 calendar variance has been pointing at. This step
-does not start with code. It starts with a gate.
+Kickoff for M1 step 5 sub-block 5-1 — GOP first-light on real Strix:
+the first time Arsenal boots on physical silicon. Per
+[ADR-0010](docs/adrs/0010-amdgpu-kms-scope.md) decision A3 (GOP-first)
++ C1 (merge first-light with the step-7 boot bring-up). This is not an
+amdgpu sub-block — it ships no DC, no shim expansion, no firmware. It
+lights the Framework 13 (Ryzen AI 300 / Strix Point) eDP panel with
+the framebuffer code Arsenal has shipped since M0, sourced from UEFI
+GOP via Limine.
 
 ## Where we are
 
-M1 step 4 (virtio-gpu, native Rust) closed on 2026-06-08. The kernel's
-first GPU: find the modern-only device (PCI id 0x1050), bring up the
-2D command protocol over the control queue, and present a framebuffer
-through a scanout — GET_DISPLAY_INFO → RESOURCE_CREATE_2D →
-RESOURCE_ATTACH_BACKING → SET_SCANOUT → TRANSFER_TO_HOST_2D →
-RESOURCE_FLUSH — in ~517 LOC (`virtio_gpu.rs` 481 + `display.rs` 36),
-native, no shim. `ARSENAL_GPU_OK` fires on the flush. The step-4 devlog
-(`docs/devlogs/2026-06-arsenal-virtio-gpu.md`) tells the arc.
+The M1-5-0 gate closed on 2026-06-09. The closure audit
+([`docs/audits/2026-06-amdgpu-kms-closure-audit.md`](docs/audits/2026-06-amdgpu-kms-closure-audit.md))
+measured a KMS-only amdgpu port at ~925k LOC + ~200 API headers, proved
+DC is monolithic (no "minimal modeset"), and pinned the target to Strix
+Point (DCN 3.5/3.5.1, DML2). ADR-0010 chose **GOP-first**: get a
+picture on the real panel cheaply, land the `Display` trait (5-2), then
+do the ~925k-LOC DC port (5-3+). GOP-first **defers but does not
+shrink** the DC port.
 
-The thing step 4 bought step 5: a kernel-side display vocabulary
-(`display::DisplayInfo` / `PixelFormat`) that amdgpu's KMS output now
-targets, rather than co-designing it with the hardest driver; and a
-GPU that QEMU smokes on every commit, so amdgpu — which QEMU cannot
-emulate — develops with the per-commit gate staying green underneath
-it. Step 4 deliberately deferred the cross-backend `Display` trait to
-step 5, when amdgpu makes it n=2 GPU backends. That trait is now due,
-and designable against two real implementations.
+The whole recommendation rests on one fact, now verified in-tree:
+`arsenal-kernel/src/fb.rs` draws to a Limine-provided linear
+framebuffer, and on UEFI hardware Limine sources that framebuffer from
+GOP. So first-light on Strix is shipped M0 code plus a real-hardware
+boot — not a new driver.
 
-HEAD is the M1-4-final commit (this STATUS + devlog + HANDOFF);
-working tree clean once it lands. Smoke is **22/22** (`ARSENAL_GPU_OK`
-is the step-4 sentinel). Push before 5-0 kicks off so the step-4 arc
-lands on origin as one push (the user pushes each sub-block).
-
-## The honest framing before anything else
-
-The four fast M1 steps (NVMe, the shim foundation, xHCI, virtio-gpu)
-all went fast for structural reasons: faithful QEMU devices, bounded
-specs, a virtio transport reused three times, a native bring-up that
-round-tripped first try. **None of those properties hold for amdgpu.**
-This is the step the post-pivot concentration window does not cover.
-Three things make it categorically different from everything M1 has
-shipped:
-
-1. **The shim has never hosted a complex driver.** It is proven for
-   virtio-balloon — ~600 LOC of inherited C, pure virtio-bus
-   interaction, one virtqueue, a stats report. amdgpu is ~10K+ LOC of
-   *its own* code (the DC display core is hundreds of thousands more),
-   pulling DRM/KMS, GEM/TTM memory management, dma-buf and fences,
-   i2c/aux + EDID, firmware loading, and a large MMIO + interrupt
-   (IH ring) surface. ADR-0006's central warning — header closure
-   grows *super-linearly* with driver complexity (balloon alone pulled
-   281 transitive headers before the BFS halted) — is about to be
-   tested at its limit. This is exactly where ADR-0009 deliberately
-   concentrated the LinuxKPI-port budget: xHCI went native so the
-   shim's first hard port is amdgpu, where it is unavoidable, not
-   spent twice.
-
-2. **QEMU cannot smoke it.** There is no amdgpu emulation. The 22/22
-   QEMU smoke stays green and keeps guarding everything *except*
-   amdgpu — NVMe, xHCI, virtio-gpu, the shim, the scheduler, the net
-   stack. **Do not conflate a passing smoke with a working amdgpu.**
-   amdgpu gets no QEMU sentinel. Its validation is a manual
-   observation on real Framework 13 AMD hardware — a picture on the
-   panel, or a serial/console marker emitted from real silicon — and
-   it is recorded in the step-5 devlog, the way the M0 framebuffer and
-   SMP devlogs recorded manual display checks, never as a CI gate the
-   cloud runner can assert.
-
-3. **It entangles with step 7.** Step 7 is "first boot on real
-   Framework 13 AMD hardware" — the M1 exit criterion. amdgpu cannot
-   be validated without running on that hardware, which means step 5's
-   validation *needs* step-7 infrastructure (UEFI boot off USB on the
-   Framework, and a console channel off real hardware — the Framework
-   13 has no RS-232 header, so this is USB-serial, a framebuffer
-   console, or a network console, none of which exist yet). How much
-   of step 7 pulls forward into step 5 is a real sequencing decision,
-   not a detail. It is one of the three questions the 5-0 scope ADR
-   puts to you.
+HEAD is the M1-5-0 gate commit (audit + ADR-0010 + STATUS + the
+ADR-0005 numbering cascade). Smoke is **22/22**, stable. Push before
+5-1 lands so the gate is on origin (the user pushes each sub-block).
 
 ## Read before proposing
 
-read CLAUDE.md (peer concerns; Rust-only base with the **one
-exception** that matters most here — inherited Linux drivers in their
-original C under the LinuxKPI boundary, GPLv2 preserved, shipped as a
-combined work with explicit license boundaries, the FreeBSD drm-kmod
-pattern; BSD-2 base; no `unsafe` without a `// SAFETY:` comment; build
-loop sacred) → STATUS.md (M1 step 4 complete, step 5 active; the
-step-4 design decision — shared `display.rs` data vocabulary, trait
-deferred to step 5 — is load-bearing for 5-0; the step-3 carry-forward
-#1 about explicit PCI Bus Master Enable on real hardware and the
-balloon round-22d BME trap both apply to amdgpu on real silicon) →
-docs/plan/ARSENAL.md § "M1 — Real iron" (amdgpu KMS is the milestone's
-named GPU deliverable; read the performance gate — cold boot to login
-< 8 s — which is asserted at step 7 on real hardware, and amdgpu modeset
-time is part of that budget) and § the compositor/Stage rows (the
-`Display` trait designed here is what Stage sits on at M2, so its shape
-outlives this driver) → **ADR-0006** (`docs/adrs/0006-*.md` — headers
-are the shim; closure grows super-linearly; the `shim_c.h`-is-the-
-surface discipline; this is the single most important prior for the
-5-0 closure audit) → **ADR-0009** (`docs/adrs/0009-xhci-native-rust.md`
-— the native-vs-port spike methodology and *why the port budget was
-concentrated on amdgpu*) → ADR-0005 (the shim's structural decisions:
-single `linuxkpi/` member, `cc`-crate compile from `build.rs`,
-directory-based GPL/BSD-2 boundary) → linuxkpi/include/ (the BSD-2
-Arsenal-authored Linux API surface as it stands after balloon — every
-header amdgpu needs that is absent is step-5 work) → linuxkpi/src/
-(pci.rs, irq.rs, virtio.rs, mm.rs, page.rs, workqueue.rs, locks.rs —
-the shim modules; amdgpu will demand large extensions to most and
-several wholly new ones: dma-buf, fence/dma_resv, i2c/aux, the DRM/KMS
-core) → linuxkpi/build.rs (the source manifest + the Kbuild flag set:
-`-nostdinc`, the clang resource-dir `-isystem`, `-mno-sse -mno-mmx
--mno-avx -msoft-float`, per-TU `-DKBUILD_MODNAME`, the `ar`-crate +
-`+whole-archive` link path) → arsenal-kernel/src/display.rs (the
-vocabulary the trait extends) + virtio_gpu.rs + fb.rs (the two
-existing display backends the trait must generalize over) →
-docs/devlogs/2026-05-arsenal-linuxkpi-shim.md + the GPL-boundary devlog
-(how the combined-work model actually works in this tree) → git log
---oneline -12 → run the sanity check below → **produce the 5-0 gate
-deliverables (audit + recon + scope ADR), do not write driver code** →
-bring the three scope decisions back for the pick.
+read CLAUDE.md (build loop sacred; "real iron" is the M1 milestone;
+the step-7 real-hardware-boot carry-forwards in STATUS — esp. the
+step-3 #1 BME / Address-Device and the balloon round-22d BME trap,
+which are about to meet real silicon) → STATUS.md (M1-5-0 gate closed,
+GOP-first, the redrawn 5-1..5-N plan; the step-3 carry-forward list is
+now load-bearing) → [ADR-0010](docs/adrs/0010-amdgpu-kms-scope.md)
+(decisions A3/B1/C1; the fb.rs-is-GOP insight; the **GOP-takeover
+handoff risk** — the one unverified premise this sub-block exists to
+confirm) → **arsenal-kernel/src/main.rs** (the boot order — see the
+map below; the path to first-light is the thing 5-1 hardens) →
+arsenal-kernel/src/fb.rs (`init` asserts `bpp == 32`; `clear`,
+`put_pixel`, `render_string`, `print_str` — the panel-side console
+already exists) → arsenal-kernel/src/shell.rs (the fb console's known
+limits, documented at the top: no fb cursor, serial-only destructive
+backspace — these surface on the panel) → arsenal-kernel/src/serial.rs
+(COM1 0x3F8 — **invisible on the Framework**, which has no RS-232; this
+is why the panel must be the console) → xtask/src/main.rs (the iso
+recipe is already BIOS+UEFI hybrid: `BOOTX64.EFI` under `EFI/BOOT`,
+`limine-uefi-cd.bin` — the ISO is UEFI-bootable as-is) →
+docs/devlogs/2026-05-arsenal-*.md (the M0 framebuffer + SMP devlogs —
+the manual-display-check precedent this sub-block follows) → the Limine
+boot protocol framebuffer feature → git log --oneline -6 → run the
+sanity check → propose the 5-1 shape (or argue a different split) →
+wait for the pick.
 
-## What step 5 is — and the gate it starts with
+## The boot order (the path to first-light)
 
-amdgpu KMS, modeset only (no Vulkan, no 3D, no compute — ARSENAL.md
-scopes amdgpu KMS-only at M1, the same 2D-scanout posture virtio-gpu
-held). The end state is: the Framework 13's internal panel lit by
-Arsenal's own kernel, driving the AMD display controller, at native
-resolution.
+From `arsenal-kernel/src/main.rs`, current sequence:
 
-But the first deliverable is **not code**. It is a gate — call it
-**M1-5-0** — because the wrong scope decision here is the difference
-between a 4-week step and a 6-month one, and that decision cannot be
-made responsibly without two pieces of recon the tree does not yet
-have. The gate has three parts:
+    serial::init                         :96   (COM1 — invisible on Strix)
+    ARSENAL_BOOT_OK                      :97
+    heap init                            :118
+    frames init                          :135
+    ACPI → MADT → SMP bring-up           :145-191   << real-HW-fragile
+    PS/2 keyboard                        :194
+    fb::init + clear(NAVY) + amber sq    :227-231   << FIRST-LIGHT
+    fb::render_string("ARSENAL")         :240       << FIRST-LIGHT
+    sched::switch_test                   :258
+    PCI scan / virtio probe / NVMe       :263-320   << real-HW-fragile
+    ... shell / prompt
 
-**(1) An ADR-0006-style header/LOC closure audit, amdgpu KMS-only.**
-Run the same instrument ADR-0006 ran on balloon, scoped to the KMS
-path (drivers/gpu/drm/amd/amdgpu + drivers/gpu/drm/amd/display, minus
-the GFX/compute/VCN/Vulkan subtrees). Produce: the transitive header
-closure size, the inherited-`.c` LOC under a KMS-only build config, and
-the list of shim subsystems amdgpu needs that do not exist yet
-(DRM/KMS core, GEM/TTM, dma-buf, dma_resv/fence, i2c/aux, the IH
-interrupt model, firmware request). This is the number that sizes the
-step. ADR-0006 says it will be large; quantify *how* large before
-committing to a path.
+The key observation: **first-light already exists in code** (navy field
++ amber square + "ARSENAL" text, the same identity virtio-gpu's scanout
+used). On Strix via Limine GOP, lines 227-240 should light the eDP.
+But first-light currently sits *after* the ACPI/SMP block — real Strix
+ACPI/MADT is far richer than QEMU's, and if that block panics or hangs,
+the panel never lights and (serial being invisible) you debug blind.
+That ordering is the first thing 5-1 fixes.
 
-**(2) Hardware + firmware recon on the actual Framework 13 AMD.**
-Which APU is in the target unit — Ryzen 7040 "Phoenix" (RDNA3, DCN
-3.1.4, gfx1103) or Ryzen AI 300 "Strix Point" (RDNA 3.5)? The DCN
-version determines which DC code paths and which firmware blobs are in
-play. Enumerate the required `amdgpu/*.bin` firmware for a *modeset*
-(at minimum the DMCUB display microcontroller, the PSP sos/ta secure-
-boot firmware, SMU/PMFW for clocks, plus GC/SDMA as the closure
-demands) — these are GPLv2/redistributable-firmware blobs that ship
-*alongside* the combined work, not inside it; their licensing and
-packaging is part of the recon. Confirm the panel's native mode and
-the connector topology (the internal eDP).
+## What 5-1 is
 
-**(3) A scope ADR putting three decisions to the user.** Do not pick
-any of these silently — each is a peer-concerns-weighted call:
+A layered deliverable, smallest-observable-first:
 
-  - **(a) How much amdgpu to inherit.** Three shapes:
-    - **Full DC.** Inherit drivers/gpu/drm/amd/display/dc + amdgpu_dm
-      and run amdgpu's real atomic modeset. Maximum fidelity (every
-      panel, DP-MST, HDR, PSR), maximum shim surface — the DC core is
-      the largest single body of display code in the kernel. This is
-      "amdgpu, properly," and the multi-month tail lives here.
-    - **Minimal modeset.** Inherit only enough amdgpu to program the
-      display controller for one fixed mode on the internal eDP. The
-      honest catch: amdgpu's DC is monolithic and was not built to be
-      sliced this way — "minimal amdgpu modeset" may not be a small
-      thing, and the closure audit (part 1) is what tells us whether
-      this option is real or a mirage.
-    - **Intermediate — native KMS over the firmware framebuffer
-      (GOP/simpledrm-style).** Get a picture on the Framework's panel
-      *cheaply and first* by taking over the framebuffer UEFI GOP
-      already set up at boot (the efifb/simpledrm pattern: the
-      firmware lit the panel; Arsenal inherits that linear framebuffer
-      and draws to it natively, no amdgpu, no DC, no shim), then pursue
-      real amdgpu modeset as a separable follow-on. This de-risks
-      "Arsenal draws on real Framework hardware" to near-term and
-      isolates the amdgpu-DC question from the first-light question.
-      It is the smaller version worth surfacing per CLAUDE.md, and it
-      changes what step 7 needs. Its cost: GOP gives you the
-      firmware's mode, no mode-setting, no second display, no power
-      management — a picture, not a driver.
+1. **Limine boots on the real Framework and its menu renders on the
+   eDP.** Proves UEFI boot + GOP before any kernel code runs. (Limine's
+   own UEFI terminal draws to GOP.) Mostly a BIOS/USB exercise.
+2. **First-light: the kernel lights the panel** with the navy + amber +
+   "ARSENAL" pattern (main.rs:227-240) on real silicon. The
+   ADR-0010-premise confirmation. This is the sub-block's core success.
+3. **Boots to a prompt visible on the panel** — the fb console
+   (`fb::print_str` + shell) renders the `>` prompt and echoes typed
+   input on the eDP, with a real USB keyboard (step-3 xHCI HID path) if
+   it enumerates, or PS/2 if the Framework exposes one.
 
-  - **(b) The shape of the `Display` trait, now due.** Step 4 deferred
-    it deliberately to n=2 GPU backends. It is now designable against
-    the real set: the Limine LFB (write-through, no flush — fb.rs),
-    the virtio-gpu scanout (explicit transfer + flush), and amdgpu
-    (atomic page-flip) — and, if option (a)-intermediate is chosen, the
-    GOP/simpledrm framebuffer (write-through again). Propose the
-    minimal trait all real backends satisfy — resolution + a writable
-    framebuffer + a present/flush call — and explicitly *not* a
-    KMS-like surface (page-flip queues, damage, multi-plane); that is
-    M2 Stage speculation, the same over-abstraction step 4's option C
-    rejected. This is the durable deliverable; flag it for design
-    review the way 4-0's vocabulary was flagged.
+The validation is **manual, on hardware, photographed for the devlog**
+— there is no QEMU sentinel for real-silicon boot (the fb path already
+smokes in QEMU; what 5-1 proves is that it survives real Strix). The
+22/22 QEMU smoke stays green throughout and is unaffected.
 
-  - **(c) How much step-7 infrastructure pulls forward.** amdgpu's
-    validation needs real-hardware boot + a console off the Framework.
-    Decide: does step 5 build the minimum step-7 boot/console infra it
-    needs to validate (USB-serial or a framebuffer console), accepting
-    that step 5 and step 7 partially merge — or does step 5 develop
-    against the closure/compile gate alone and defer *all* on-silicon
-    validation to step 7, accepting that amdgpu ships "compiles and is
-    wired" but unproven until then? The intermediate option (a) makes
-    this cheaper (a GOP framebuffer console is itself first-light); the
-    full-DC option makes it heavier.
+## The split: QEMU-hardening (no hardware needed) + on-Strix validation
 
-## Validation model (read carefully — it is unlike every prior step)
+This sub-block divides cleanly, which matters because it lets progress
+happen whether or not the physical unit is in hand yet:
 
-Every M1 step so far had a QEMU sentinel: the device round-tripped, the
-smoke asserted it, the cloud runner gated on it. **amdgpu has none of
-that.** The model splits cleanly and the two halves must not be
-conflated:
+**5-1a — boot-path hardening (QEMU-verifiable, keeps 22/22 green).**
+Software changes that make a real-hardware boot survivable and
+debuggable, all smoke-testable in QEMU first:
 
-- **The QEMU smoke (22/22) stays green and guards everything except
-  amdgpu.** It is the regression net for the rest of the kernel while
-  amdgpu is built. A passing smoke says nothing about amdgpu. amdgpu
-  adds *no* sentinel to REQUIRED_SENTINELS. If the closure-audit path
-  produces compile-time shim self-tests (the way balloon's shim
-  primitives got `ARSENAL_LINUXKPI_OK` coverage), those *can* smoke —
-  but they assert the shim, not the driver.
+  - **Hoist `fb::init` to the earliest safe point** — right after heap
+    (fb needs only the Limine framebuffer response + HHDM, both
+    available immediately), *before* the ACPI/SMP block. Then first-light
+    is the earliest possible signal on Strix, ahead of every
+    real-HW-fragile probe. Bisect seam.
+  - **Make the panic handler render to the framebuffer**, not only
+    serial. On the Framework serial is invisible, so a panic before or
+    after first-light must paint the panel (red field + message via
+    `fb::render_string`/`print_str`) or you are blind. This is the single
+    highest-value hardware-debuggability change. Bisect seam.
+  - **Make device probing degrade gracefully on absence/difference** —
+    on real Strix the virtio devices do not exist (blk/net/gpu/balloon
+    all absent) and NVMe/xHCI are real, not QEMU models. Confirm each
+    probe no-ops cleanly when its device is absent and does not panic
+    the boot before the prompt (first-light already precedes them; this
+    is about reaching the prompt). The step-3 carry-forwards (BSR=0
+    Address Device, CSW unit-attention) and the balloon/NVMe **BME**
+    findings are the known real-HW deltas to watch.
+  - Optional: confirm `fb::init`'s `bpp == 32` assert holds for GOP's
+    framebuffer format (GOP is typically 32-bpp BGRA — likely fine, but
+    a hard assert on real hardware is worth a soft-fail path).
 
-- **amdgpu's validation is manual, on real Framework 13 AMD hardware,
-  recorded in the devlog.** The observable is a picture on the panel
-  (a known pattern, the navy field + amber band virtio-gpu used is the
-  natural reuse) or a serial/console line from real silicon confirming
-  modeset completed. This is the honest limit and it is stated plainly,
-  the way the headless virtio-gpu smoke's "command pipeline, not
-  pixels" caveat was stated in qemu-smoke.sh and the step-4 devlog.
+**5-1b — on-Strix validation (needs the physical unit).** Manual:
 
-## Sub-block plan (proposed — argue with it at 5-0, and expect it to
-change based on the scope pick)
+  - `cargo xtask iso`, write `arsenal.iso` to USB (`dd` / the user's
+    tool of choice — the ISO is already UEFI-hybrid).
+  - Framework BIOS: disable Secure Boot (Limine + the kernel are
+    unsigned), enable USB boot, set boot order. (Signing Limine is the
+    alternative; disable is the bring-up path.)
+  - Boot; observe in order: Limine menu on the eDP → first-light pattern
+    → prompt. Photograph each for the devlog.
+  - Record the native mode Limine/GOP reports (the Framework 13 panel is
+    high-DPI — note the resolution + that "ARSENAL" text is tiny at
+    native scale, a real finding for the M2 Stage HiDPI work).
 
-**(M1-5-0) The gate.** Closure audit + hardware/firmware recon + scope
-ADR with the three decisions above. **No driver code.** Output is a
-committed ADR (`docs/adrs/NNNN-amdgpu-kms-scope.md`) and the three
-picks. This is the design-review seam, and the most important one in
-M1. Bisect seam.
+If the unit is not yet in hand, 5-1a still lands and smokes; 5-1b waits.
 
-Everything below 5-0 is *conditional on the scope pick* and is sketched,
-not committed — the real decomposition is written after 5-0:
+## Foundation 5-1 reuses
 
-**If (a)-intermediate (GOP/simpledrm) is picked first:**
-  - 5-1: inherit the UEFI GOP framebuffer at boot, native Rust, draw
-    the known pattern on real hardware → first light on the Framework.
-  - 5-2: land the `Display` trait (decision b) with fb.rs, virtio-gpu,
-    and the GOP backend as its three implementors.
-  - then the amdgpu-DC port (full or minimal per a) proceeds as 5-3+
-    with first-light already in hand and the trait already shaped.
-
-**If full-DC or minimal-modeset amdgpu is picked directly:**
-  - 5-1: the shim closure foundation — the new subsystems the audit
-    found (DRM/KMS skeleton, GEM/TTM, dma-buf, fence, i2c/aux), each
-    landing + compiling + self-testing the way the balloon shim
-    rounds did. This is the multi-session, unbudgetable compile-error
-    iteration ADR-0006 describes, at amdgpu scale.
-  - 5-N: amdgpu.c family into build.rs's manifest; compile-error
-    iteration until it builds; firmware loading; modeset against the
-    real panel; the `Display` trait (decision b) landed once amdgpu is
-    the second real GPU backend.
-
-**(M1-5-final)** STATUS refresh + step-5 devlog + step-6 HANDOFF
-(iwlwifi + mac80211 via LinuxKPI). Per the established close.
-
-## Foundation step 5 reuses
-
-- **The entire LinuxKPI shim** (`linuxkpi/`): the PCI bus adapter,
-  IRQ dispatcher pool, DMA-coherent allocator, the virtio bus, the mm
-  surface (struct page per ADR-0007, alloc_pages, page_address), the
-  cooperative workqueue runner (ADR-0011), locks, lists, err, time,
-  the `cc`-crate build path, and the `shim_c.h`-is-the-surface
-  discipline (ADR-0006). amdgpu extends all of it heavily and adds new
-  subsystems, but the foundation, the build loop, and the GPL/BSD-2
-  boundary are proven.
-- **ADR-0006's methodology**: the recursive vendor-fetch closure walker
-  (preserved in git history at `b2dd46f`) is the exact instrument for
-  the 5-0 audit's part 1.
-- **The PCI MSI-X + dynamic IDT vector path** (from NVMe 1-0, reused by
-  every M1 driver) for amdgpu's interrupt (IH ring) wiring.
-- **The step-3/balloon BME trap**: PCI Bus Master Enable is a hard
-  precondition for MSI delivery *and* for any DMA. amdgpu does heavy
-  DMA; the shim's `register_*`/probe path already sets BME (balloon
-  round-22d fix) — confirm amdgpu's path inherits it.
-- **`display::DisplayInfo` / `PixelFormat`** (step 4) — the vocabulary
-  amdgpu's modeset output populates and the trait (decision b)
-  extends.
-- **`fb::NAVY` / `fb::AMBER`** for the on-hardware test pattern, the
-  same visual identity virtio-gpu's scanout used.
+- **`fb.rs` in full** — the Limine LFB path is the GOP path on hardware;
+  first-light is `clear`/`put_pixel`/`render_string` unchanged.
+- **The shell's fb console** (`fb::print_str`, shell.rs) — the panel-side
+  prompt already exists, with the documented cursor/backspace limits.
+- **The Limine boot config** — the ISO is BIOS+UEFI hybrid already; no
+  xtask change needed to boot UEFI, only (possibly) a Secure Boot
+  decision.
+- **The step-3 xHCI HID keyboard** — if a USB keyboard enumerates on
+  real Strix, the existing path feeds the shell; the real-HW xHCI delta
+  (BSR, quirks) is step-3 carry-forward territory.
+- **The M0 manual-display-check discipline** — the framebuffer + SMP
+  devlogs are the template for photographing first-light.
 
 ## Spec-fragile / risk pieces to watch
 
-- **The closure is the risk, not any single command.** Unlike
-  virtio-gpu (a bounded 2D command set), amdgpu has no small spec to
-  transcribe correctly. The risk is the *size and shape* of the
-  inherited surface, which is why 5-0 quantifies it before any code.
-- **DC is monolithic.** "Minimal amdgpu modeset" may not exist as a
-  small thing; the audit decides whether option (a)-minimal is real.
-- **Firmware loading is a new shim subsystem.** amdgpu requires signed
-  firmware blobs (DMCUB, PSP, SMU); the shim has never loaded firmware.
-  The request_firmware path + where the blobs live in the Arsenal image
-  + their redistribution licensing is net-new and recon'd at 5-0.
-- **i2c/aux + EDID** to read the panel's mode is a subsystem the shim
-  lacks. The intermediate GOP option sidesteps it (firmware already
-  read the EDID); the amdgpu path does not.
-- **The IH (interrupt handler) ring model** differs from the per-vector
-  MSI-X the shim does today; amdgpu multiplexes many interrupt sources
-  over a ring. New shim shape.
-- **Real-hardware DMA is not QEMU DMA.** Cache coherency, IOMMU, and
-  the BME precondition all bite on silicon in ways QEMU forgives
-  (step-3 carry-forward #1, the balloon BME trap). The first time
-  Arsenal's shim DMA runs on real AMD silicon is in this step.
-- **The `Display` trait at n=2 GPUs is still a design risk**, just a
-  smaller one than at n=1. Over-abstracting toward a KMS surface
-  (step 4's rejected option C) is the trap; under-abstracting leaks
-  amdgpu specifics into the trait. Minimal common surface, flagged for
-  review.
+- **The GOP-takeover handoff on Strix is the one unverified premise.**
+  Limine's UEFI GOP path lighting the *internal eDP* (not an external
+  output, not a blank panel) on this exact unit is assumed, not proven.
+  Falsify it early — the Limine menu appearing on the eDP is the first
+  green light. If it does not, the issue is in Limine/UEFI/eDP, not
+  Arsenal, and the debugging is boot-firmware-level.
+- **Real Strix ACPI/MADT vs QEMU's.** The SMP block (main.rs:145-191)
+  runs before first-light today; hoisting fb::init ahead of it (5-1a) is
+  the mitigation. If ACPI parsing panics on real tables, that is its own
+  finding — but the panel will already be lit to show it (once the panic
+  handler paints fb).
+- **Serial is invisible.** Every `serial::write_str` (incl. the
+  `ARSENAL_*_OK` sentinels) produces nothing on the Framework. The panel
+  is the only channel. This inverts the entire prior debugging model —
+  internalize it before booting.
+- **Secure Boot.** The Framework ships it on; an unsigned Limine/kernel
+  will be rejected. Disable in BIOS for bring-up (or sign Limine).
+- **HiDPI.** The Framework 13 panel is high-resolution; the 8-px-origin
+  16×16 amber square and the "ARSENAL" glyph string will be physically
+  tiny. Not a bug — a real M2-Stage HiDPI note, and a reason first-light
+  might be easy to miss on a 2256×1504-class panel. Render larger if
+  needed to confirm visually.
+- **The real-HW probe panics are after first-light, not before.** So
+  "no picture" and "no prompt" are different failures — the first is
+  Limine/GOP/eDP or the boot-to-fb path; the second is a device probe.
+  Keep them distinct when debugging.
 
 ## Estimates and cadence
 
-This is where the M1 calendar variance lives, and it always has. The
-milestone budget (~67 part-time weeks across 9 steps; ARSENAL.md months
-9-24) was structured with the harder steps — shim, **amdgpu**, real-
-hardware bring-up — holding the variance precisely because the early
-steps could not. **Four fast steps do not shrink amdgpu's estimate.**
-ADR-0006 already proved the closure grows super-linearly: balloon's 281
-headers are the floor, not the model, for a ~10K+ LOC driver pulling
-DRM/KMS/DC.
+This is the first real-silicon boot — qualitatively different from every
+QEMU step, and first-silicon-boot always surprises. But the software is
+unusually ready: first-light is shipped code, the console exists, the
+ISO is UEFI-bootable. The realistic shape: 5-1a (hardening) is a focused
+QEMU-verifiable session or two; 5-1b (on-Strix) is bounded by physical
+access and BIOS/Secure-Boot/USB friction more than by code, plus
+whatever the GOP-eDP handoff and the real-HW probes surface. If the
+panel does not light and the cause is below Arsenal (Limine/UEFI/eDP),
+that can eat sessions with little Arsenal code to show — the CLAUDE.md
+"step away for a day" cue applies, and a `wip:` branch holds any partial
+hardening. This sub-block does **not** touch the ~925k-LOC DC port; that
+calendar variance is still banked in 5-3+.
 
-The compile-error iteration (the balloon sub-task-3 pattern: each round
-resolves one missing type/macro/function by extending a BSD-2 header or
-shim module, `main` green at every commit) is the unbudgetable part, at
-a scale balloon only previewed. Treat 5-1+ as multi-month, not multi-
-session. Per CLAUDE.md's working-hours posture: this is the step where
-"a single bug owns multiple sessions" is the *expected* texture, not the
-exception — and the explicit cue applies: when it does, write up what
-was tried and step away for a day. Every gap-filling sub-block carries a
-`wip:` branch as the partial-work checkpoint.
-
-The intermediate (GOP) scope option exists partly as morale and risk
-management: it puts a real picture on real Framework hardware *early*,
-which is both a genuine milestone and a hedge against the amdgpu-DC tail
-being as long as ADR-0006 predicts. Surface it as the smaller-first
-option; let the user weigh it against full-fidelity amdgpu.
+A natural artifact to write during 5-1: a `docs/skills/limine.md` (or a
+real-hardware-boot skill) capturing the USB-write + Framework BIOS +
+Secure-Boot + boot-observe procedure, per CLAUDE.md's skill-file
+pattern — future real-hardware sub-blocks (5-3+ amdgpu validation, step
+6 iwlwifi, step 7) all repeat it.
 
 ## Sanity check before kicking off
 
     git tag --list | grep arsenal     # arsenal-M0-complete
-    git log --oneline -6              # M1-4-final (HEAD), f6c6da3,
-                                      # dd96e50, 0ea2814, c3258bd,
-                                      # 8fcd986
+    git log --oneline -6              # M1-5-0 gate (HEAD), M1-4-final,
+                                      # f6c6da3, dd96e50, 0ea2814, c3258bd
     git status --short                # clean (or ?? HANDOFF.md while drafting)
     cargo build -p arsenal-kernel --target x86_64-unknown-none --release
     cargo clippy -p arsenal-kernel --target x86_64-unknown-none --release -- -D warnings
-    cargo xtask iso                   # arsenal.iso ~19.4 MB
+    cargo xtask iso                   # arsenal.iso, BIOS+UEFI hybrid
     ci/qemu-smoke.sh                  # ==> PASS (22 sentinels)
 
-Expected: smoke PASSes with 22 sentinels; boot→prompt ~110-235 ms;
-`ARSENAL_GPU_OK` fires. (This is the regression net for the rest of the
-kernel; it does not and will not assert amdgpu.)
+Expected: smoke PASSes with 22 sentinels; the QEMU framebuffer still
+shows navy + amber + "ARSENAL" (the same path Strix will exercise). 5-1a
+must keep this green; 5-1b does not run in CI.
 
-## Out of scope for step 5 specifically
+## Out of scope for 5-1 specifically
 
-- **Vulkan / 3D / compute / VCN (video).** amdgpu is KMS modeset only
-  at M1, per ARSENAL.md — the same scope-discipline virtio-gpu held
-  (2D only, no virgl). The GFX/compute/Vulkan/VCN subtrees are
-  explicitly *excluded* from the 5-0 closure audit.
-- **DP-MST / external displays / multi-monitor.** The internal eDP
-  panel only for the step. (Full-DC inherits the capability; minimal/
-  GOP do not target it.)
-- **HDR / PSR / variable refresh / display power management.** Modeset
-  to a stable native picture is the bar.
-- **The compositor (Stage).** M2. Step 5 ships the `Display` trait
-  Stage sits on, not Stage.
-- **GPU acceleration of the existing fb/shell.** As in step 4, no
-  consumer demands it at M1; M2 Stage work.
+- **amdgpu, DC, DML2, modeset, firmware.** All 5-3+. 5-1 is GOP only —
+  the firmware's mode, no mode-setting.
+- **The `Display` trait.** That is 5-2, designed against the GOP +
+  virtio-gpu backends once first-light is in hand.
+- **DPMS / backlight / power management / external displays / runtime
+  resolution change.** GOP gives one fixed mode; the rest is the DC port.
+- **Real NVMe / xHCI / networking working end-to-end on Strix.** 5-1
+  needs *boot to a visible prompt*; full real-HW driver bring-up is
+  step 7. A probe that no-ops or fails gracefully is acceptable here as
+  long as it does not block the prompt.
+- **Signing Limine / a Secure-Boot chain.** Disable SB for bring-up;
+  signing is a later hardening decision.
 
 ## Permanently out of scope (do not propose)
 
-- Any `unsafe` block without a `// SAFETY:` comment naming the
-  invariant. amdgpu DMA + MMIO + firmware is unsafe-dense; every site
-  needs it.
-- Reverting any closed/tagged M0 or merged M1 commit. Force-pushing to
-  origin.
-- Dropping the BSD-2 SPDX header from any Arsenal-base file, or the
-  GPLv2 header from any inherited `.c`. The combined-work boundary is
-  non-negotiable (CLAUDE.md §3; the drm-kmod pattern). amdgpu's C stays
-  GPLv2 under `vendor/`; the shim stays BSD-2 under `linuxkpi/`.
-- Pulling amdgpu's C into the Rust base, or "rewriting amdgpu in Rust."
-  It is inherited under the LinuxKPI boundary; that is the whole point
-  of the shim (ADR-0004, ADR-0005).
-- Conflating a passing QEMU smoke with a working amdgpu. They are
-  independent; say so wherever it could be misread.
-- Religious framing; reintroducing HolyC; going back to stable Rust.
-- Skipping the build + smoke loop on any commit that touches kernel or
-  shim code (amdgpu's own C is the exception that proves it — it cannot
-  smoke, hence the manual-validation model above).
+- Any `unsafe` without a `// SAFETY:` comment. The fb path is MMIO
+  writes into the GOP framebuffer; the panic-to-fb handler is unsafe-
+  dense.
+- Reverting any closed/tagged M0 or merged M1 commit. Force-pushing.
+- Dropping the BSD-2 SPDX header from any Arsenal-base file.
+- Conflating the 22/22 QEMU smoke with real-hardware success — they are
+  independent; 5-1b is a manual, photographed observation, never a CI
+  gate.
+- Religious framing; HolyC; stable Rust. CLAUDE.md hard rules.
 
 ## First action
 
-**Start M1-5-0: the gate, not the driver.** Run the ADR-0006 closure
-instrument against amdgpu's KMS path and produce the header/LOC closure
-number and the missing-shim-subsystem list. Do the Framework 13 AMD
-hardware + firmware recon (APU/DCN version, the modeset `amdgpu/*.bin`
-set, the eDP native mode). Then write the scope ADR
-(`docs/adrs/NNNN-amdgpu-kms-scope.md`) laying out the three decisions —
-(a) full-DC vs minimal-modeset vs intermediate-GOP, (b) the `Display`
-trait shape at n=2 backends, (c) how much step-7 boot/console infra
-pulls forward — each with options and a recommendation, none picked
-silently. Bring all three back for the design review before any driver
-or shim code is written. The QEMU smoke stays 22/22 and green
-throughout; it is the net under the rest of the kernel, not a gate on
-amdgpu. This is the step where the estimate discipline matters most:
-quantify the closure first, then decide the path, then build.
+**Start 5-1a: hoist `fb::init` ahead of the ACPI/SMP block and make the
+panic handler paint the framebuffer.** These are the two changes that
+make a real-Strix boot both reach first-light earliest and show its
+failures on the only visible channel, and both are verifiable in QEMU
+without the hardware (the smoke must stay 22/22 and the QEMU window must
+still show first-light). Land them as two bisect-seam commits. Then, if
+the Strix unit is in hand, proceed to 5-1b: build the ISO, write USB,
+disable Secure Boot, boot, and photograph the panel from Limine menu →
+first-light → prompt. If the unit is not yet available, 5-1a is the
+landing sub-block and 5-1b waits on physical access — say so in STATUS
+rather than blocking.

@@ -389,21 +389,25 @@ forecast that work; the next ADR will.
   reservation — then again by [ADR-0009](0009-xhci-native-rust.md),
   a first-use "xHCI is native Rust" decision at M1 step 3 that
   claimed the 0009 slot and bumped the provisional reservations
-  below up by one each):
-  - **ADR-0010 (provisional):** "Evolve LinuxKPI to three-crate
-    split when amdgpu lands." Triggered at M1 step 5 kickoff.
-  - **ADR-0012 (provisional):** "Adopt cbindgen for `shim_c.h`
+  below up by one each, then again by [ADR-0010](0010-amdgpu-kms-scope.md),
+  a first-use "amdgpu KMS scope — GOP-first" decision at the M1 step 5
+  kickoff that claimed the 0010 slot (the three-crate-split
+  reservation) and bumped the reservations below up by one each):
+  - **ADR-0012 (provisional):** "Evolve LinuxKPI to three-crate
+    split when amdgpu lands." Triggered when the amdgpu DC port
+    (M1 step 5 sub-blocks 5-3+) balloons `linuxkpi/`; deferred past
+    5-1/5-2 by [ADR-0010](0010-amdgpu-kms-scope.md)'s GOP-first scope.
+  - **ADR-0013 (provisional):** "Adopt cbindgen for `shim_c.h`
     generation." Triggered when `shim_c.h` exceeds ~1500 lines
     or when a third inherited driver's C-callable surface
-    expansion crosses a maintainability threshold. (0011 is the
-    accepted deferred-work runner; this reservation skips it.)
-  - **ADR-0013 (provisional):** "Initcall-style table for
+    expansion crosses a maintainability threshold.
+  - **ADR-0014 (provisional):** "Initcall-style table for
     synchronous inherited-driver init." The other half of the
     previously-combined ADR-0011 reservation; triggered per
     [ADR-0008](0008-module-init-by-symbol-name.md) when the
     inherited-driver count or cross-driver init-ordering need
     crosses the explicit-list maintainability threshold.
-  - **ADR-0014 (provisional):** "Per-workqueue cooperative
+  - **ADR-0015 (provisional):** "Per-workqueue cooperative
     runner + freezable semantics." Successor to
     [ADR-0011](0011-deferred-work-cooperative-runner.md);
     triggered by an observed starvation event between two
